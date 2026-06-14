@@ -41,6 +41,35 @@ just configure
 just build
 ```
 
+C++ tests use GTest and CTest:
+
+```bash
+just test-cpp
+```
+
+Run the normal local test suite:
+
+```bash
+just test-all
+```
+
+Host C++ coverage can be collected from a coverage-instrumented CMake build:
+
+```bash
+just coverage-cpp
+```
+
+That enables GCC/Clang `--coverage` for host C++ core logic. CUDA kernels are
+validated with GPU correctness tests and NVIDIA tools rather than gcov line
+coverage:
+
+```bash
+just test-cuda
+```
+
+`test-cuda` runs Compute Sanitizer `memcheck`, `racecheck`, `initcheck`, and
+`synccheck`. It requires a visible NVIDIA GPU.
+
 For a release wheel through scikit-build-core:
 
 ```bash

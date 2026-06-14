@@ -1,3 +1,5 @@
+#include "gaffa/vector_add_cuda.hpp"
+
 #include "gaffa/vector_add.hpp"
 
 #include <cuda_runtime.h>
@@ -48,16 +50,9 @@ __global__ void vector_add_kernel(const float* lhs, const float* rhs, float* out
 
 namespace gaffa {
 
-std::vector<float> vector_add(const std::vector<float>& lhs, const std::vector<float>& rhs) {
-  if (lhs.size() != rhs.size()) {
-    throw std::invalid_argument("vector_add requires inputs with the same length");
-  }
-
+std::vector<float> vector_add_cuda(const std::vector<float>& lhs, const std::vector<float>& rhs) {
   const int size = static_cast<int>(lhs.size());
   std::vector<float> out(lhs.size());
-  if (size == 0) {
-    return out;
-  }
 
   const std::size_t bytes = lhs.size() * sizeof(float);
   DeviceBuffer device_lhs(bytes);

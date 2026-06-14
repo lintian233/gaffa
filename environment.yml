@@ -16,6 +16,8 @@ dependencies:
   - scikit-build-core>=0.10
   - pybind11>=2.13
   - pytest>=8
+  - pytest-cov
+  - gcovr
   - ruff>=0.5
   - python-build
   - pip

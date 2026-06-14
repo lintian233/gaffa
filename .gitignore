@@ -14,6 +14,11 @@ ENV/
 .coverage.*
 coverage.xml
 htmlcov/
+coverage/
+*.gcda
+*.gcno
+*.gcov
+lcov.info
 .ruff_cache/
 .mypy_cache/
 .pyre/
