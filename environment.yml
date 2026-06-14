@@ -1,0 +1,21 @@
+name: gaffa
+channels:
+  - nvidia
+  - conda-forge
+dependencies:
+  - python=3.12
+  - cuda-toolkit=12.8
+  - gcc_linux-64=13
+  - gxx_linux-64=13
+  - libgcc-ng>=13
+  - libstdcxx-ng>=13
+  - cmake>=3.26
+  - ninja
+  - conan>=2
+  - just
+  - scikit-build-core>=0.10
+  - pybind11>=2.13
+  - pytest>=8
+  - ruff>=0.5
+  - python-build
+  - pip

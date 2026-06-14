@@ -1,0 +1,77 @@
+[build-system]
+requires = [
+  "scikit-build-core>=0.10",
+  "wheel",
+  "cmake>=3.26",
+  "ninja",
+  "pybind11>=2.13",
+  "conan>=2.0"
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "gaffa"
+version = "0.1.0"
+requires-python = ">=3.12"
+readme = "README.md"
+authors = [{ name = "lintian233" }]
+description = "CUDA/C++ and Python hybrid project scaffold."
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.5",
+]
+
+[tool.scikit-build]
+wheel.packages = ["python/gaffa"]
+build-dir = "build/{wheel_tag}"
+
+[tool.scikit-build.cmake]
+minimum-version = "3.26"
+
+[tool.scikit-build.cmake.define]
+CMAKE_BUILD_TYPE = "Release"
+
+[tool.scikit-build.sdist]
+include = [
+  "CMakeLists.txt",
+  "conanfile.py",
+  "environment.yml",
+  "justfile",
+  "include/**",
+  "src/**",
+  "python/**",
+  "tests/**",
+]
+exclude = [
+  "build/**",
+  "_skbuild/**",
+  "dist/**",
+  ".git/**",
+  ".github/**",
+]
+
+[tool.cibuildwheel]
+build = ["cp312-*"]
+archs = ["x86_64"]
+skip = ["*-musllinux_*", "pp*"]
+
+[tool.cibuildwheel.linux]
+repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+
+
+[tool.cibuildwheel.environment]
+CMAKE_BUILD_TYPE = "Release"
+CMAKE_CUDA_ARCHITECTURES = "75;80;86;89;90"
+CUDA_HOME = "/usr/local/cuda"
+CUDACXX = "/usr/local/cuda/bin/nvcc"
+NVCC_PREPEND_FLAGS = "--allow-unsupported-compiler"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

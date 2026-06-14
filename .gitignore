@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.venv/
+venv/
+ENV/
+
+# Test and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+
+# Packaging
+build/
+dist/
+wheelhouse/
+*.whl
+*.tar.gz
+
+# CMake, Ninja, and compiled artifacts
+CMakeCache.txt
+CMakeFiles/
+CMakeUserPresets.json
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+.ninja_deps
+.ninja_log
+*.ninja
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.pdb
+
+# CUDA build byproducts
+*.ptx
+*.cubin
+*.fatbin
+*.cuo
+
+# Conan local state
+.conan2/
+
+# Local/generated scratch from experiments
+build_backend/
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
