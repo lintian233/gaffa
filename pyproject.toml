@@ -16,7 +16,9 @@ requires-python = ">=3.12"
 readme = "README.md"
 authors = [{ name = "lintian233" }]
 description = "CUDA/C++ and Python hybrid project scaffold."
-dependencies = []
+dependencies = [
+  "numpy>=1.26",
+]
 
 [project.optional-dependencies]
 dev = [

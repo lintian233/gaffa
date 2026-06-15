@@ -14,7 +14,10 @@ deps-release: conan-profile
 
 install: deps
     source env/dev.sh && python -m pip install -e ".[dev]" --no-build-isolation --force-reinstall \
-      -Ccmake.args="-DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake" \
+      -Cbuild-dir="build/editable-debug" \
+      -Ccmake.args="-DCMAKE_TOOLCHAIN_FILE=$PWD/build/conan/debug/conan_toolchain.cmake" \
+      -Ccmake.args="-DCMAKE_PREFIX_PATH=$PWD/build/conan/debug" \
+      -Ccmake.args="-Dpybind11_DIR=$PWD/build/conan/debug" \
       -Ccmake.args="-DCMAKE_BUILD_TYPE=Debug"
 
 test:
@@ -22,7 +25,10 @@ test:
 
 wheel: deps-release
     source env/dev.sh && python -m build --wheel --no-isolation \
-      -Ccmake.args="-DCMAKE_TOOLCHAIN_FILE=build/conan/release/conan_toolchain.cmake" \
+      -Cbuild-dir="build/wheel-release" \
+      -Ccmake.args="-DCMAKE_TOOLCHAIN_FILE=$PWD/build/conan/release/conan_toolchain.cmake" \
+      -Ccmake.args="-DCMAKE_PREFIX_PATH=$PWD/build/conan/release" \
+      -Ccmake.args="-Dpybind11_DIR=$PWD/build/conan/release" \
       -Ccmake.args="-DCMAKE_BUILD_TYPE=Release"
 
 configure: deps
@@ -57,7 +63,7 @@ test-cuda: build
     source env/dev.sh && compute-sanitizer --tool synccheck --error-exitcode 1 build/dev/gaffa_cpp_tests
 
 coverage-cpp: deps
-    source env/dev.sh && mkdir -p coverage && if [ -f build/coverage/CMakeCache.txt ]; then cmake -S . -B build/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; else cmake -S . -B build/coverage -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; fi && cmake --build build/coverage --target clean && { find build/coverage -name '*.gcda' -delete -o -name '*.gcno' -delete 2>/dev/null || true; } && cmake --build build/coverage && ctest --test-dir build/coverage --output-on-failure && find build/coverage -name 'cmake_device_link.gcno' -delete -o -name 'cmake_device_link.gcda' -delete -o -name 'link.stub*.gcno' -delete -o -name 'link.stub*.gcda' -delete && "$CONDA_PREFIX/bin/gcovr" --gcov-executable "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcov" --root . --filter src/gaffa --filter include/gaffa --exclude tests/cpp --exclude src/gaffa/bindings.cpp --exclude src/gaffa/io/filterbank_legacy.cpp --exclude '.*cmake_device_link.*' --exclude '.*link\.stub.*' --txt --xml-pretty --xml coverage/cpp.xml --html-details coverage/cpp.html
+    source env/dev.sh && mkdir -p coverage && if [ -f build/coverage/CMakeCache.txt ]; then cmake -S . -B build/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; else cmake -S . -B build/coverage -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; fi && cmake --build build/coverage --target clean && { find build/coverage -name '*.gcda' -delete -o -name '*.gcno' -delete 2>/dev/null || true; } && cmake --build build/coverage && ctest --test-dir build/coverage --output-on-failure && find build/coverage -name 'cmake_device_link.gcno' -delete -o -name 'cmake_device_link.gcda' -delete -o -name 'link.stub*.gcno' -delete -o -name 'link.stub*.gcda' -delete && "$CONDA_PREFIX/bin/gcovr" --gcov-executable "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcov" --root . --filter src/gaffa --filter include/gaffa --exclude tests/cpp --exclude src/gaffa/bindings.cpp --exclude 'src/gaffa/python/.*' --exclude src/gaffa/io/filterbank_legacy.cpp --exclude '.*cmake_device_link.*' --exclude '.*link\.stub.*' --txt --xml-pretty --xml coverage/cpp.xml --html-details coverage/cpp.html
 
 test-all: test test-cpp coverage-cpp
 

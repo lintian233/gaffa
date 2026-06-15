@@ -33,7 +33,12 @@ file(GLOB_RECURSE GAFFA_CORE_SOURCES CONFIGURE_DEPENDS
   src/gaffa/*.cu
 )
 list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/bindings\\.cpp$")
+list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/python/.*\\.cpp$")
 list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/.*_legacy\\.cpp$")
+
+file(GLOB_RECURSE GAFFA_PYTHON_BINDING_SOURCES CONFIGURE_DEPENDS
+  src/gaffa/python/*.cpp
+)
 
 add_library(gaffa_core_objects OBJECT ${GAFFA_CORE_SOURCES})
 target_link_libraries(gaffa_core_objects PUBLIC CUDA::cudart)
@@ -47,8 +52,9 @@ set_target_properties(gaffa_core_objects PROPERTIES
   LINKER_LANGUAGE CUDA
 )
 
-pybind11_add_module(_core
+pybind11_add_module(_core NO_EXTRAS
   src/gaffa/bindings.cpp
+  ${GAFFA_PYTHON_BINDING_SOURCES}
   $<TARGET_OBJECTS:gaffa_core_objects>
 )
 target_link_libraries(_core PRIVATE CUDA::cudart)
@@ -99,7 +105,7 @@ set(GAFFA_BENCHMARK_TARGETS)
 foreach(benchmark_source IN LISTS GAFFA_BENCHMARK_SOURCES)
   get_filename_component(benchmark_name "${benchmark_source}" NAME_WE)
   set(benchmark_target "gaffa_${benchmark_name}")
-  add_executable(${benchmark_target}
+  add_executable(${benchmark_target} EXCLUDE_FROM_ALL
     ${benchmark_source}
     src/gaffa/io/filterbank_legacy.cpp
     $<TARGET_OBJECTS:gaffa_core_objects>
@@ -124,4 +130,3 @@ if(GAFFA_BENCHMARK_TARGETS)
 endif()
 
 install(TARGETS _core LIBRARY DESTINATION gaffa)
-install(FILES python/gaffa/__init__.py DESTINATION gaffa)
