@@ -1,0 +1,297 @@
+#include "gaffa/dedispersion.h"
+#include "gaffa/filterbank.h"
+#include "gaffa/filterbank_view.h"
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+template <typename T>
+gaffa::HostSampleView<T> make_view(const std::vector<T>& samples,
+                                   std::size_t nsamples,
+                                   std::size_t nchans) {
+  return gaffa::HostSampleView<T>{samples.data(),
+                                  gaffa::SampleShape{nsamples, 1, nchans}};
+}
+
+gaffa::SingleDmDedispersionPlan single_plan(double dm) {
+  return gaffa::SingleDmDedispersionPlan{
+      .dm = dm,
+      .ref_frequency_mhz = 2000.0,
+      .tsamp = 0.003111606,
+      .chan_begin = 0,
+      .chan_end = 3,
+  };
+}
+
+gaffa::MultiDmDedispersionPlan multi_plan(std::size_t ndm) {
+  return gaffa::MultiDmDedispersionPlan{
+      .dm_low = 0.0,
+      .dm_step = 1.0,
+      .ndm = ndm,
+      .ref_frequency_mhz = 2000.0,
+      .tsamp = 0.003111606,
+      .chan_begin = 0,
+      .chan_end = 3,
+  };
+}
+
+std::filesystem::path test_data_path(const std::string& filename) {
+  return std::filesystem::path(GAFFA_TEST_DATA_DIR) / filename;
+}
+
+}  // namespace
+
+TEST(DedispersionCpu, SingleDmZeroEqualsChannelSumForUint8) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0};
+
+  const auto result = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 2, 3), frequency, single_plan(0.0));
+
+  EXPECT_EQ(result.shape.ndm, 1);
+  EXPECT_EQ(result.shape.nsamples, 2);
+  EXPECT_EQ(result.data, (std::vector<std::uint32_t>{6, 15}));
+}
+
+TEST(DedispersionCpu, SingleDmUsesSignedDelayAndBounds) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 2000.0, 2000.0};
+
+  const auto result = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 2, 3), frequency, single_plan(1.0));
+
+  EXPECT_EQ(result.data, (std::vector<std::uint32_t>{9, 11}));
+}
+
+TEST(DedispersionCpu, SupportsUint16OutputAsUint32) {
+  const std::vector<std::uint16_t> samples{1000, 2000, 3000, 4000};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  const auto result = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 2, 2), frequency, plan);
+
+  EXPECT_EQ(result.data, (std::vector<std::uint32_t>{3000, 7000}));
+}
+
+TEST(DedispersionCpu, SupportsFloatOutputAsFloat) {
+  const std::vector<float> samples{1.5F, 2.5F, 3.5F, 4.5F};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  const auto result =
+      gaffa::dedisperse_single_dm_cpu(make_view(samples, 2, 2), frequency, plan);
+
+  EXPECT_EQ(result.data, (std::vector<float>{4.0F, 8.0F}));
+}
+
+TEST(DedispersionCpu, MultiDmMatchesRepeatedSingleDm) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 2000.0, 2000.0};
+
+  const auto multi = gaffa::dedisperse_multi_dm_cpu(
+      make_view(samples, 2, 3), frequency, multi_plan(2));
+  const auto dm0 = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 2, 3), frequency, single_plan(0.0));
+  const auto dm1 = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 2, 3), frequency, single_plan(1.0));
+
+  EXPECT_EQ(multi.shape.ndm, 2);
+  EXPECT_EQ(multi.shape.nsamples, 2);
+  EXPECT_EQ((std::vector<std::uint32_t>{multi.data[0], multi.data[1]}),
+            dm0.data);
+  EXPECT_EQ((std::vector<std::uint32_t>{multi.data[2], multi.data[3]}),
+            dm1.data);
+}
+
+TEST(DedispersionCpu, ChannelRangeIsHalfOpen) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_begin = 1;
+  plan.chan_end = 3;
+
+  const auto result =
+      gaffa::dedisperse_single_dm_cpu(make_view(samples, 2, 3), frequency, plan);
+
+  EXPECT_EQ(result.data, (std::vector<std::uint32_t>{5, 11}));
+}
+
+TEST(DedispersionCpu, SubbandDegenerateMatchesMultiDm) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 2000.0, 2000.0};
+  const gaffa::MultiDmDedispersionPlan plan = multi_plan(2);
+  const gaffa::SubbandDedispersionOptions options{
+      .subband_channels = 1,
+      .ndm_per_nominal = 1,
+  };
+
+  const auto direct =
+      gaffa::dedisperse_multi_dm_cpu(make_view(samples, 2, 3), frequency, plan);
+  const auto subband = gaffa::dedisperse_subband_cpu(
+      make_view(samples, 2, 3), frequency, plan, options);
+
+  EXPECT_EQ(subband.shape.ndm, direct.shape.ndm);
+  EXPECT_EQ(subband.shape.nsamples, direct.shape.nsamples);
+  EXPECT_EQ(subband.data, direct.data);
+}
+
+TEST(DedispersionCpu, SubbandNormalModeProducesExpectedDmZeroSums) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  gaffa::MultiDmDedispersionPlan plan = multi_plan(1);
+  plan.chan_end = 4;
+  const gaffa::SubbandDedispersionOptions options{
+      .subband_channels = 2,
+      .ndm_per_nominal = 32,
+  };
+
+  const auto result = gaffa::dedisperse_subband_cpu(
+      make_view(samples, 2, 4), frequency, plan, options);
+
+  EXPECT_EQ(result.shape.ndm, 1);
+  EXPECT_EQ(result.shape.nsamples, 2);
+  EXPECT_EQ(result.data, (std::vector<std::uint32_t>{10, 26}));
+}
+
+TEST(DedispersionCpu, RejectsNifsOtherThanOne) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  const gaffa::HostSampleView<std::uint8_t> view{
+      samples.data(), gaffa::SampleShape{1, 2, 2}};
+
+  EXPECT_THROW((void)gaffa::dedisperse_single_dm_cpu(view, frequency,
+                                                     single_plan(0.0)),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, RejectsFrequencySizeMismatch) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{1000.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  EXPECT_THROW((void)gaffa::dedisperse_single_dm_cpu(
+                   make_view(samples, 2, 2), frequency, plan),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, RejectsNullSampleData) {
+  const std::vector<double> frequency{1000.0, 2000.0};
+  const gaffa::HostSampleView<std::uint8_t> view{
+      nullptr, gaffa::SampleShape{2, 1, 2}};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  EXPECT_THROW((void)gaffa::dedisperse_single_dm_cpu(view, frequency, plan),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, RejectsInvalidFrequencyValues) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{
+      1000.0, std::numeric_limits<double>::quiet_NaN()};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  EXPECT_THROW((void)gaffa::dedisperse_single_dm_cpu(
+                   make_view(samples, 2, 2), frequency, plan),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, RejectsInvalidMultiDmPlan) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::MultiDmDedispersionPlan plan = multi_plan(0);
+  plan.chan_end = 2;
+
+  EXPECT_THROW((void)gaffa::dedisperse_multi_dm_cpu(
+                   make_view(samples, 2, 2), frequency, plan),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, RejectsInvalidSubbandOptions) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::MultiDmDedispersionPlan plan = multi_plan(1);
+  plan.chan_end = 2;
+  const gaffa::SubbandDedispersionOptions options{
+      .subband_channels = 0,
+      .ndm_per_nominal = 1,
+  };
+
+  EXPECT_THROW((void)gaffa::dedisperse_subband_cpu(
+                   make_view(samples, 2, 2), frequency, plan, options),
+               std::invalid_argument);
+}
+
+TEST(DedispersionCpu, BaseTestFixtureCpuModesAgree) {
+  const std::filesystem::path path = test_data_path("basetest.fil");
+  if (!std::filesystem::exists(path)) {
+    GTEST_SKIP() << "basetest.fil is not available";
+  }
+
+  const gaffa::FilterbankData filterbank = gaffa::read_filterbank(path);
+  ASSERT_EQ(filterbank.header.nifs, 1);
+  ASSERT_EQ(filterbank.header.nbits, 8);
+
+  const auto samples = gaffa::sample_view<std::uint8_t>(filterbank);
+  const gaffa::MultiDmDedispersionPlan multi_plan{
+      .dm_low = 0.0,
+      .dm_step = 1.0,
+      .ndm = 10,
+      .ref_frequency_mhz = filterbank.header.frequency_table.back(),
+      .tsamp = filterbank.header.tsamp,
+      .chan_begin = 0,
+      .chan_end = static_cast<std::size_t>(filterbank.header.nchans),
+  };
+  const gaffa::SubbandDedispersionOptions degenerate_subband{
+      .subband_channels = 1,
+      .ndm_per_nominal = 1,
+  };
+
+  const auto multi =
+      gaffa::dedisperse_multi_dm_cpu(samples, filterbank.header.frequency_table,
+                                     multi_plan);
+  const auto subband = gaffa::dedisperse_subband_cpu(
+      samples, filterbank.header.frequency_table, multi_plan,
+      degenerate_subband);
+
+  ASSERT_EQ(multi.shape.ndm, multi_plan.ndm);
+  ASSERT_EQ(multi.shape.nsamples, samples.shape.nsamples);
+  EXPECT_EQ(subband.shape.ndm, multi.shape.ndm);
+  EXPECT_EQ(subband.shape.nsamples, multi.shape.nsamples);
+  EXPECT_EQ(subband.data, multi.data);
+
+  for (std::size_t dm_index = 0; dm_index < multi_plan.ndm; ++dm_index) {
+    const gaffa::SingleDmDedispersionPlan single_plan{
+        .dm = multi_plan.dm_low +
+              static_cast<double>(dm_index) * multi_plan.dm_step,
+        .ref_frequency_mhz = multi_plan.ref_frequency_mhz,
+        .tsamp = multi_plan.tsamp,
+        .chan_begin = multi_plan.chan_begin,
+        .chan_end = multi_plan.chan_end,
+    };
+    const auto single = gaffa::dedisperse_single_dm_cpu(
+        samples, filterbank.header.frequency_table, single_plan);
+    ASSERT_EQ(single.shape.ndm, 1);
+    ASSERT_EQ(single.shape.nsamples, multi.shape.nsamples);
+
+    const auto begin =
+        multi.data.begin() +
+        static_cast<std::ptrdiff_t>(dm_index * multi.shape.nsamples);
+    const auto end =
+        begin + static_cast<std::ptrdiff_t>(multi.shape.nsamples);
+    EXPECT_EQ((std::vector<std::uint32_t>{begin, end}), single.data);
+  }
+}
