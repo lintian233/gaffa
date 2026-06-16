@@ -43,6 +43,10 @@ std::size_t checked_output_size(std::size_t ndm, std::size_t nsamples) {
   return ndm * nsamples;
 }
 
+std::size_t ceil_div(std::size_t value, std::size_t divisor) {
+  return value / divisor + static_cast<std::size_t>(value % divisor != 0);
+}
+
 template <typename T>
 void validate_samples(HostSampleView<T> samples,
                       std::span<const double> frequency_mhz) {
@@ -273,12 +277,6 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cpu_impl(
   return result;
 }
 
-SingleDmDedispersionPlan single_plan_for_dm(
-    const MultiDmDedispersionPlan& plan, double dm) {
-  return SingleDmDedispersionPlan{dm, plan.ref_frequency_mhz, plan.tsamp,
-                                  plan.chan_begin, plan.chan_end};
-}
-
 template <typename T>
 DedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cpu_impl(
     HostSampleView<T> samples, std::span<const double> frequency_mhz,
@@ -346,10 +344,9 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
   using OutT = DedispersedValueT<T>;
   const std::size_t channel_count = plan.chan_end - plan.chan_begin;
   const std::size_t subband_count =
-      (channel_count + options.subband_channels - 1) /
-      options.subband_channels;
+      ceil_div(channel_count, options.subband_channels);
   const std::size_t nominal_dm_count =
-      (plan.ndm + options.ndm_per_nominal - 1) / options.ndm_per_nominal;
+      ceil_div(plan.ndm, options.ndm_per_nominal);
 
   std::vector<std::size_t> subband_begin(subband_count);
   std::vector<std::size_t> subband_end(subband_count);
