@@ -1,0 +1,294 @@
+#include "gaffa/dedispersion.h"
+#include "gaffa/dedispersion_cuda.h"
+#include "gaffa/filterbank.h"
+#include "gaffa/filterbank_view.h"
+#include "gaffa/vector_add.hpp"
+
+#include <gtest/gtest.h>
+
+#include <cstdint>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace {
+
+template <typename T>
+gaffa::HostSampleView<T> make_view(const std::vector<T>& samples,
+                                   std::size_t nsamples,
+                                   std::size_t nchans) {
+  return gaffa::HostSampleView<T>{samples.data(),
+                                  gaffa::SampleShape{nsamples, 1, nchans}};
+}
+
+bool has_cuda_device() {
+  return gaffa::cuda_device_count() != 0;
+}
+
+gaffa::SingleDmDedispersionPlan single_plan(double dm) {
+  return gaffa::SingleDmDedispersionPlan{
+      .dm = dm,
+      .ref_frequency_mhz = 2000.0,
+      .tsamp = 0.003111606,
+      .chan_begin = 0,
+      .chan_end = 4,
+  };
+}
+
+gaffa::MultiDmDedispersionPlan multi_plan(std::size_t ndm) {
+  return gaffa::MultiDmDedispersionPlan{
+      .dm_low = 0.0,
+      .dm_step = 1.0,
+      .ndm = ndm,
+      .ref_frequency_mhz = 2000.0,
+      .tsamp = 0.003111606,
+      .chan_begin = 0,
+      .chan_end = 4,
+  };
+}
+
+std::filesystem::path test_data_path(const std::string& filename) {
+  return std::filesystem::path(GAFFA_TEST_DATA_DIR) / filename;
+}
+
+}  // namespace
+
+TEST(DedispersionCuda, SingleDmUint8MatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_single_dm_cpu(view, frequency,
+                                                  single_plan(1.0));
+  const auto cuda = gaffa::dedisperse_single_dm_cuda(view, frequency,
+                                                    single_plan(1.0));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, SingleDmUint16MatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint16_t> samples{100, 200, 300, 400,
+                                           500, 600, 700, 800};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_single_dm_cpu(view, frequency,
+                                                  single_plan(1.0));
+  const auto cuda = gaffa::dedisperse_single_dm_cuda(view, frequency,
+                                                    single_plan(1.0));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, SingleDmFloatMatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<float> samples{1.0F, 2.0F, 3.0F, 4.0F,
+                                   5.0F, 6.0F, 7.0F, 8.0F};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_single_dm_cpu(view, frequency,
+                                                  single_plan(1.0));
+  const auto cuda = gaffa::dedisperse_single_dm_cuda(view, frequency,
+                                                    single_plan(1.0));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, MultiDmUint8MatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
+                                                 multi_plan(3));
+  const auto cuda = gaffa::dedisperse_multi_dm_cuda(view, frequency,
+                                                   multi_plan(3));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, DeviceResultCopiesToHost) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
+                                                 multi_plan(3));
+  const auto device = gaffa::dedisperse_multi_dm_cuda_device(
+      view, frequency, multi_plan(3));
+  const auto device_view = device.view();
+  const auto host = gaffa::copy_to_host(device);
+
+  EXPECT_EQ(device.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(device.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(device.size(), cpu.data.size());
+  EXPECT_EQ(device_view.data, device.data.data());
+  EXPECT_EQ(device_view.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(device_view.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(device_view.size(), cpu.data.size());
+  EXPECT_EQ(device_view.device_id, 0);
+  EXPECT_EQ(host.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(host.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(host.data, cpu.data);
+}
+
+TEST(DedispersionCuda, MultiDmUint16MatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint16_t> samples{100, 200, 300, 400,
+                                           500, 600, 700, 800};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
+                                                 multi_plan(3));
+  const auto cuda = gaffa::dedisperse_multi_dm_cuda(view, frequency,
+                                                   multi_plan(3));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, MultiDmFloatMatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<float> samples{1.0F, 2.0F, 3.0F, 4.0F,
+                                   5.0F, 6.0F, 7.0F, 8.0F};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
+                                                 multi_plan(3));
+  const auto cuda = gaffa::dedisperse_multi_dm_cuda(view, frequency,
+                                                   multi_plan(3));
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, SubbandDegenerateMatchesMultiDmCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const gaffa::SubbandDedispersionOptions subband_options{
+      .subband_channels = 1,
+      .ndm_per_nominal = 1,
+  };
+  const auto view = make_view(samples, 2, 4);
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
+                                                 multi_plan(3));
+  const auto cuda = gaffa::dedisperse_subband_cuda(
+      view, frequency, multi_plan(3), subband_options);
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, SubbandNormalMatchesCpuSubband) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8,
+                                          9, 10, 11, 12};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  gaffa::MultiDmDedispersionPlan plan = multi_plan(4);
+  plan.ndm = 4;
+  const gaffa::SubbandDedispersionOptions subband_options{
+      .subband_channels = 2,
+      .ndm_per_nominal = 2,
+  };
+  const gaffa::CudaDedispersionOptions cuda_options{
+      .device_id = 0,
+      .threads_per_block = 128,
+      .time_tile_samples = 2,
+  };
+  const auto view = make_view(samples, 3, 4);
+
+  const auto cpu = gaffa::dedisperse_subband_cpu(view, frequency, plan,
+                                                subband_options);
+  const auto cuda = gaffa::dedisperse_subband_cuda(
+      view, frequency, plan, subband_options, cuda_options);
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, BaseTestFixtureMatchesCpuModes) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::filesystem::path path = test_data_path("basetest.fil");
+  if (!std::filesystem::exists(path)) {
+    GTEST_SKIP() << "basetest.fil is not available";
+  }
+
+  const gaffa::FilterbankData filterbank = gaffa::read_filterbank(path);
+  ASSERT_EQ(filterbank.header.nifs, 1);
+  ASSERT_EQ(filterbank.header.nbits, 8);
+
+  const auto samples = gaffa::sample_view<std::uint8_t>(filterbank);
+  const gaffa::MultiDmDedispersionPlan plan{
+      .dm_low = 0.0,
+      .dm_step = 1.0,
+      .ndm = 50,
+      .ref_frequency_mhz = filterbank.header.frequency_table.back(),
+      .tsamp = filterbank.header.tsamp,
+      .chan_begin = 0,
+      .chan_end = static_cast<std::size_t>(filterbank.header.nchans),
+  };
+  const gaffa::SubbandDedispersionOptions degenerate_subband{
+      .subband_channels = 1,
+      .ndm_per_nominal = 1,
+  };
+
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(
+      samples, filterbank.header.frequency_table, plan);
+  const auto cuda = gaffa::dedisperse_subband_cuda(
+      samples, filterbank.header.frequency_table, plan, degenerate_subband);
+
+  EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
+  EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
+  EXPECT_EQ(cuda.data, cpu.data);
+}

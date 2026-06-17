@@ -53,6 +53,9 @@ bench: build-benchmarks
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_filterbank_read_benchmark all tests/data/basedata_240M.fil 1
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_filterbank_read_benchmark all tests/data/Mercer_5_tracking-M03_filtool_01.fil 1
 
+bench-cuda: build-benchmarks
+    source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/basedata_240M.fil 3
+    # source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/FRB20241112A_01.fil 3
 test-cpp: build
     source env/dev.sh && ctest --test-dir build/dev --output-on-failure
 
