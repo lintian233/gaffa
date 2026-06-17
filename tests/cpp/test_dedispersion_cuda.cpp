@@ -145,6 +145,7 @@ TEST(DedispersionCuda, DeviceResultCopiesToHost) {
   const auto device = gaffa::dedisperse_multi_dm_cuda_device(
       view, frequency, multi_plan(3));
   const auto device_view = device.view();
+  const auto device_span = device_view.as_span();
   const auto host = gaffa::copy_to_host(device);
 
   EXPECT_EQ(device.shape.ndm, cpu.shape.ndm);
@@ -155,6 +156,10 @@ TEST(DedispersionCuda, DeviceResultCopiesToHost) {
   EXPECT_EQ(device_view.shape.nsamples, cpu.shape.nsamples);
   EXPECT_EQ(device_view.size(), cpu.data.size());
   EXPECT_EQ(device_view.device_id, 0);
+  EXPECT_EQ(device_span.data, device.data.data());
+  EXPECT_EQ(device_span.size(), cpu.data.size());
+  EXPECT_EQ(device_span.bytes(), cpu.data.size() * sizeof(std::uint32_t));
+  EXPECT_EQ(device_span.device_id, 0);
   EXPECT_EQ(host.shape.ndm, cpu.shape.ndm);
   EXPECT_EQ(host.shape.nsamples, cpu.shape.nsamples);
   EXPECT_EQ(host.data, cpu.data);

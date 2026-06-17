@@ -633,54 +633,6 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_subband_cuda_device_impl(
 
 }  // namespace
 
-CudaDeviceMemory::CudaDeviceMemory(std::size_t bytes) : bytes_(bytes) {
-  if (bytes_ != 0) {
-    check_cuda(cudaMalloc(&data_, bytes_), "cudaMalloc");
-  }
-}
-
-CudaDeviceMemory::CudaDeviceMemory(CudaDeviceMemory&& other) noexcept
-    : data_(other.data_), bytes_(other.bytes_) {
-  other.data_ = nullptr;
-  other.bytes_ = 0;
-}
-
-CudaDeviceMemory& CudaDeviceMemory::operator=(
-    CudaDeviceMemory&& other) noexcept {
-  if (this != &other) {
-    release();
-    data_ = other.data_;
-    bytes_ = other.bytes_;
-    other.data_ = nullptr;
-    other.bytes_ = 0;
-  }
-  return *this;
-}
-
-CudaDeviceMemory::~CudaDeviceMemory() {
-  release();
-}
-
-void* CudaDeviceMemory::data() noexcept {
-  return data_;
-}
-
-const void* CudaDeviceMemory::data() const noexcept {
-  return data_;
-}
-
-std::size_t CudaDeviceMemory::bytes() const noexcept {
-  return bytes_;
-}
-
-void CudaDeviceMemory::release() noexcept {
-  if (data_ != nullptr) {
-    (void)cudaFree(data_);
-    data_ = nullptr;
-    bytes_ = 0;
-  }
-}
-
 template <typename T>
 DedispersedResult<T> copy_to_host_impl(const CudaDedispersedResult<T>& result) {
   DedispersedResult<T> host;
