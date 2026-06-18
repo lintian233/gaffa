@@ -56,6 +56,7 @@ bench: build-benchmarks
 bench-cuda: build-benchmarks
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/basedata_240M.fil 3
     # source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/FRB20241112A_01.fil 3
+    
 test-cpp: build
     source env/dev.sh && ctest --test-dir build/dev --output-on-failure
 
@@ -68,7 +69,7 @@ test-cuda: build
 coverage-cpp: deps
     source env/dev.sh && mkdir -p coverage && if [ -f build/coverage/CMakeCache.txt ]; then cmake -S . -B build/coverage -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; else cmake -S . -B build/coverage -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_COVERAGE=ON; fi && cmake --build build/coverage --target clean && { find build/coverage -name '*.gcda' -delete -o -name '*.gcno' -delete 2>/dev/null || true; } && cmake --build build/coverage && ctest --test-dir build/coverage --output-on-failure && find build/coverage -name 'cmake_device_link.gcno' -delete -o -name 'cmake_device_link.gcda' -delete -o -name 'link.stub*.gcno' -delete -o -name 'link.stub*.gcda' -delete && "$CONDA_PREFIX/bin/gcovr" --gcov-executable "$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-gcov" --root . --filter src/gaffa --filter include/gaffa --exclude tests/cpp --exclude src/gaffa/bindings.cpp --exclude 'src/gaffa/python/.*' --exclude src/gaffa/io/filterbank_legacy.cpp --exclude '.*cmake_device_link.*' --exclude '.*link\.stub.*' --txt --xml-pretty --xml coverage/cpp.xml --html-details coverage/cpp.html
 
-test-all: test test-cpp coverage-cpp
+test-all: test test-cpp test-cuda
 
 clean:
     rm -rf build dist *.egg-info
