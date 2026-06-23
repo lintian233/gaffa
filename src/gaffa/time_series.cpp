@@ -1,3 +1,7 @@
+// The real-valued weighted-sum downsampling and variance model in this file are
+// derived from riptide (https://github.com/v-morello/riptide), licensed under
+// the MIT License.
+
 #include "gaffa/time_series.h"
 
 #include <algorithm>

@@ -151,6 +151,58 @@ TEST(FfaTransformCpu, IgnoresIncompleteTailSamples) {
   EXPECT_EQ(result.data, ffa_output_8x8());
 }
 
+TEST(FfaTransformCpu, BlockApiMatchesOwningTransform) {
+  const auto expected = gaffa::ffa_transform_cpu(
+      ffa_input_8x8(), gaffa::FfaTransformPlan{.bins = 8});
+  std::vector<float> scratch(expected.data.size());
+  std::vector<float> output(expected.data.size());
+
+  gaffa::ffa_transform_block_cpu(ffa_input_8x8(), expected.shape, scratch,
+                                 output);
+
+  EXPECT_EQ(output, expected.data);
+}
+
+TEST(FfaTransformCpu, BlockApiAllowsOversizedScratchAndOutput) {
+  const auto expected = gaffa::ffa_transform_cpu(
+      ffa_input_8x8(), gaffa::FfaTransformPlan{.bins = 8});
+  std::vector<float> scratch(expected.data.size() + 3, -1.0F);
+  std::vector<float> output(expected.data.size() + 5, -1.0F);
+
+  gaffa::ffa_transform_block_cpu(ffa_input_8x8(), expected.shape, scratch,
+                                 output);
+
+  EXPECT_EQ(std::vector<float>(output.begin(),
+                               output.begin() + expected.data.size()),
+            expected.data);
+  EXPECT_EQ(output[expected.data.size()], -1.0F);
+}
+
+TEST(FfaTransformCpu, BlockApiRejectsInvalidBuffers) {
+  const std::vector<float> input{1, 2, 3, 4};
+  const gaffa::FfaTransformShape shape{.rows = 2, .bins = 2};
+  std::vector<float> scratch(4);
+  std::vector<float> output(4);
+
+  EXPECT_THROW(gaffa::ffa_transform_block_cpu(input, {.rows = 0, .bins = 2},
+                                              scratch, output),
+               std::invalid_argument);
+  EXPECT_THROW(gaffa::ffa_transform_block_cpu(input, {.rows = 2, .bins = 1},
+                                              scratch, output),
+               std::invalid_argument);
+  EXPECT_THROW(gaffa::ffa_transform_block_cpu(
+                   std::span<const float>(input).first(3), shape, scratch,
+                   output),
+               std::invalid_argument);
+  EXPECT_THROW(gaffa::ffa_transform_block_cpu(input, shape,
+                                              std::span<float>(scratch).first(3),
+                                              output),
+               std::invalid_argument);
+  EXPECT_THROW(gaffa::ffa_transform_block_cpu(input, shape, scratch,
+                                              std::span<float>(output).first(3)),
+               std::invalid_argument);
+}
+
 TEST(FfaTransformCpu, ComputesTrialPeriodsForTransformRows) {
   const auto periods =
       gaffa::ffa_trial_periods(gaffa::FfaTransformShape{.rows = 42, .bins = 127},

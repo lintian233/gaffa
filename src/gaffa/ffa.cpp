@@ -145,6 +145,8 @@ void validate_transform_buffers(std::span<const float> input,
   }
 }
 
+}  // namespace
+
 void ffa_transform_block_cpu(std::span<const float> input,
                              FfaTransformShape shape,
                              std::span<float> scratch,
@@ -155,8 +157,6 @@ void ffa_transform_block_cpu(std::span<const float> input,
                       BlockView{scratch.data(), shape.rows, shape.bins},
                       BlockView{output.data(), shape.rows, shape.bins});
 }
-
-}  // namespace
 
 FfaTransformResult<float> ffa_transform_cpu(
     std::span<const float> time_series,

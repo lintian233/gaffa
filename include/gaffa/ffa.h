@@ -21,6 +21,14 @@ struct FfaTransformResult {
   FfaTransformShape shape{};
 };
 
+// Executes one rows x bins FFA transform block without allocating memory.
+// input must contain exactly rows * bins values. scratch and output must each
+// contain at least rows * bins values.
+void ffa_transform_block_cpu(std::span<const float> input,
+                             FfaTransformShape shape,
+                             std::span<float> scratch,
+                             std::span<float> output);
+
 FfaTransformResult<float> ffa_transform_cpu(
     std::span<const float> time_series,
     const FfaTransformPlan& plan);
