@@ -133,58 +133,6 @@ float fill_circular_prefix(std::span<const float> profile,
   return circular_prefix[bins];
 }
 
-bool is_better_candidate(const FfaCandidate& lhs, const FfaCandidate& rhs) {
-  if (lhs.snr != rhs.snr) {
-    return lhs.snr > rhs.snr;
-  }
-  if (lhs.period != rhs.period) {
-    return lhs.period < rhs.period;
-  }
-  if (lhs.width != rhs.width) {
-    return lhs.width < rhs.width;
-  }
-  return lhs.phase < rhs.phase;
-}
-
-struct WorstCandidateFirst {
-  bool operator()(const FfaCandidate& lhs, const FfaCandidate& rhs) const {
-    return is_better_candidate(lhs, rhs);
-  }
-};
-
-class CandidateTopK {
- public:
-  explicit CandidateTopK(std::size_t max_candidates)
-      : max_candidates_(max_candidates) {
-    candidates_.reserve(max_candidates);
-  }
-
-  void consider(FfaCandidate candidate) {
-    if (candidates_.size() < max_candidates_) {
-      candidates_.push_back(candidate);
-      std::push_heap(candidates_.begin(), candidates_.end(),
-                     WorstCandidateFirst{});
-      return;
-    }
-    if (is_better_candidate(candidate, candidates_.front())) {
-      std::pop_heap(candidates_.begin(), candidates_.end(),
-                    WorstCandidateFirst{});
-      candidates_.back() = candidate;
-      std::push_heap(candidates_.begin(), candidates_.end(),
-                     WorstCandidateFirst{});
-    }
-  }
-
-  std::vector<FfaCandidate> sorted() && {
-    std::sort(candidates_.begin(), candidates_.end(), is_better_candidate);
-    return std::move(candidates_);
-  }
-
- private:
-  std::size_t max_candidates_ = 0;
-  std::vector<FfaCandidate> candidates_;
-};
-
 }  // namespace
 
 std::vector<FfaCandidate> detect_ffa_block_cpu(
@@ -197,7 +145,7 @@ std::vector<FfaCandidate> detect_ffa_block_cpu(
   validate_detection_arguments(transform, shape, task, width_trials, stdnoise,
                                options);
 
-  CandidateTopK candidates(options.max_candidates);
+  FfaCandidateTopK candidates(options.max_candidates);
   const std::size_t max_width =
       *std::max_element(width_trials.begin(), width_trials.end());
   std::vector<float> circular_prefix(shape.bins + max_width + 1, 0.0F);

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gaffa/ffa_detection.h"
+#include "gaffa/ffa_candidate.h"
 #include "gaffa/ffa_plan.h"
 
 #include <cstddef>

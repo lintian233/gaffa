@@ -1,66 +1,13 @@
 #include "gaffa/ffa_search.h"
 
+#include "gaffa/ffa_detection.h"
 #include "gaffa/ffa_executor.h"
 
-#include <algorithm>
 #include <cmath>
 #include <stdexcept>
-#include <vector>
 
 namespace gaffa {
 namespace {
-
-bool is_better_candidate(const FfaCandidate& lhs, const FfaCandidate& rhs) {
-  if (lhs.snr != rhs.snr) {
-    return lhs.snr > rhs.snr;
-  }
-  if (lhs.period != rhs.period) {
-    return lhs.period < rhs.period;
-  }
-  if (lhs.width != rhs.width) {
-    return lhs.width < rhs.width;
-  }
-  return lhs.phase < rhs.phase;
-}
-
-struct WorstCandidateFirst {
-  bool operator()(const FfaCandidate& lhs, const FfaCandidate& rhs) const {
-    return is_better_candidate(lhs, rhs);
-  }
-};
-
-class CandidateTopK {
- public:
-  explicit CandidateTopK(std::size_t max_candidates)
-      : max_candidates_(max_candidates) {
-    candidates_.reserve(max_candidates);
-  }
-
-  void consider(const FfaCandidate& candidate) {
-    if (candidates_.size() < max_candidates_) {
-      candidates_.push_back(candidate);
-      std::push_heap(candidates_.begin(), candidates_.end(),
-                     WorstCandidateFirst{});
-      return;
-    }
-    if (is_better_candidate(candidate, candidates_.front())) {
-      std::pop_heap(candidates_.begin(), candidates_.end(),
-                    WorstCandidateFirst{});
-      candidates_.back() = candidate;
-      std::push_heap(candidates_.begin(), candidates_.end(),
-                     WorstCandidateFirst{});
-    }
-  }
-
-  std::vector<FfaCandidate> sorted() && {
-    std::sort(candidates_.begin(), candidates_.end(), is_better_candidate);
-    return std::move(candidates_);
-  }
-
- private:
-  std::size_t max_candidates_ = 0;
-  std::vector<FfaCandidate> candidates_;
-};
 
 void validate_search_inputs(const FfaSearchPlan& plan,
                             const FfaSearchOptions& options) {
@@ -80,7 +27,7 @@ void validate_search_inputs(const FfaSearchPlan& plan,
 void collect_block_candidates(const FfaBlockView& block,
                               std::span<const std::size_t> width_trials,
                               const FfaDetectionOptions& detection_options,
-                              CandidateTopK& global_candidates) {
+                              FfaCandidateTopK& global_candidates) {
   const auto local_candidates =
       detect_ffa_block_cpu(block.transform, block.shape, *block.task,
                            width_trials, block.stdnoise, detection_options);
@@ -96,7 +43,7 @@ FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
                                const FfaSearchOptions& options) {
   validate_search_inputs(plan, options);
 
-  CandidateTopK global_candidates(options.max_candidates);
+  FfaCandidateTopK global_candidates(options.max_candidates);
   const FfaDetectionOptions detection_options{
       .snr_threshold = options.snr_threshold,
       .max_candidates = options.max_candidates,

@@ -12,7 +12,7 @@ namespace {
 
 gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
                                double downsample_factor,
-                               std::size_t nsamples,
+                               std::size_t prepared_nsamples,
                                std::size_t rows,
                                std::size_t rows_eval,
                                std::size_t bins) {
@@ -20,7 +20,7 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
       .downsample_factor = downsample_factor,
       .effective_tsamp = downsample_factor,
       .input_nsamples = input_nsamples,
-      .prepared_nsamples = nsamples,
+      .prepared_nsamples = prepared_nsamples,
       .bins = bins,
       .rows = rows,
       .rows_eval = rows_eval,

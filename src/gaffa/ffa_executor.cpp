@@ -21,6 +21,12 @@ bool is_no_downsample(double factor) {
   return factor == 1.0;
 }
 
+struct PreparedSampleCache {
+  bool valid = false;
+  double downsample_factor = 0.0;
+  std::vector<float> downsampled;
+};
+
 void validate_task(const FfaSearchTask& task, std::size_t input_nsamples) {
   if (task.input_nsamples != input_nsamples) {
     throw std::invalid_argument(
@@ -91,22 +97,20 @@ void validate_inputs(std::span<const float> time_series,
 
 std::span<const float> prepare_task_samples(std::span<const float> time_series,
                                             const FfaSearchTask& task,
-                                            std::vector<float>& downsampled,
-                                            bool& downsample_cache_valid,
-                                            double& cached_downsample_factor) {
+                                            PreparedSampleCache& cache) {
   if (is_no_downsample(task.downsample_factor)) {
     return time_series.first(task.prepared_nsamples);
   }
 
-  if (!downsample_cache_valid ||
-      cached_downsample_factor != task.downsample_factor) {
-    downsampled.resize(task.prepared_nsamples);
+  if (!cache.valid || cache.downsample_factor != task.downsample_factor ||
+      cache.downsampled.size() != task.prepared_nsamples) {
+    cache.downsampled.resize(task.prepared_nsamples);
     downsample_weighted_sum_cpu(time_series, task.downsample_factor,
-                                downsampled);
-    cached_downsample_factor = task.downsample_factor;
-    downsample_cache_valid = true;
+                                cache.downsampled);
+    cache.downsample_factor = task.downsample_factor;
+    cache.valid = true;
   }
-  return downsampled;
+  return cache.downsampled;
 }
 
 float task_stdnoise(std::size_t input_nsamples, const FfaSearchTask& task) {
@@ -125,17 +129,13 @@ void for_each_ffa_block_cpu(std::span<const float> time_series,
                             const FfaBlockConsumer& consumer) {
   validate_inputs(time_series, plan, consumer);
 
-  std::vector<float> downsampled;
+  PreparedSampleCache prepared_cache;
   std::vector<float> scratch;
   std::vector<float> transform;
-  bool downsample_cache_valid = false;
-  double cached_downsample_factor = 0.0;
 
   for (const auto& task : plan.tasks) {
     const std::span<const float> prepared =
-        prepare_task_samples(time_series, task, downsampled,
-                             downsample_cache_valid,
-                             cached_downsample_factor);
+        prepare_task_samples(time_series, task, prepared_cache);
 
     const std::size_t full_size = checked_multiply(task.rows, task.bins);
     scratch.resize(full_size);

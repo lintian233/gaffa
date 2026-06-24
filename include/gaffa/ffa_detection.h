@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gaffa/ffa_candidate.h"
 #include "gaffa/ffa.h"
 #include "gaffa/ffa_plan.h"
 
@@ -8,15 +9,6 @@
 #include <vector>
 
 namespace gaffa {
-
-struct FfaCandidate {
-  double period = 0.0;
-  std::size_t width = 0;
-  std::size_t phase = 0;
-  std::size_t shift = 0;
-  std::size_t bins = 0;
-  float snr = 0.0F;
-};
 
 struct FfaDetectionOptions {
   float snr_threshold = 6.0F;
