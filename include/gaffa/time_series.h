@@ -6,6 +6,40 @@
 
 namespace gaffa {
 
+struct TimeSeries {
+  std::vector<float> data;
+  double tsamp = 0.0;
+};
+
+struct TimeSeriesStats {
+  double mean = 0.0;
+  double variance = 0.0;
+  double stddev = 0.0;
+};
+
+struct NormaliseOptions {
+  bool reject_constant = true;
+};
+
+void validate_time_series(const TimeSeries& time_series);
+
+// Computes population statistics over a finite 1D time series. Non-finite
+// samples are rejected because downstream S/N calculations assume a well-defined
+// noise scale.
+TimeSeriesStats time_series_stats_cpu(std::span<const float> input,
+                                      const NormaliseOptions& options = {});
+
+// Standardises input to zero mean and unit population standard deviation.
+void normalise_cpu(std::span<const float> input,
+                   std::span<float> output,
+                   const NormaliseOptions& options = {});
+
+std::vector<float> normalise_cpu(std::span<const float> input,
+                                 const NormaliseOptions& options = {});
+
+void normalise_inplace_cpu(std::span<float> data,
+                           const NormaliseOptions& options = {});
+
 // Returns floor(nsamples / factor) for riptide-compatible downsampling.
 // The factor must satisfy 1 < factor <= nsamples. A factor of 1 means no
 // downsampling and should be handled by the caller by reusing the input span.

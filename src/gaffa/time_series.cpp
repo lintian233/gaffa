@@ -22,7 +22,98 @@ void validate_downsample_factor(std::size_t nsamples, double factor) {
   }
 }
 
+void validate_input_span(std::span<const float> input, const char* name) {
+  if (input.empty()) {
+    throw std::invalid_argument(name);
+  }
+}
+
+void validate_finite_samples(std::span<const float> input) {
+  for (const float value : input) {
+    if (!std::isfinite(value)) {
+      throw std::invalid_argument("time series samples must be finite");
+    }
+  }
+}
+
 }  // namespace
+
+void validate_time_series(const TimeSeries& time_series) {
+  if (time_series.data.empty()) {
+    throw std::invalid_argument("time series data must not be empty");
+  }
+  if (!(time_series.tsamp > 0.0) || !std::isfinite(time_series.tsamp)) {
+    throw std::invalid_argument("time series tsamp must be finite and > 0");
+  }
+}
+
+TimeSeriesStats time_series_stats_cpu(std::span<const float> input,
+                                      const NormaliseOptions& /*options*/) {
+  validate_input_span(input, "time series stats input must not be empty");
+  validate_finite_samples(input);
+
+  double sum = 0.0;
+  double sum_squares = 0.0;
+  for (const float value : input) {
+    const double sample = static_cast<double>(value);
+    sum += sample;
+    sum_squares += sample * sample;
+  }
+
+  const double count = static_cast<double>(input.size());
+  const double mean = sum / count;
+  double variance = sum_squares / count - mean * mean;
+  if (variance < 0.0 && variance > -1.0e-12) {
+    variance = 0.0;
+  }
+  if (variance < 0.0 || !std::isfinite(variance)) {
+    throw std::invalid_argument("time series variance must be finite and >= 0");
+  }
+
+  return TimeSeriesStats{
+      .mean = mean,
+      .variance = variance,
+      .stddev = std::sqrt(variance),
+  };
+}
+
+void normalise_cpu(std::span<const float> input,
+                   std::span<float> output,
+                   const NormaliseOptions& options) {
+  validate_input_span(input, "normalise input must not be empty");
+  if (output.size() != input.size()) {
+    throw std::invalid_argument("normalise output size must match input size");
+  }
+
+  const TimeSeriesStats stats = time_series_stats_cpu(input, options);
+  if (!(stats.stddev > 0.0) || !std::isfinite(stats.stddev)) {
+    if (options.reject_constant) {
+      throw std::invalid_argument(
+          "normalise input standard deviation must be finite and > 0");
+    }
+    std::fill(output.begin(), output.end(), 0.0F);
+    return;
+  }
+
+  const double scale = 1.0 / stats.stddev;
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    output[index] =
+        static_cast<float>((static_cast<double>(input[index]) - stats.mean) *
+                           scale);
+  }
+}
+
+std::vector<float> normalise_cpu(std::span<const float> input,
+                                 const NormaliseOptions& options) {
+  std::vector<float> output(input.size());
+  normalise_cpu(input, output, options);
+  return output;
+}
+
+void normalise_inplace_cpu(std::span<float> data,
+                           const NormaliseOptions& options) {
+  normalise_cpu(std::span<const float>(data.data(), data.size()), data, options);
+}
 
 std::size_t downsampled_size(std::size_t nsamples, double factor) {
   validate_downsample_factor(nsamples, factor);
