@@ -45,28 +45,30 @@ void validate_task(const FfaSearchTask& task, std::size_t input_nsamples) {
     throw std::invalid_argument(
         "FFA executor task rows_eval must satisfy 0 < rows_eval <= rows");
   }
-  if (task.nsamples == 0) {
-    throw std::invalid_argument("FFA executor task nsamples must be > 0");
+  if (task.prepared_nsamples == 0) {
+    throw std::invalid_argument(
+        "FFA executor task prepared_nsamples must be > 0");
   }
 
   const std::size_t full_size = checked_multiply(task.rows, task.bins);
-  if (full_size > task.nsamples) {
+  if (full_size > task.prepared_nsamples) {
     throw std::invalid_argument(
-        "FFA executor task rows * bins must be <= nsamples");
+        "FFA executor task rows * bins must be <= prepared_nsamples");
   }
 
   if (is_no_downsample(task.downsample_factor)) {
-    if (task.nsamples != input_nsamples) {
+    if (task.prepared_nsamples != input_nsamples) {
       throw std::invalid_argument(
-          "FFA executor no-downsample task nsamples must match input size");
+          "FFA executor no-downsample task prepared_nsamples must match input "
+          "size");
     }
     return;
   }
 
-  if (task.nsamples != downsampled_size(input_nsamples,
+  if (task.prepared_nsamples != downsampled_size(input_nsamples,
                                         task.downsample_factor)) {
     throw std::invalid_argument(
-        "FFA executor task nsamples must match downsampled_size");
+        "FFA executor task prepared_nsamples must match downsampled_size");
   }
 }
 
@@ -89,13 +91,21 @@ void validate_inputs(std::span<const float> time_series,
 
 std::span<const float> prepare_task_samples(std::span<const float> time_series,
                                             const FfaSearchTask& task,
-                                            std::vector<float>& downsampled) {
+                                            std::vector<float>& downsampled,
+                                            bool& downsample_cache_valid,
+                                            double& cached_downsample_factor) {
   if (is_no_downsample(task.downsample_factor)) {
-    return time_series.first(task.nsamples);
+    return time_series.first(task.prepared_nsamples);
   }
 
-  downsampled.resize(task.nsamples);
-  downsample_weighted_sum_cpu(time_series, task.downsample_factor, downsampled);
+  if (!downsample_cache_valid ||
+      cached_downsample_factor != task.downsample_factor) {
+    downsampled.resize(task.prepared_nsamples);
+    downsample_weighted_sum_cpu(time_series, task.downsample_factor,
+                                downsampled);
+    cached_downsample_factor = task.downsample_factor;
+    downsample_cache_valid = true;
+  }
   return downsampled;
 }
 
@@ -118,10 +128,14 @@ void for_each_ffa_block_cpu(std::span<const float> time_series,
   std::vector<float> downsampled;
   std::vector<float> scratch;
   std::vector<float> transform;
+  bool downsample_cache_valid = false;
+  double cached_downsample_factor = 0.0;
 
   for (const auto& task : plan.tasks) {
     const std::span<const float> prepared =
-        prepare_task_samples(time_series, task, downsampled);
+        prepare_task_samples(time_series, task, downsampled,
+                             downsample_cache_valid,
+                             cached_downsample_factor);
 
     const std::size_t full_size = checked_multiply(task.rows, task.bins);
     scratch.resize(full_size);

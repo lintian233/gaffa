@@ -9,11 +9,17 @@ struct FfaSearchTask {
   double downsample_factor = 1.0;
   double effective_tsamp = 0.0;
 
+  // Number of samples in the original 1D time series passed to the executor.
   std::size_t input_nsamples = 0;
-  std::size_t nsamples = 0;
+  // Number of samples after preparing this task's input. This equals
+  // input_nsamples for downsample_factor == 1 and downsampled_size otherwise.
+  std::size_t prepared_nsamples = 0;
 
+  // FFA transform shape for the prepared samples.
   std::size_t bins = 0;
   std::size_t rows = 0;
+  // Number of transform rows to expose to detection. The full transform still
+  // uses rows x bins internally so trial-period mapping stays correct.
   std::size_t rows_eval = 0;
 
   double period_begin = 0.0;

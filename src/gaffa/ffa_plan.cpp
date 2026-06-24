@@ -1,5 +1,7 @@
 #include "gaffa/ffa_plan.h"
 
+#include "gaffa/time_series.h"
+
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -35,9 +37,11 @@ void validate_riptide_options(std::size_t nsamples,
             "FFA plan period_min must be >= tsamp * bins_min");
 }
 
-std::size_t downsampled_size(std::size_t nsamples, double factor) {
-  return static_cast<std::size_t>(
-      std::floor(static_cast<double>(nsamples) / factor));
+std::size_t prepared_sample_count(std::size_t nsamples, double factor) {
+  if (factor == 1.0) {
+    return nsamples;
+  }
+  return downsampled_size(nsamples, factor);
 }
 
 std::size_t ceil_shift(std::size_t rows,
@@ -117,20 +121,20 @@ FfaSearchPlan make_riptide_ffa_plan(
         initial_downsample_factor *
         std::pow(downsample_growth, static_cast<double>(cycle));
     const double effective_tsamp = factor * tsamp;
-    const std::size_t downsampled_nsamples =
-        downsampled_size(nsamples, factor);
+    const std::size_t prepared_nsamples =
+        prepared_sample_count(nsamples, factor);
     const double period_max_samples =
         effective_period_max / effective_tsamp;
 
     const auto bins_stop = std::min(
-        {options.bins_max, downsampled_nsamples,
+        {options.bins_max, prepared_nsamples,
          static_cast<std::size_t>(std::floor(period_max_samples))});
     if (bins_stop < options.bins_min) {
       continue;
     }
 
     for (std::size_t bins = options.bins_min; bins <= bins_stop; ++bins) {
-      const std::size_t rows = downsampled_nsamples / bins;
+      const std::size_t rows = prepared_nsamples / bins;
       if (rows < options.min_periods) {
         continue;
       }
@@ -151,7 +155,7 @@ FfaSearchPlan make_riptide_ffa_plan(
           .downsample_factor = factor,
           .effective_tsamp = effective_tsamp,
           .input_nsamples = nsamples,
-          .nsamples = downsampled_nsamples,
+          .prepared_nsamples = prepared_nsamples,
           .bins = bins,
           .rows = rows,
           .rows_eval = rows_eval,

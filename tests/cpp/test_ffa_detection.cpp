@@ -14,7 +14,7 @@ gaffa::FfaSearchTask task_for_shape(gaffa::FfaTransformShape shape) {
       .downsample_factor = 1.0,
       .effective_tsamp = 0.25,
       .input_nsamples = shape.rows * shape.bins,
-      .nsamples = shape.rows * shape.bins,
+      .prepared_nsamples = shape.rows * shape.bins,
       .bins = shape.bins,
       .rows = shape.rows,
       .rows_eval = shape.rows,

@@ -20,7 +20,7 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
       .downsample_factor = downsample_factor,
       .effective_tsamp = downsample_factor,
       .input_nsamples = input_nsamples,
-      .nsamples = nsamples,
+      .prepared_nsamples = nsamples,
       .bins = bins,
       .rows = rows,
       .rows_eval = rows_eval,
@@ -151,3 +151,27 @@ TEST(FfaExecutorCpu, CallsConsumerForEachTask) {
   EXPECT_EQ(shapes[1].bins, 2);
 }
 
+TEST(FfaExecutorCpu, ReusesPreparedDownsampleForAdjacentTasks) {
+  const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
+  const gaffa::FfaSearchPlan plan{
+      .tasks = {
+          make_task(input.size(), 2.0, 4, 2, 2, 2),
+          make_task(input.size(), 2.0, 4, 1, 1, 4),
+      },
+  };
+
+  std::vector<std::vector<float>> observed;
+  gaffa::for_each_ffa_block_cpu(input, plan, [&](const gaffa::FfaBlockView& block) {
+    observed.emplace_back(block.transform.begin(), block.transform.end());
+  });
+
+  const auto downsampled = gaffa::downsample_weighted_sum_cpu(input, 2.0);
+  const auto first_expected = run_manual_transform(
+      downsampled, gaffa::FfaTransformShape{.rows = 2, .bins = 2});
+  const auto second_expected = run_manual_transform(
+      downsampled, gaffa::FfaTransformShape{.rows = 1, .bins = 4});
+
+  ASSERT_EQ(observed.size(), 2);
+  EXPECT_EQ(observed[0], first_expected);
+  EXPECT_EQ(observed[1], second_expected);
+}

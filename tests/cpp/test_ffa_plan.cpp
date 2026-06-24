@@ -100,7 +100,7 @@ TEST(FfaPlan, MatchesSmallKnownPlan) {
   EXPECT_DOUBLE_EQ(first.downsample_factor, 1.0);
   EXPECT_DOUBLE_EQ(first.effective_tsamp, 0.25);
   EXPECT_EQ(first.input_nsamples, 64);
-  EXPECT_EQ(first.nsamples, 64);
+  EXPECT_EQ(first.prepared_nsamples, 64);
   EXPECT_EQ(first.bins, 4);
   EXPECT_EQ(first.rows, 16);
   EXPECT_EQ(first.rows_eval, 12);
