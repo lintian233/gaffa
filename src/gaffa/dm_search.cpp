@@ -1,7 +1,9 @@
 #include "gaffa/dm_search.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -160,6 +162,29 @@ void validate_preprocessed_time_series(const TimeSeries& time_series,
 }
 
 template <typename T>
+void collect_dm_candidates(const DedispersedResult<T>& input,
+                           std::span<const double> dms,
+                           std::size_t dm_index,
+                           double tsamp,
+                           const PreprocessPlan& preprocess,
+                           const FfaSearchPlan& ffa_plan,
+                           const FfaSearchOptions& ffa_options,
+                           DmCandidateTopK& candidates) {
+  TimeSeries time_series =
+      maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
+  validate_preprocessed_time_series(time_series, input.shape, tsamp);
+  const FfaSearchResult search =
+      search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
+  for (const auto& candidate : search.candidates) {
+    candidates.consider(DmCandidate{
+        .dm = dms[dm_index],
+        .dm_index = dm_index,
+        .ffa = candidate,
+    });
+  }
+}
+
+template <typename T>
 DmSearchResult search_dms_impl(const DedispersedResult<T>& input,
                                std::span<const double> dms,
                                double tsamp,
@@ -175,20 +200,43 @@ DmSearchResult search_dms_impl(const DedispersedResult<T>& input,
   const FfaSearchPlan ffa_plan =
       make_riptide_ffa_plan(input.shape.nsamples, tsamp, options.plan);
 
-  for (std::size_t dm_index = 0; dm_index < input.shape.ndm; ++dm_index) {
-    TimeSeries time_series =
-        maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp),
-                         options.preprocess);
-    validate_preprocessed_time_series(time_series, input.shape, tsamp);
-    const FfaSearchResult search =
-        search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
-    for (const auto& candidate : search.candidates) {
-      global_candidates.consider(DmCandidate{
-          .dm = dms[dm_index],
-          .dm_index = dm_index,
-          .ffa = candidate,
-      });
+  std::exception_ptr error;
+  std::atomic_bool has_error = false;
+  const bool parallel = input.shape.ndm > 4;
+
+#pragma omp parallel if(parallel)
+  {
+    DmCandidateTopK local_candidates(options.max_candidates);
+
+#pragma omp for schedule(dynamic, 1)
+    for (std::size_t dm_index = 0; dm_index < input.shape.ndm; ++dm_index) {
+      if (has_error.load(std::memory_order_relaxed)) {
+        continue;
+      }
+      try {
+        collect_dm_candidates(input, dms, dm_index, tsamp, options.preprocess,
+                              ffa_plan, ffa_options, local_candidates);
+      } catch (...) {
+        bool expected = false;
+        if (has_error.compare_exchange_strong(expected, true,
+                                              std::memory_order_relaxed)) {
+#pragma omp critical(dm_search_error)
+          { error = std::current_exception(); }
+        }
+      }
     }
+
+    auto thread_candidates = std::move(local_candidates).sorted();
+#pragma omp critical(dm_search_candidates)
+    {
+      for (const auto& candidate : thread_candidates) {
+        global_candidates.consider(candidate);
+      }
+    }
+  }
+
+  if (error) {
+    std::rethrow_exception(error);
   }
 
   return DmSearchResult{
