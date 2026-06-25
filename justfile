@@ -57,8 +57,8 @@ bench-cuda: build-benchmarks
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/basedata_240M.fil 3
     # source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/FRB20241112A_01.fil 3
 
-bench-dm-search file="tests/data/Mercer_5_tracking-M03_filtool_01.fil" backend="cuda-subband" ndm="32" dm_low="1110.20" dm_step="0.5" period_min="0.1" period_max="1" max_peaks="0" print_peaks="64" snr_threshold="6" bins_min="200" bins_max="256" preprocess="riptide" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32": build-benchmarks
-    source env/dev.sh && /usr/bin/time -v build/release/gaffa_dm_search_benchmark {{file}} {{backend}} {{ndm}} {{dm_low}} {{dm_step}} {{period_min}} {{period_max}} {{max_peaks}} {{print_peaks}} {{snr_threshold}} {{bins_min}} {{bins_max}} {{preprocess}} {{running_median_seconds}} {{subband_channels}} {{ndm_per_nominal}}
+bench-dm-search file="tests/data/Mercer_5_tracking-M03_filtool_01.fil" backend="cuda-subband" ndm="100" dm_low="1050.20" dm_step="1" period_min="0.1" period_max="1" max_peaks="0" print_peaks="64" snr_threshold="6" bins_min="200" bins_max="256" preprocess="riptide" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32" max_candidates="0": build-benchmarks
+    source env/dev.sh && /usr/bin/time -v build/release/gaffa_dm_search_benchmark {{file}} {{backend}} {{ndm}} {{dm_low}} {{dm_step}} {{period_min}} {{period_max}} {{max_peaks}} {{print_peaks}} {{snr_threshold}} {{bins_min}} {{bins_max}} {{preprocess}} {{running_median_seconds}} {{subband_channels}} {{ndm_per_nominal}} {{max_candidates}}
 
 test-cpp: build
     source env/dev.sh && ctest --test-dir build/dev --output-on-failure
