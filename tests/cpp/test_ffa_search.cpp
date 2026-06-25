@@ -41,12 +41,15 @@ TEST(FfaSearchCpu, RejectsInvalidOptions) {
   const auto plan = single_task_plan(input.size());
 
   EXPECT_THROW((void)gaffa::search_ffa_cpu(
-                   input, plan, gaffa::FfaSearchOptions{.max_candidates = 0}),
+                   input, plan,
+                   gaffa::FfaSearchOptions{
+                       .snr_threshold = INFINITY,
+                   }),
                std::invalid_argument);
   EXPECT_THROW((void)gaffa::search_ffa_cpu(
                    input, plan,
                    gaffa::FfaSearchOptions{
-                       .snr_threshold = INFINITY,
+                       .frequency_cluster_radius = -1.0,
                    }),
                std::invalid_argument);
 
@@ -56,7 +59,7 @@ TEST(FfaSearchCpu, RejectsInvalidOptions) {
                std::invalid_argument);
 }
 
-TEST(FfaSearchCpu, ReturnsEmptyWhenNoCandidatePassesThreshold) {
+TEST(FfaSearchCpu, ReturnsEmptyWhenNoPeakPassesThreshold) {
   const std::vector<float> input{1, 0, 2, 0, 3, 0, 4, 0};
   const auto plan = single_task_plan(input.size());
 
@@ -66,10 +69,10 @@ TEST(FfaSearchCpu, ReturnsEmptyWhenNoCandidatePassesThreshold) {
           .snr_threshold = 1000.0F,
       });
 
-  EXPECT_TRUE(result.candidates.empty());
+  EXPECT_TRUE(result.peaks.empty());
 }
 
-TEST(FfaSearchCpu, FindsCandidateThroughExecutorAndDetection) {
+TEST(FfaSearchCpu, FindsPeaksThroughExecutorAndDetection) {
   const std::vector<float> input{0, 0, 0, 5, 0, 0, 0, 5};
   const auto plan = single_task_plan(input.size());
 
@@ -79,26 +82,12 @@ TEST(FfaSearchCpu, FindsCandidateThroughExecutorAndDetection) {
           .snr_threshold = 0.0F,
       });
 
-  ASSERT_FALSE(result.candidates.empty());
-  EXPECT_EQ(result.candidates.front().width, 1);
-  EXPECT_EQ(result.candidates.front().bins, 2);
+  ASSERT_FALSE(result.peaks.empty());
+  EXPECT_EQ(result.peaks.front().width, 1);
+  EXPECT_EQ(result.peaks.front().bins, 2);
 }
 
-TEST(FfaSearchCpu, LimitsGlobalCandidates) {
-  const std::vector<float> input{1, 0, 2, 0, 3, 0, 4, 0};
-  const auto plan = single_task_plan(input.size());
-
-  const auto result = gaffa::search_ffa_cpu(
-      input, plan,
-      gaffa::FfaSearchOptions{
-          .snr_threshold = 0.0F,
-          .max_candidates = 1,
-      });
-
-  EXPECT_EQ(result.candidates.size(), 1);
-}
-
-TEST(FfaSearchCpu, KeepsBestGlobalCandidatesAcrossBlocks) {
+TEST(FfaSearchCpu, CollectsPeaksAcrossBlocks) {
   const std::vector<float> input{0, 0, 0, 1, 0, 0, 0, 10};
   const gaffa::FfaSearchPlan plan{
       .tasks = {
@@ -112,13 +101,11 @@ TEST(FfaSearchCpu, KeepsBestGlobalCandidatesAcrossBlocks) {
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
-          .max_candidates = 1,
+          .frequency_cluster_radius = 0.0,
       });
 
-  ASSERT_EQ(result.candidates.size(), 1);
-  EXPECT_GT(result.candidates.front().snr, 0.0F);
-  EXPECT_EQ(result.candidates.front().bins, 4);
-  EXPECT_DOUBLE_EQ(result.candidates.front().period, 4.0);
+  ASSERT_GE(result.peaks.size(), 2);
+  EXPECT_GT(result.peaks.front().snr, 0.0F);
 }
 
 TEST(FfaSearchCpu, ReportsDownsampledTaskPeriod) {
@@ -132,13 +119,12 @@ TEST(FfaSearchCpu, ReportsDownsampledTaskPeriod) {
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
-          .max_candidates = 1,
       });
 
-  ASSERT_EQ(result.candidates.size(), 1);
-  EXPECT_EQ(result.candidates.front().bins, 2);
-  EXPECT_EQ(result.candidates.front().width, 1);
-  EXPECT_DOUBLE_EQ(result.candidates.front().period, 4.0);
+  ASSERT_FALSE(result.peaks.empty());
+  EXPECT_EQ(result.peaks.front().bins, 2);
+  EXPECT_EQ(result.peaks.front().width, 1);
+  EXPECT_DOUBLE_EQ(result.peaks.front().period, 4.0);
 }
 
 TEST(FfaSearchCpu, AllowsExternalPlan) {
@@ -154,6 +140,6 @@ TEST(FfaSearchCpu, AllowsExternalPlan) {
           .snr_threshold = 0.0F,
       });
 
-  ASSERT_FALSE(result.candidates.empty());
-  EXPECT_EQ(result.candidates.front().bins, 2);
+  ASSERT_FALSE(result.peaks.empty());
+  EXPECT_EQ(result.peaks.front().bins, 2);
 }

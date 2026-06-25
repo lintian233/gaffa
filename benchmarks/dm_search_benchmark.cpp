@@ -5,6 +5,7 @@
 #include "gaffa/filterbank_view.h"
 #include "gaffa/preprocessing.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -29,7 +30,8 @@ struct Args {
   double dm_step = 1.0;
   double period_min = 0.1;
   double period_max = 1;
-  std::size_t max_candidates = 1024;
+  std::size_t max_peaks = 0;
+  std::size_t print_peaks = 64;
   float snr_threshold = 6.0F;
   std::size_t bins_min = 200;
   std::size_t bins_max = 256;
@@ -51,7 +53,7 @@ void usage(const char* program) {
       << "Usage: " << program
       << " <filterbank.fil> [cpu-subband|cuda-subband]"
       << " [ndm] [dm_low] [dm_step] [period_min] [period_max]"
-      << " [max_candidates] [snr_threshold] [bins_min] [bins_max]"
+      << " [max_peaks] [print_peaks] [snr_threshold] [bins_min] [bins_max]"
       << " [none|normalise|riptide] [running_median_seconds]"
       << " [subband_channels] [ndm_per_nominal]\n";
 }
@@ -75,7 +77,7 @@ float parse_number<float>(const char* value) {
 }
 
 Args parse_args(int argc, char** argv) {
-  if (argc < 2 || argc > 16) {
+  if (argc < 2 || argc > 17) {
     usage(argv[0]);
     throw std::invalid_argument("invalid argument count");
   }
@@ -101,28 +103,31 @@ Args parse_args(int argc, char** argv) {
     args.period_max = parse_number<double>(argv[7]);
   }
   if (argc >= 9) {
-    args.max_candidates = parse_number<std::size_t>(argv[8]);
+    args.max_peaks = parse_number<std::size_t>(argv[8]);
   }
   if (argc >= 10) {
-    args.snr_threshold = parse_number<float>(argv[9]);
+    args.print_peaks = parse_number<std::size_t>(argv[9]);
   }
   if (argc >= 11) {
-    args.bins_min = parse_number<std::size_t>(argv[10]);
+    args.snr_threshold = parse_number<float>(argv[10]);
   }
   if (argc >= 12) {
-    args.bins_max = parse_number<std::size_t>(argv[11]);
+    args.bins_min = parse_number<std::size_t>(argv[11]);
   }
   if (argc >= 13) {
-    args.preprocess = argv[12];
+    args.bins_max = parse_number<std::size_t>(argv[12]);
   }
   if (argc >= 14) {
-    args.running_median_seconds = parse_number<double>(argv[13]);
+    args.preprocess = argv[13];
   }
   if (argc >= 15) {
-    args.subband_channels = parse_number<std::size_t>(argv[14]);
+    args.running_median_seconds = parse_number<double>(argv[14]);
   }
   if (argc >= 16) {
-    args.ndm_per_nominal = parse_number<std::size_t>(argv[15]);
+    args.subband_channels = parse_number<std::size_t>(argv[15]);
+  }
+  if (argc >= 17) {
+    args.ndm_per_nominal = parse_number<std::size_t>(argv[16]);
   }
 
   if (args.dedispersion_backend != "cpu-subband" &&
@@ -140,9 +145,6 @@ Args parse_args(int argc, char** argv) {
   if (!(args.period_min > 0.0) || !(args.period_max > args.period_min) ||
       !std::isfinite(args.period_min) || !std::isfinite(args.period_max)) {
     throw std::invalid_argument("period range must be finite and satisfy 0 < min < max");
-  }
-  if (args.max_candidates == 0) {
-    throw std::invalid_argument("max_candidates must be > 0");
   }
   if (!std::isfinite(args.snr_threshold)) {
     throw std::invalid_argument("snr_threshold must be finite");
@@ -262,7 +264,7 @@ gaffa::DmSearchOptions search_options(const Args& args, double tsamp) {
       },
       .preprocess = preprocess_plan(args, tsamp),
       .snr_threshold = args.snr_threshold,
-      .max_candidates = args.max_candidates,
+      .max_peaks = args.max_peaks,
   };
 }
 
@@ -292,7 +294,8 @@ gaffa::DmSearchResult run_typed_search(const gaffa::FilterbankData& filterbank,
       search_options(args, filterbank.header.tsamp);
   timings.search_seconds = time_once([&] {
     search_result =
-        gaffa::search_dms_cpu(dedispersed, dms, filterbank.header.tsamp, options);
+        gaffa::find_dm_peaks_cpu(dedispersed, dms, filterbank.header.tsamp,
+                                  options);
   });
   return search_result;
 }
@@ -308,18 +311,20 @@ gaffa::DmSearchResult run_search(const gaffa::FilterbankData& filterbank,
       filterbank.samples);
 }
 
-void print_candidate(std::size_t rank, const gaffa::DmCandidate& candidate) {
-  const gaffa::FfaCandidate& ffa = candidate.ffa;
-  std::cout << "candidate"
+void print_peak(std::size_t rank, const gaffa::DmPeak& dm_peak) {
+  const gaffa::FfaPeak& peak = dm_peak.peak;
+  std::cout << "peak"
             << " rank=" << rank
-            << " dm=" << candidate.dm
-            << " dm_index=" << candidate.dm_index
-            << " snr=" << ffa.snr
-            << " period=" << ffa.period
-            << " width=" << ffa.width
-            << " phase=" << ffa.phase
-            << " shift=" << ffa.shift
-            << " bins=" << ffa.bins << '\n';
+            << " dm=" << dm_peak.dm
+            << " dm_index=" << dm_peak.dm_index
+            << " snr=" << peak.snr
+            << " period=" << peak.period
+            << " frequency=" << peak.frequency
+            << " width=" << peak.width
+            << " duty_cycle=" << peak.duty_cycle
+            << " phase=" << peak.phase
+            << " shift=" << peak.shift
+            << " bins=" << peak.bins << '\n';
 }
 
 void print_report(const Args& args,
@@ -346,15 +351,21 @@ void print_report(const Args& args,
             << " bins_max=" << args.bins_max
             << " preprocess=" << args.preprocess
             << " snr_threshold=" << args.snr_threshold
-            << " max_candidates=" << args.max_candidates << '\n';
+            << " max_peaks=" << args.max_peaks
+            << " print_peaks=" << args.print_peaks << '\n';
   std::cout << "timing"
             << " read_seconds=" << timings.read_seconds
             << " dedisperse_seconds=" << timings.dedisperse_seconds
             << " search_seconds=" << timings.search_seconds
             << " total_seconds=" << timings.total_seconds << '\n';
-  std::cout << "result candidates=" << result.candidates.size() << '\n';
-  for (std::size_t rank = 0; rank < result.candidates.size(); ++rank) {
-    print_candidate(rank, result.candidates[rank]);
+  std::cout << "result peaks=" << result.peaks.size() << '\n';
+  const std::size_t print_count = std::min(args.print_peaks, result.peaks.size());
+  for (std::size_t rank = 0; rank < print_count; ++rank) {
+    print_peak(rank, result.peaks[rank]);
+  }
+  if (print_count < result.peaks.size()) {
+    std::cout << "result peaks_omitted=" << result.peaks.size() - print_count
+              << '\n';
   }
   std::cout << "dm_search_end\n";
 }

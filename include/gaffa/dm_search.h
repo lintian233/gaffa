@@ -1,7 +1,7 @@
 #pragma once
 
 #include "gaffa/dedispersion.h"
-#include "gaffa/ffa_candidate.h"
+#include "gaffa/ffa_peak.h"
 #include "gaffa/ffa_plan.h"
 #include "gaffa/ffa_search.h"
 #include "gaffa/preprocessing.h"
@@ -13,21 +13,24 @@
 
 namespace gaffa {
 
-struct DmCandidate {
+struct DmPeak {
   double dm = 0.0;
   std::size_t dm_index = 0;
-  FfaCandidate ffa{};
+  FfaPeak peak{};
 };
 
 struct DmSearchOptions {
   RiptideFfaPlanOptions plan{};
   PreprocessPlan preprocess{};
   float snr_threshold = 6.0F;
-  std::size_t max_candidates = 1024;
+  // Frequency clustering radius in Fourier-bin units. This is converted to Hz
+  // inside each FFA task as frequency_cluster_radius / observation_seconds.
+  double frequency_cluster_radius = 0.1;
+  std::size_t max_peaks = 0;
 };
 
 struct DmSearchResult {
-  std::vector<DmCandidate> candidates;
+  std::vector<DmPeak> peaks;
 };
 
 TimeSeries dm_time_series_cpu(const DedispersedResult<std::uint32_t>& input,
@@ -38,17 +41,17 @@ TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
                               std::size_t dm_index,
                               double tsamp);
 
-// Searches every DM row in an eager host dedispersion result. The FFA core stays
-// one-dimensional; this wrapper only extracts each DM time series, optionally
-// applies preprocessing, runs FFA search, and attaches DM metadata.
-DmSearchResult search_dms_cpu(const DedispersedResult<std::uint32_t>& input,
-                              std::span<const double> dms,
-                              double tsamp,
-                              const DmSearchOptions& options);
+// Finds significant FFA peaks for every DM row in an eager host dedispersion
+// result. This layer deliberately does not apply a final top-k cap; downstream
+// clustering/candidate selection owns final candidate limiting.
+DmSearchResult find_dm_peaks_cpu(const DedispersedResult<std::uint32_t>& input,
+                                 std::span<const double> dms,
+                                 double tsamp,
+                                 const DmSearchOptions& options);
 
-DmSearchResult search_dms_cpu(const DedispersedResult<float>& input,
-                              std::span<const double> dms,
-                              double tsamp,
-                              const DmSearchOptions& options);
+DmSearchResult find_dm_peaks_cpu(const DedispersedResult<float>& input,
+                                 std::span<const double> dms,
+                                 double tsamp,
+                                 const DmSearchOptions& options);
 
 }  // namespace gaffa
