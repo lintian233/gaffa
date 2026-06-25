@@ -97,6 +97,30 @@ TEST(DmSearch, LimitsGlobalCandidates) {
   EXPECT_EQ(result.candidates.front().dm_index, 1);
 }
 
+TEST(DmSearch, ParallelPathKeepsBestGlobalCandidates) {
+  const gaffa::DedispersedResult<float> input{
+      .data = {
+          0.0F, 0.0F, 0.0F, 2.0F, 0.0F, 0.0F, 0.0F, 2.0F,
+          0.0F, 0.0F, 0.0F, 4.0F, 0.0F, 0.0F, 0.0F, 4.0F,
+          0.0F, 0.0F, 0.0F, 6.0F, 0.0F, 0.0F, 0.0F, 6.0F,
+          0.0F, 0.0F, 0.0F, 8.0F, 0.0F, 0.0F, 0.0F, 8.0F,
+          0.0F, 0.0F, 0.0F, 10.0F, 0.0F, 0.0F, 0.0F, 10.0F,
+      },
+      .shape = {.ndm = 5, .nsamples = 8},
+  };
+  const std::vector<double> dms{10.0, 20.0, 30.0, 40.0, 50.0};
+
+  const auto result =
+      gaffa::search_dms_cpu(input, dms, 1.0, small_search_options(2));
+
+  ASSERT_EQ(result.candidates.size(), 2);
+  EXPECT_EQ(result.candidates[0].dm_index, 4);
+  EXPECT_DOUBLE_EQ(result.candidates[0].dm, 50.0);
+  EXPECT_EQ(result.candidates[1].dm_index, 3);
+  EXPECT_DOUBLE_EQ(result.candidates[1].dm, 40.0);
+  EXPECT_GE(result.candidates[0].ffa.snr, result.candidates[1].ffa.snr);
+}
+
 TEST(DmSearch, RejectsInvalidInputs) {
   const gaffa::DedispersedResult<float> input{
       .data = {0.0F, 1.0F, 0.0F, 1.0F},
