@@ -84,11 +84,6 @@ void validate_dm_search_inputs(DedispersedShape shape,
   if (!std::isfinite(options.snr_threshold)) {
     throw std::invalid_argument("DM search S/N threshold must be finite");
   }
-  if (options.frequency_cluster_radius < 0.0 ||
-      !std::isfinite(options.frequency_cluster_radius)) {
-    throw std::invalid_argument(
-        "DM search frequency_cluster_radius must be finite and >= 0");
-  }
 }
 
 bool is_better_dm_peak(const DmPeak& lhs, const DmPeak& rhs) {
@@ -154,7 +149,6 @@ DmSearchResult find_dm_peaks_impl(const DedispersedResult<T>& input,
 
   const FfaSearchOptions ffa_options{
       .snr_threshold = options.snr_threshold,
-      .frequency_cluster_radius = options.frequency_cluster_radius,
       .max_peaks = options.max_peaks,
   };
   const FfaSearchPlan ffa_plan =

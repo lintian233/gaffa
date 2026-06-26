@@ -276,23 +276,24 @@ gaffa::DmSearchOptions search_options(const Args& args, double tsamp) {
   };
 }
 
-gaffa::CandidateSelectionOptions candidate_options(const Args& args) {
+gaffa::CandidateSelectionOptions candidate_options() {
   return gaffa::CandidateSelectionOptions{
       .frequency_cluster_radius = 0.1,
-      .dm_cluster_radius = 1,
+      .dm_cluster_radius = 50,
       .cluster_across_widths = true,
-      .max_candidates = args.max_candidates,
+      .max_candidates = 0,
   };
 }
 
 gaffa::HarmonicOptions harmonic_options() {
   return gaffa::HarmonicOptions{
-      .max_harmonic = 16,
-      .denominator_max = 5,
+      .max_harmonic = 32,
+      .denominator_max = 100,
       .frequency_tolerance_bins = 1.5,
       .phase_distance_max = 1.0,
       .dm_distance_max = 3.0,
       .use_snr_consistency = false,
+      .snr_distance_max = 3.0,
   };
 }
 
@@ -417,6 +418,7 @@ void print_report(const Args& args,
                   const std::vector<gaffa::Candidate>& filtered_candidates,
                   const Timings& timings) {
   const gaffa::FilterbankHeader& header = filterbank.header;
+  const gaffa::HarmonicOptions harmonic = harmonic_options();
   std::cout << "dm_search_begin"
             << " file=" << args.path
             << " dedispersion_backend=" << args.dedispersion_backend
@@ -438,6 +440,14 @@ void print_report(const Args& args,
             << " snr_threshold=" << args.snr_threshold
             << " max_peaks=" << args.max_peaks
             << " max_candidates=" << args.max_candidates
+            << " harmonic_max_harmonic=" << harmonic.max_harmonic
+            << " harmonic_denominator_max=" << harmonic.denominator_max
+            << " harmonic_frequency_tolerance_bins="
+            << harmonic.frequency_tolerance_bins
+            << " harmonic_phase_distance_max=" << harmonic.phase_distance_max
+            << " harmonic_dm_distance_max=" << harmonic.dm_distance_max
+            << " harmonic_use_snr_consistency="
+            << harmonic.use_snr_consistency
             << " print_peaks=" << args.print_peaks << '\n';
   std::cout << "timing"
             << " read_seconds=" << timings.read_seconds
@@ -512,7 +522,7 @@ int main(int argc, char** argv) {
       candidates = gaffa::select_candidates_cpu(
           result.peaks,
           filterbank.header.tsamp * static_cast<double>(filterbank.header.nsamples),
-          candidate_options(args));
+          candidate_options());
     });
     std::vector<gaffa::HarmonicCandidate> flagged_candidates;
     std::vector<gaffa::Candidate> filtered_candidates;

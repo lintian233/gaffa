@@ -46,12 +46,6 @@ TEST(FfaSearchCpu, RejectsInvalidOptions) {
                        .snr_threshold = INFINITY,
                    }),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::search_ffa_cpu(
-                   input, plan,
-                   gaffa::FfaSearchOptions{
-                       .frequency_cluster_radius = -1.0,
-                   }),
-               std::invalid_argument);
 
   auto empty_widths = plan;
   empty_widths.width_trials.clear();
@@ -101,7 +95,6 @@ TEST(FfaSearchCpu, CollectsPeaksAcrossBlocks) {
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
-          .frequency_cluster_radius = 0.0,
       });
 
   ASSERT_GE(result.peaks.size(), 2);

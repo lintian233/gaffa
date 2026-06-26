@@ -23,9 +23,6 @@ struct DmSearchOptions {
   RiptideFfaPlanOptions plan{};
   PreprocessPlan preprocess{};
   float snr_threshold = 6.0F;
-  // Frequency clustering radius in Fourier-bin units. This is converted to Hz
-  // inside each FFA task as frequency_cluster_radius / observation_seconds.
-  double frequency_cluster_radius = 0.1;
   std::size_t max_peaks = 0;
 };
 

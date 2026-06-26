@@ -143,11 +143,6 @@ TEST(DmSearch, RejectsInvalidInputs) {
   EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(input, dms, 1.0, bad_options),
                std::invalid_argument);
 
-  bad_options = options;
-  bad_options.frequency_cluster_radius = -1.0;
-  EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(input, dms, 1.0, bad_options),
-               std::invalid_argument);
-
   EXPECT_THROW((void)gaffa::dm_time_series_cpu(input, 1, 1.0),
                std::out_of_range);
 }

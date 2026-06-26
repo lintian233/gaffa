@@ -108,11 +108,6 @@ TEST(FfaDetectionCpu, RejectsInvalidStdnoiseAndOptions) {
                    transform, shape, task, widths, 1.0F,
                    gaffa::FfaDetectionOptions{.snr_threshold = INFINITY}),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::find_ffa_peaks_cpu(
-                   transform, shape, task, widths, 1.0F,
-                   gaffa::FfaDetectionOptions{
-                       .frequency_cluster_radius = -1.0}),
-               std::invalid_argument);
 }
 
 TEST(FfaDetectionCpu, RejectsInvalidWidths) {
@@ -189,7 +184,6 @@ TEST(FfaDetectionCpu, ComputesPeriodFromTaskRowsNotRowsEval) {
       transform, shape, task, widths, 1.0F,
       gaffa::FfaDetectionOptions{
           .snr_threshold = 0.0F,
-          .frequency_cluster_radius = 0.0,
       });
 
   ASSERT_FALSE(peaks.empty());
@@ -214,7 +208,6 @@ TEST(FfaDetectionCpu, SortsPeaksBySnrDescending) {
       transform, shape, task, widths, 1.0F,
       gaffa::FfaDetectionOptions{
           .snr_threshold = 0.0F,
-          .frequency_cluster_radius = 0.0,
       });
 
   ASSERT_EQ(peaks.size(), 2);
@@ -222,7 +215,7 @@ TEST(FfaDetectionCpu, SortsPeaksBySnrDescending) {
   EXPECT_EQ(peaks[0].shift, 1);
 }
 
-TEST(FfaDetectionCpu, ClustersAdjacentFrequencyTrialsWithinWidth) {
+TEST(FfaDetectionCpu, ReturnsRawAdjacentFrequencyTrialsWithinWidth) {
   const gaffa::FfaTransformShape shape{.rows = 3, .bins = 4};
   const std::vector<float> transform{
       0.0F, 0.0F, 2.0F, 0.0F,
@@ -236,10 +229,9 @@ TEST(FfaDetectionCpu, ClustersAdjacentFrequencyTrialsWithinWidth) {
       transform, shape, task, widths, 1.0F,
       gaffa::FfaDetectionOptions{
           .snr_threshold = 0.0F,
-          .frequency_cluster_radius = 10.0,
       });
 
-  ASSERT_EQ(peaks.size(), 1);
+  ASSERT_EQ(peaks.size(), 3);
   EXPECT_EQ(peaks.front().shift, 1);
 }
 

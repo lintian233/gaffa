@@ -25,12 +25,6 @@ struct BoxcarTrial {
   double duty_cycle = 0.0;
 };
 
-struct ActiveWidthCluster {
-  bool active = false;
-  double previous_frequency = 0.0;
-  FfaPeak best{};
-};
-
 std::size_t checked_block_size(FfaTransformShape shape) {
   if (shape.rows == 0) {
     throw std::invalid_argument("FFA detection rows must be > 0");
@@ -111,11 +105,6 @@ void validate_detection_arguments(std::span<const float> transform,
     throw std::invalid_argument(
         "FFA detection S/N threshold must be finite");
   }
-  if (options.frequency_cluster_radius < 0.0 ||
-      !std::isfinite(options.frequency_cluster_radius)) {
-    throw std::invalid_argument(
-        "FFA detection frequency_cluster_radius must be finite and >= 0");
-  }
   validate_width_trials(width_trials, shape.bins);
 }
 
@@ -128,19 +117,6 @@ double trial_period(const FfaSearchTask& task, std::size_t shift) {
   return task.effective_tsamp * bins * bins /
          (bins - static_cast<double>(shift) /
                      static_cast<double>(task.rows - 1));
-}
-
-double observation_seconds(const FfaSearchTask& task) {
-  return task.effective_tsamp * static_cast<double>(task.prepared_nsamples);
-}
-
-double frequency_cluster_radius_hz(const FfaSearchTask& task,
-                                   const FfaDetectionOptions& options) {
-  const double tobs = observation_seconds(task);
-  if (!(tobs > 0.0) || !std::isfinite(tobs)) {
-    throw std::invalid_argument("FFA detection observation time must be finite and > 0");
-  }
-  return options.frequency_cluster_radius / tobs;
 }
 
 void append_peak_with_guard(std::vector<FfaPeak>& peaks,
@@ -212,55 +188,6 @@ FfaPeak make_peak(const BoxcarTrial& trial,
   };
 }
 
-void flush_cluster(ActiveWidthCluster& cluster,
-                   std::vector<FfaPeak>& peaks,
-                   const FfaDetectionOptions& options) {
-  if (!cluster.active) {
-    return;
-  }
-  append_peak_with_guard(peaks, cluster.best, options);
-  cluster.active = false;
-}
-
-void update_cluster(ActiveWidthCluster& cluster,
-                    const FfaPeak& peak,
-                    double cluster_radius_hz,
-                    std::vector<FfaPeak>& peaks,
-                    const FfaDetectionOptions& options) {
-  if (!cluster.active) {
-    cluster = ActiveWidthCluster{
-        .active = true,
-        .previous_frequency = peak.frequency,
-        .best = peak,
-    };
-    return;
-  }
-
-  if (std::abs(cluster.previous_frequency - peak.frequency) <=
-      cluster_radius_hz) {
-    if (is_better_ffa_peak(peak, cluster.best)) {
-      cluster.best = peak;
-    }
-    cluster.previous_frequency = peak.frequency;
-    return;
-  }
-
-  flush_cluster(cluster, peaks, options);
-  cluster = ActiveWidthCluster{
-      .active = true,
-      .previous_frequency = peak.frequency,
-      .best = peak,
-  };
-}
-
-void flush_clusters(std::vector<ActiveWidthCluster>& clusters,
-                    std::vector<FfaPeak>& peaks,
-                    const FfaDetectionOptions& options) {
-  for (auto& cluster : clusters) {
-    flush_cluster(cluster, peaks, options);
-  }
-}
-
 }  // namespace
 
 std::vector<FfaPeak> find_ffa_peaks_cpu(
@@ -276,18 +203,14 @@ std::vector<FfaPeak> find_ffa_peaks_cpu(
   std::vector<FfaPeak> peaks;
   const std::vector<BoxcarTrial> boxcar_trials =
       make_boxcar_trials(width_trials, shape.bins);
-  std::vector<ActiveWidthCluster> active_clusters(boxcar_trials.size());
   const std::size_t max_width = std::max_element(
       boxcar_trials.begin(), boxcar_trials.end(),
       [](const BoxcarTrial& lhs, const BoxcarTrial& rhs) {
         return lhs.width < rhs.width;
       })->width;
   std::vector<float> circular_prefix(shape.bins + max_width + 1, 0.0F);
-  const double cluster_radius_hz = frequency_cluster_radius_hz(task, options);
   const float inv_stdnoise = 1.0F / stdnoise;
 
-  // Trial frequency is monotonic over shift within one FFA task, so each width
-  // can be clustered online without storing every above-threshold trial.
   for (std::size_t shift = 0; shift < shape.rows; ++shift) {
     const auto row = transform.subspan(shift * shape.bins, shape.bins);
     const float profile_sum =
@@ -298,15 +221,13 @@ std::vector<FfaPeak> find_ffa_peaks_cpu(
       const BoxcarPeak boxcar = scan_boxcar_peak(
           trial, circular_prefix, shape.bins, profile_sum, inv_stdnoise);
       if (boxcar.snr >= options.snr_threshold) {
-        update_cluster(active_clusters[trial.width_index],
-                       make_peak(trial, boxcar, period, frequency, shift,
-                                 shape.bins),
-                       cluster_radius_hz, peaks, options);
+        append_peak_with_guard(
+            peaks, make_peak(trial, boxcar, period, frequency, shift,
+                             shape.bins),
+            options);
       }
     }
   }
-
-  flush_clusters(active_clusters, peaks, options);
 
   sort_ffa_peaks(peaks);
   return peaks;

@@ -15,11 +15,6 @@ void validate_search_inputs(const FfaSearchPlan& plan,
     throw std::invalid_argument(
         "FFA search S/N threshold must be finite");
   }
-  if (options.frequency_cluster_radius < 0.0 ||
-      !std::isfinite(options.frequency_cluster_radius)) {
-    throw std::invalid_argument(
-        "FFA search frequency_cluster_radius must be finite and >= 0");
-  }
   if (plan.width_trials.empty()) {
     throw std::invalid_argument(
         "FFA search plan width_trials must not be empty");
@@ -46,7 +41,6 @@ FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
   std::vector<FfaPeak> peaks;
   const FfaDetectionOptions detection_options{
       .snr_threshold = options.snr_threshold,
-      .frequency_cluster_radius = options.frequency_cluster_radius,
       .max_peaks = options.max_peaks,
   };
 

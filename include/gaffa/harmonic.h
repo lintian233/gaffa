@@ -21,6 +21,9 @@ struct HarmonicContext {
 
 struct HarmonicOptions {
   std::size_t max_harmonic = 16;
+  // This flags harmonically related candidates, not only strict higher-frequency
+  // harmonics. A weaker lower-frequency candidate may be flagged when it is
+  // rationally related to a stronger parent.
   // Keep the default conservative: low-order fractional harmonics are useful
   // diagnostics, while high-denominator ratios can turn ordinary nearby
   // candidates into apparent harmonics.
