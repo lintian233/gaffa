@@ -418,6 +418,7 @@ void print_report(const Args& args,
                   const std::vector<gaffa::Candidate>& filtered_candidates,
                   const Timings& timings) {
   const gaffa::FilterbankHeader& header = filterbank.header;
+  const gaffa::CandidateSelectionOptions candidate = candidate_options();
   const gaffa::HarmonicOptions harmonic = harmonic_options();
   std::cout << "dm_search_begin"
             << " file=" << args.path
@@ -440,6 +441,13 @@ void print_report(const Args& args,
             << " snr_threshold=" << args.snr_threshold
             << " max_peaks=" << args.max_peaks
             << " max_candidates=" << args.max_candidates
+            << " candidate_frequency_cluster_radius="
+            << candidate.frequency_cluster_radius
+            << " candidate_dm_cluster_radius="
+            << candidate.dm_cluster_radius
+            << " candidate_cluster_across_widths="
+            << candidate.cluster_across_widths
+            << " candidate_max_candidates=" << candidate.max_candidates
             << " harmonic_max_harmonic=" << harmonic.max_harmonic
             << " harmonic_denominator_max=" << harmonic.denominator_max
             << " harmonic_frequency_tolerance_bins="

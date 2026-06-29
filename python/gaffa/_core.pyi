@@ -1,0 +1,420 @@
+"""Type stubs for the compiled gaffa extension module.
+
+Most users should import from public Python modules such as ``gaffa.io`` and
+``gaffa.dedispersion`` instead of importing ``gaffa._core`` directly.
+"""
+
+from __future__ import annotations
+
+from enum import Enum
+from os import PathLike
+from typing import Literal, Sequence, TypeAlias
+
+import numpy as np
+from numpy.typing import NDArray
+
+PathLikeStr: TypeAlias = str | PathLike[str]
+Backend: TypeAlias = Literal["cpu", "cuda"]
+ChannelOrder: TypeAlias = Literal["frequency_ascending", "preserve_file_order"]
+ReverseBackendName: TypeAlias = Literal["auto", "cpu_scalar", "cpu_openmp"]
+FilterbankArray: TypeAlias = (
+    NDArray[np.uint8] | NDArray[np.uint16] | NDArray[np.float32]
+)
+DedispersedArray: TypeAlias = NDArray[np.uint32] | NDArray[np.float32]
+
+
+class ChannelOrderPolicy(Enum):
+    """Channel ordering policy used when reading filterbank files."""
+
+    FrequencyAscending: ChannelOrderPolicy
+    """Normalize channels so frequency increases along the channel axis."""
+
+    PreserveFileOrder: ChannelOrderPolicy
+    """Keep the channel order stored in the input file."""
+
+
+class ReverseBackend(Enum):
+    """CPU backend used for channel reversal during filterbank loading."""
+
+    Auto: ReverseBackend
+    """Choose the channel reversal implementation automatically."""
+
+    CpuScalar: ReverseBackend
+    """Use the scalar CPU reversal path."""
+
+    CpuOpenmp: ReverseBackend
+    """Use the OpenMP CPU reversal path when OpenMP is available."""
+
+
+class FilterbankHeader:
+    """Parsed SIGPROC filterbank header.
+
+    The numeric fields mirror the filterbank header. Frequencies are in MHz,
+    ``tsamp`` is in seconds, and ``frequency_table`` contains one frequency per
+    channel in the same order as ``Filterbank.data``.
+    """
+
+    header_size: int
+    """Header size in bytes."""
+
+    nsamples: int
+    """Number of time samples in the data section."""
+
+    telescope_id: int
+    machine_id: int
+    data_type: int
+    barycentric: int
+    pulsarcentric: int
+    ibeam: int
+    nbeams: int
+    npuls: int
+    nbins: int
+    nbits: int
+    """Number of bits per input sample: currently 8, 16, or 32."""
+
+    nifs: int
+    """Number of IF/polarisation streams. Dedispersion currently requires 1."""
+
+    nchans: int
+    """Number of frequency channels."""
+
+    az_start: float
+    za_start: float
+    src_raj: float
+    src_dej: float
+    tstart: float
+    tsamp: float
+    """Sampling interval in seconds."""
+
+    fch1: float
+    """Frequency of the first stored channel in MHz."""
+
+    foff: float
+    """Frequency offset between adjacent channels in MHz."""
+
+    refdm: float
+    period: float
+    rawdatafile: str
+    source_name: str
+    frequency_table: list[float]
+    """Per-channel frequencies in MHz, aligned with ``Filterbank.data``."""
+
+    uses_frequency_table: bool
+    """Whether the file provided an explicit frequency table."""
+
+    def __repr__(self) -> str: ...
+
+
+class Filterbank:
+    """In-memory SIGPROC filterbank.
+
+    ``data`` is a NumPy array with shape ``(nsamples, nifs, nchans)``. By
+    default, channels are normalized to ascending frequency order. Use
+    ``channel_order="preserve_file_order"`` when the on-disk channel order must
+    be kept exactly.
+    """
+
+    header: FilterbankHeader
+    """Parsed filterbank header."""
+
+    data: FilterbankArray
+    """Sample array with shape ``(nsamples, nifs, nchans)``."""
+
+    def __init__(
+        self,
+        path: PathLikeStr,
+        *,
+        channel_order: ChannelOrder = "frequency_ascending",
+        reverse_backend: ReverseBackendName = "auto",
+        io_buffer_bytes: int = 67_108_864,
+        openmp_min_rows: int = 4096,
+    ) -> None:
+        """Read a SIGPROC filterbank file into host memory.
+
+        Parameters
+        ----------
+        path
+            Input filterbank path.
+        channel_order
+            ``"frequency_ascending"`` normalizes the channel axis to ascending
+            frequency. ``"preserve_file_order"`` keeps the file order.
+        reverse_backend
+            Backend used when channel reversal is needed.
+        io_buffer_bytes
+            Host I/O buffer size used while reading sample data.
+        openmp_min_rows
+            Minimum row count before the OpenMP reversal path is used.
+
+        Raises
+        ------
+        ValueError
+            If an option value is not recognized.
+        RuntimeError
+            If the file cannot be read or the header/data layout is invalid.
+        """
+        ...
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        """Alias for ``data.shape``."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype[np.generic]:
+        """Alias for ``data.dtype``."""
+        ...
+
+    @property
+    def nbytes(self) -> int:
+        """Alias for ``data.nbytes``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class DedispersedResult:
+    """Host-resident dedispersed time series.
+
+    ``data`` has shape ``(ndm, nsamples)``. Integer filterbank inputs produce
+    ``uint32`` output; ``float32`` inputs produce ``float32`` output.
+    """
+
+    data: DedispersedArray
+    """Dedispersed time series with shape ``(ndm, nsamples)``."""
+
+    backend: str
+    """Backend that produced the result: ``"cpu"`` or ``"cuda"``."""
+
+    dm_low: float
+    """First DM represented by the result."""
+
+    dm_step: float
+    """DM spacing between adjacent rows. Single-DM results use 0."""
+
+    ndm: int
+    """Number of DM rows in ``data``."""
+
+    nsamples: int
+    """Number of time samples per DM row."""
+
+    tsamp: float
+    """Sampling interval in seconds."""
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Alias for ``data.shape``."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype[np.generic]:
+        """Alias for ``data.dtype``."""
+        ...
+
+    @property
+    def nbytes(self) -> int:
+        """Alias for ``data.nbytes``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+def dedisperse_single_dm(
+    filterbank: Filterbank,
+    *,
+    dm: float,
+    backend: Backend = "cpu",
+    device_id: int = 0,
+    threads_per_block: int = 256,
+    time_tile_samples: int = 81920,
+) -> DedispersedResult:
+    """Dedisperse one DM from a loaded filterbank.
+
+    Parameters
+    ----------
+    filterbank
+        Loaded filterbank. The current implementation requires
+        ``filterbank.header.nifs == 1``.
+    dm
+        Dispersion measure to evaluate.
+    backend
+        Execution backend. ``"cuda"`` requires a visible CUDA device and does
+        not fall back to CPU.
+    device_id
+        CUDA device ordinal used when ``backend="cuda"``.
+    threads_per_block
+        CUDA thread block size used when ``backend="cuda"``.
+    time_tile_samples
+        CUDA time-tile length used when ``backend="cuda"``.
+
+    Returns
+    -------
+    DedispersedResult
+        Host-resident result with ``data.shape == (1, nsamples)``.
+
+    Raises
+    ------
+    ValueError
+        If the filterbank shape, backend, or DM plan is invalid.
+    RuntimeError
+        If CUDA execution fails.
+
+    Notes
+    -----
+    Integer filterbank inputs produce ``uint32`` output. ``float32`` input
+    produces ``float32`` output.
+    """
+    ...
+
+
+def dedisperse_multi_dm(
+    filterbank: Filterbank,
+    *,
+    dm_low: float,
+    dm_step: float,
+    ndm: int,
+    backend: Backend = "cpu",
+    device_id: int = 0,
+    threads_per_block: int = 256,
+    time_tile_samples: int = 81920,
+) -> DedispersedResult:
+    """Dedisperse a contiguous DM grid from a loaded filterbank.
+
+    Parameters
+    ----------
+    filterbank
+        Loaded filterbank. The current implementation requires
+        ``filterbank.header.nifs == 1``.
+    dm_low
+        First dispersion measure in the grid.
+    dm_step
+        Positive spacing between adjacent DM trials.
+    ndm
+        Number of DM trials.
+    backend
+        Execution backend. ``"cuda"`` requires a visible CUDA device and does
+        not fall back to CPU.
+    device_id
+        CUDA device ordinal used when ``backend="cuda"``.
+    threads_per_block
+        CUDA thread block size used when ``backend="cuda"``.
+    time_tile_samples
+        CUDA time-tile length used when ``backend="cuda"``.
+
+    Returns
+    -------
+    DedispersedResult
+        Host-resident result with ``data.shape == (ndm, nsamples)``. Output row
+        ``i`` corresponds to ``dm_low + i * dm_step``.
+
+    Raises
+    ------
+    ValueError
+        If the filterbank shape, backend, or DM grid is invalid.
+    RuntimeError
+        If CUDA execution fails.
+
+    Notes
+    -----
+    Integer filterbank inputs produce ``uint32`` output. ``float32`` input
+    produces ``float32`` output.
+    """
+    ...
+
+
+def dedisperse_subband(
+    filterbank: Filterbank,
+    *,
+    dm_low: float,
+    dm_step: float,
+    ndm: int,
+    backend: Backend = "cuda",
+    subband_channels: int = 32,
+    ndm_per_nominal: int = 32,
+    device_id: int = 0,
+    threads_per_block: int = 256,
+    time_tile_samples: int = 81920,
+) -> DedispersedResult:
+    """Dedisperse a contiguous DM grid with the subband method.
+
+    Parameters
+    ----------
+    filterbank
+        Loaded filterbank. The current implementation requires
+        ``filterbank.header.nifs == 1``.
+    dm_low
+        First dispersion measure in the grid.
+    dm_step
+        Positive spacing between adjacent DM trials.
+    ndm
+        Number of DM trials.
+    backend
+        Execution backend. ``"cuda"`` requires a visible CUDA device and does
+        not fall back to CPU.
+    subband_channels
+        Number of adjacent frequency channels grouped into each subband.
+    ndm_per_nominal
+        Number of adjacent DM trials sharing one nominal subband stage.
+    device_id
+        CUDA device ordinal used when ``backend="cuda"``.
+    threads_per_block
+        CUDA thread block size used when ``backend="cuda"``.
+    time_tile_samples
+        CUDA time-tile length used when ``backend="cuda"``.
+
+    Returns
+    -------
+    DedispersedResult
+        Host-resident result with ``data.shape == (ndm, nsamples)``.
+
+    Raises
+    ------
+    ValueError
+        If the filterbank shape, backend, DM grid, or subband options are
+        invalid.
+    RuntimeError
+        If CUDA execution fails.
+
+    Notes
+    -----
+    This is the preferred CUDA-facing many-DM API. Integer filterbank inputs
+    produce ``uint32`` output. ``float32`` input produces ``float32`` output.
+    """
+    ...
+
+
+def vector_add(lhs: Sequence[float], rhs: Sequence[float]) -> list[float]:
+    """Add two equally sized float sequences with the CUDA demo kernel.
+
+    Parameters
+    ----------
+    lhs, rhs
+        Input sequences with equal length.
+
+    Returns
+    -------
+    list[float]
+        Elementwise sum.
+    """
+    ...
+
+
+def cuda_device_count() -> int:
+    """Return the number of CUDA devices visible to the runtime.
+
+    Returns
+    -------
+    int
+        Visible CUDA device count.
+    """
+    ...
+
+
+def cuda_runtime_version() -> int:
+    """Return the CUDA runtime version.
+
+    Returns
+    -------
+    int
+        CUDA runtime version encoded as an integer, for example ``12080``.
+    """
+    ...

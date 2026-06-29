@@ -201,6 +201,9 @@ std::vector<FfaPeak> find_ffa_peaks_cpu(
                                options);
 
   std::vector<FfaPeak> peaks;
+  if (options.max_peaks != 0) {
+    peaks.reserve(options.max_peaks);
+  }
   const std::vector<BoxcarTrial> boxcar_trials =
       make_boxcar_trials(width_trials, shape.bins);
   const std::size_t max_width = std::max_element(

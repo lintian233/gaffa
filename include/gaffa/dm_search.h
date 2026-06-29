@@ -23,6 +23,7 @@ struct DmSearchOptions {
   RiptideFfaPlanOptions plan{};
   PreprocessPlan preprocess{};
   float snr_threshold = 6.0F;
+  // 0 means unbounded. Applied per DM and per FFA block as a raw peak guard.
   std::size_t max_peaks = 0;
 };
 

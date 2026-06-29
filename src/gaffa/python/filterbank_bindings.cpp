@@ -20,11 +20,6 @@ namespace py = pybind11;
 
 namespace {
 
-struct PyFilterbank {
-  gaffa::FilterbankHeader header;
-  py::array data;
-};
-
 gaffa::ChannelOrderPolicy parse_channel_order(const std::string& value) {
   if (value == "frequency_ascending") {
     return gaffa::ChannelOrderPolicy::FrequencyAscending;
@@ -84,7 +79,7 @@ py::array make_numpy_array(gaffa::FilterbankData&& filterbank) {
       std::move(filterbank.samples));
 }
 
-PyFilterbank read_filterbank_for_python(
+gaffa::python::PyFilterbank read_filterbank_for_python(
     const std::filesystem::path& path,
     const std::string& channel_order,
     const std::string& reverse_backend,
@@ -98,7 +93,7 @@ PyFilterbank read_filterbank_for_python(
 
   gaffa::FilterbankData data = gaffa::read_filterbank(path, options);
 
-  PyFilterbank result;
+  gaffa::python::PyFilterbank result;
   result.header = data.header;
   result.data = make_numpy_array(std::move(data));
   return result;
@@ -112,7 +107,7 @@ std::string filterbank_header_repr(const gaffa::FilterbankHeader& header) {
          " foff=" + std::to_string(header.foff) + ">";
 }
 
-std::string filterbank_repr(const PyFilterbank& filterbank) {
+std::string filterbank_repr(const gaffa::python::PyFilterbank& filterbank) {
   const gaffa::FilterbankHeader& header = filterbank.header;
   return "<Filterbank shape=(" + std::to_string(header.nsamples) + ", " +
          std::to_string(header.nifs) + ", " +
@@ -166,7 +161,7 @@ void bind_filterbank(py::module_& module) {
                     &gaffa::FilterbankHeader::uses_frequency_table)
       .def("__repr__", &filterbank_header_repr);
 
-  py::class_<PyFilterbank>(module, "Filterbank")
+  py::class_<gaffa::python::PyFilterbank>(module, "Filterbank")
       .def(py::init(&read_filterbank_for_python),
            "Read a SIGPROC filterbank file into a Filterbank object.",
            py::arg("path"),
@@ -175,18 +170,18 @@ void bind_filterbank(py::module_& module) {
            py::arg("reverse_backend") = "auto",
            py::arg("io_buffer_bytes") = gaffa::default_filterbank_io_buffer_bytes,
            py::arg("openmp_min_rows") = 4096)
-      .def_readonly("header", &PyFilterbank::header)
-      .def_readonly("data", &PyFilterbank::data)
+      .def_readonly("header", &gaffa::python::PyFilterbank::header)
+      .def_readonly("data", &gaffa::python::PyFilterbank::data)
       .def_property_readonly("shape",
-                             [](const PyFilterbank& filterbank) {
+                             [](const gaffa::python::PyFilterbank& filterbank) {
                                return filterbank.data.attr("shape");
                              })
       .def_property_readonly("dtype",
-                             [](const PyFilterbank& filterbank) {
+                             [](const gaffa::python::PyFilterbank& filterbank) {
                                return filterbank.data.attr("dtype");
                              })
       .def_property_readonly("nbytes",
-                             [](const PyFilterbank& filterbank) {
+                             [](const gaffa::python::PyFilterbank& filterbank) {
                                return filterbank.data.attr("nbytes");
                              })
       .def("__repr__", &filterbank_repr);

@@ -12,6 +12,8 @@ namespace gaffa {
 
 struct FfaDetectionOptions {
   float snr_threshold = 6.0F;
+  // 0 means unbounded. This is a per-call raw peak safety guard before
+  // candidate clustering, not a final candidate limit.
   std::size_t max_peaks = 0;
 };
 

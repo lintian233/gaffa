@@ -11,6 +11,8 @@ namespace gaffa {
 
 struct FfaSearchOptions {
   float snr_threshold = 6.0F;
+  // 0 means unbounded. Applied independently to each FFA block's raw
+  // detection. Final candidate limiting belongs to candidate filtering.
   std::size_t max_peaks = 0;
 };
 
