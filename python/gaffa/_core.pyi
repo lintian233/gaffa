@@ -182,7 +182,7 @@ class DedispersedResult:
     data: DedispersedArray
     """Dedispersed time series with shape ``(ndm, nsamples)``."""
 
-    backend: str
+    backend: Backend
     """Backend that produced the result: ``"cpu"`` or ``"cuda"``."""
 
     dm_low: float

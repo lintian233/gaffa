@@ -11,4 +11,9 @@ from gaffa._core import (
     dedisperse_subband,
 )
 
-__all__: list[str]
+__all__ = [
+    "DedispersedResult",
+    "dedisperse_multi_dm",
+    "dedisperse_single_dm",
+    "dedisperse_subband",
+]
