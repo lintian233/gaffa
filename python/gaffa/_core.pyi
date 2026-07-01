@@ -21,6 +21,9 @@ FilterbankArray: TypeAlias = (
     NDArray[np.uint8] | NDArray[np.uint16] | NDArray[np.float32]
 )
 DedispersedArray: TypeAlias = NDArray[np.uint32] | NDArray[np.float32]
+DedispersedSpectrumArray: TypeAlias = (
+    NDArray[np.uint8] | NDArray[np.uint16] | NDArray[np.float32]
+)
 
 
 class ChannelOrderPolicy(Enum):
@@ -219,6 +222,110 @@ class DedispersedResult:
         ...
 
     def __repr__(self) -> str: ...
+
+
+class DedispersedSpectrum:
+    """Host-resident single-DM aligned dynamic spectrum.
+
+    ``data`` has shape ``(nsamples, nchans)`` and keeps the input sample dtype.
+    The time axis is valid-only: trailing samples that would require
+    out-of-range delayed input samples are omitted. This API materializes the
+    full aligned spectrum in host memory and is intended for diagnostics,
+    visualization, and workflows that explicitly need channel-resolved output.
+    """
+
+    data: DedispersedSpectrumArray
+    """Aligned dynamic spectrum with shape ``(nsamples, nchans)``."""
+
+    backend: Backend
+    """Backend that produced the result: ``"cpu"`` or ``"cuda"``."""
+
+    dm: float
+    """Dispersion measure used for channel alignment. Must be non-negative."""
+
+    nsamples: int
+    """Number of valid time samples."""
+
+    nchans: int
+    """Number of selected frequency channels."""
+
+    tsamp: float
+    """Sampling interval in seconds."""
+
+    chan_begin: int
+    """Inclusive start channel in the source filterbank."""
+
+    chan_end: int
+    """Exclusive end channel in the source filterbank."""
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        """Alias for ``data.shape``."""
+        ...
+
+    @property
+    def dtype(self) -> np.dtype[np.generic]:
+        """Alias for ``data.dtype``."""
+        ...
+
+    @property
+    def nbytes(self) -> int:
+        """Alias for ``data.nbytes``."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+def dedisperse_spectrum(
+    filterbank: Filterbank,
+    *,
+    dm: float,
+    backend: Backend = "cpu",
+    device_id: int = 0,
+    threads_per_block: int = 256,
+    time_tile_samples: int = 81920,
+) -> DedispersedSpectrum:
+    """Dedisperse one DM and return the aligned dynamic spectrum.
+
+    Parameters
+    ----------
+    filterbank
+        Loaded filterbank. The current implementation requires
+        ``filterbank.header.nifs == 1``.
+    dm
+        Non-negative dispersion measure used to align channels.
+    backend
+        Execution backend. ``"cuda"`` requires a visible CUDA device and does
+        not fall back to CPU.
+    device_id
+        CUDA device ordinal used when ``backend="cuda"``.
+    threads_per_block
+        CUDA thread block size used when ``backend="cuda"``.
+    time_tile_samples
+        CUDA time-tile length for tiled algorithms. The current spectrum CUDA
+        path materializes the full aligned spectrum and does not use this value
+        to reduce output memory.
+
+    Returns
+    -------
+    DedispersedSpectrum
+        Host-resident aligned dynamic spectrum with
+        ``data.shape == (nsamples, nchans)``.
+
+    Raises
+    ------
+    ValueError
+        If the filterbank shape, backend, or DM plan is invalid.
+    RuntimeError
+        If CUDA execution fails.
+
+    Notes
+    -----
+    Unlike ``dedisperse_single_dm``, this function does not sum over channels.
+    Integer input dtypes are preserved. Memory use is proportional to
+    ``nsamples * nchans * dtype.itemsize``.
+    """
+    ...
 
 
 def dedisperse_single_dm(

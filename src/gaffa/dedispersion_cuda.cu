@@ -288,6 +288,31 @@ __global__ void single_dm_kernel(OutT* output, const InT* input,
   output[time] = sum;
 }
 
+template <typename T>
+__global__ void spectrum_single_dm_kernel(
+    T* output, const T* input, const std::int32_t* delays,
+    std::size_t input_nsamples, std::size_t output_nsamples,
+    std::size_t input_nchans, std::size_t chan_begin,
+    std::size_t channel_count) {
+  const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
+  const std::size_t total = output_nsamples * channel_count;
+  if (index >= total) {
+    return;
+  }
+
+  const std::size_t time = index / channel_count;
+  const std::size_t channel_offset = index % channel_count;
+  const std::size_t input_channel = chan_begin + channel_offset;
+  const std::int64_t input_time =
+      static_cast<std::int64_t>(time) + delays[channel_offset];
+  if (input_time >= 0 &&
+      input_time < static_cast<std::int64_t>(input_nsamples)) {
+    output[index] =
+        input[static_cast<std::size_t>(input_time) * input_nchans +
+              input_channel];
+  }
+}
+
 template <typename InT, typename OutT>
 __global__ void multi_dm_kernel(OutT* output, const InT* input,
                                 const std::int32_t* delays,
@@ -449,6 +474,57 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cuda_device_imp
   CudaDedispersedResult<OutT> result;
   result.shape = DedispersedShape{1, output_nsamples};
   result.data = std::move(device_output);
+  result.device_id = options.device_id;
+  return result;
+}
+
+template <typename T>
+CudaDedispersedSpectrum<T> dedisperse_spectrum_cuda_device_impl(
+    HostSampleView<T> samples, std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  validate_single_plan(samples, frequency_mhz, plan, options);
+  check_cuda(cudaSetDevice(options.device_id), "cudaSetDevice");
+
+  const std::size_t input_size = samples.size();
+  const std::size_t channel_count = plan.chan_end - plan.chan_begin;
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::single_dm_max_delay(frequency_mhz,
+                                                                plan));
+  const std::size_t output_size =
+      checked_multiply(output_nsamples, channel_count, "dedispersed spectrum");
+  const int threads = static_cast<int>(options.threads_per_block);
+  const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
+  const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
+      std::span<const T>(samples.data, input_size), "copy samples");
+  const CudaDeviceBuffer<double> device_frequency =
+      copy_to_device<double>(std::span<const double>(frequency_copy),
+                             "copy frequency table");
+  CudaDeviceBuffer<std::int32_t> device_delays(channel_count);
+  CudaDeviceBuffer<T> device_output(output_size);
+
+  compute_single_dm_delay_kernel<<<block_count(channel_count,
+                                                options.threads_per_block),
+                                   threads>>>(
+      device_delays.get(), device_frequency.get(), plan.dm,
+      plan.ref_frequency_mhz, plan.tsamp, plan.chan_begin, channel_count);
+  launch_barrier("compute_single_dm_delay_kernel");
+
+  spectrum_single_dm_kernel<T>
+      <<<block_count(output_size, options.threads_per_block), threads>>>(
+          device_output.get(), device_input.get(), device_delays.get(),
+          samples.shape.nsamples, output_nsamples, samples.shape.nchans,
+          plan.chan_begin, channel_count);
+  launch_barrier("spectrum_single_dm_kernel");
+
+  CudaDedispersedSpectrum<T> result;
+  result.shape = SampleShape{output_nsamples, 1, channel_count};
+  result.data = std::move(device_output);
+  result.dm = plan.dm;
+  result.tsamp = plan.tsamp;
+  result.chan_begin = plan.chan_begin;
+  result.chan_end = plan.chan_end;
   result.device_id = options.device_id;
   return result;
 }
@@ -657,6 +733,64 @@ DedispersedResult<float> copy_to_host(
   return copy_to_host_impl(result);
 }
 
+template <typename T>
+DedispersedSpectrum<T> copy_spectrum_to_host_impl(
+    const CudaDedispersedSpectrum<T>& result) {
+  DedispersedSpectrum<T> host;
+  host.shape = result.shape;
+  host.data.resize(result.size());
+  host.dm = result.dm;
+  host.tsamp = result.tsamp;
+  host.chan_begin = result.chan_begin;
+  host.chan_end = result.chan_end;
+  check_cuda(cudaSetDevice(result.device_id), "cudaSetDevice");
+  check_cuda(cudaMemcpy(host.data.data(), result.data.data(), result.bytes(),
+                        cudaMemcpyDeviceToHost),
+             "copy dedispersed spectrum output to host");
+  return host;
+}
+
+DedispersedSpectrum<std::uint8_t> copy_to_host(
+    const CudaDedispersedSpectrum<std::uint8_t>& result) {
+  return copy_spectrum_to_host_impl(result);
+}
+
+DedispersedSpectrum<std::uint16_t> copy_to_host(
+    const CudaDedispersedSpectrum<std::uint16_t>& result) {
+  return copy_spectrum_to_host_impl(result);
+}
+
+DedispersedSpectrum<float> copy_to_host(
+    const CudaDedispersedSpectrum<float>& result) {
+  return copy_spectrum_to_host_impl(result);
+}
+
+DedispersedSpectrum<std::uint8_t> dedisperse_spectrum_cuda(
+    HostSampleView<std::uint8_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return copy_to_host(
+      dedisperse_spectrum_cuda_device(samples, frequency_mhz, plan, options));
+}
+
+DedispersedSpectrum<std::uint16_t> dedisperse_spectrum_cuda(
+    HostSampleView<std::uint16_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return copy_to_host(
+      dedisperse_spectrum_cuda_device(samples, frequency_mhz, plan, options));
+}
+
+DedispersedSpectrum<float> dedisperse_spectrum_cuda(
+    HostSampleView<float> samples, std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return copy_to_host(
+      dedisperse_spectrum_cuda_device(samples, frequency_mhz, plan, options));
+}
+
 DedispersedResult<std::uint32_t> dedisperse_single_dm_cuda(
     HostSampleView<std::uint8_t> samples,
     std::span<const double> frequency_mhz,
@@ -762,6 +896,32 @@ CudaDedispersedResult<float> dedisperse_single_dm_cuda_device(
     const CudaDedispersionOptions& options) {
   return dedisperse_single_dm_cuda_device_impl(samples, frequency_mhz, plan,
                                                options);
+}
+
+CudaDedispersedSpectrum<std::uint8_t> dedisperse_spectrum_cuda_device(
+    HostSampleView<std::uint8_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return dedisperse_spectrum_cuda_device_impl(samples, frequency_mhz, plan,
+                                              options);
+}
+
+CudaDedispersedSpectrum<std::uint16_t> dedisperse_spectrum_cuda_device(
+    HostSampleView<std::uint16_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return dedisperse_spectrum_cuda_device_impl(samples, frequency_mhz, plan,
+                                              options);
+}
+
+CudaDedispersedSpectrum<float> dedisperse_spectrum_cuda_device(
+    HostSampleView<float> samples, std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan,
+    const CudaDedispersionOptions& options) {
+  return dedisperse_spectrum_cuda_device_impl(samples, frequency_mhz, plan,
+                                              options);
 }
 
 CudaDedispersedResult<std::uint32_t> dedisperse_multi_dm_cuda_device(

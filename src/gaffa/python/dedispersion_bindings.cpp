@@ -38,6 +38,17 @@ struct PyDedispersedResult {
   double tsamp = 0.0;
 };
 
+struct PyDedispersedSpectrum {
+  py::array data;
+  std::string backend;
+  double dm = 0.0;
+  std::size_t nsamples = 0;
+  std::size_t nchans = 0;
+  double tsamp = 0.0;
+  std::size_t chan_begin = 0;
+  std::size_t chan_end = 0;
+};
+
 PythonDedispersionBackend parse_backend(const std::string& value) {
   if (value == "cpu") {
     return PythonDedispersionBackend::Cpu;
@@ -156,6 +167,37 @@ PyDedispersedResult make_python_result(gaffa::DedispersedResult<T>&& result,
   return py_result;
 }
 
+template <typename T>
+py::array make_numpy_array(gaffa::DedispersedSpectrum<T>&& result) {
+  auto owner = std::make_unique<std::vector<T>>(std::move(result.data));
+  T* data = owner->data();
+  py::capsule capsule(owner.release(), [](void* pointer) {
+    delete static_cast<std::vector<T>*>(pointer);
+  });
+
+  const auto nsamples = static_cast<py::ssize_t>(result.shape.nsamples);
+  const auto nchans = static_cast<py::ssize_t>(result.shape.nchans);
+  const auto item_size = static_cast<py::ssize_t>(sizeof(T));
+  return py::array_t<T>({nsamples, nchans}, {nchans * item_size, item_size},
+                        data, capsule);
+}
+
+template <typename T>
+PyDedispersedSpectrum make_python_spectrum(
+    gaffa::DedispersedSpectrum<T>&& result, PythonDedispersionBackend backend,
+    double tsamp) {
+  PyDedispersedSpectrum py_result;
+  py_result.nsamples = result.shape.nsamples;
+  py_result.nchans = result.shape.nchans;
+  py_result.backend = backend_name(backend);
+  py_result.dm = result.dm;
+  py_result.tsamp = tsamp;
+  py_result.chan_begin = result.chan_begin;
+  py_result.chan_end = result.chan_end;
+  py_result.data = make_numpy_array(std::move(result));
+  return py_result;
+}
+
 gaffa::SingleDmDedispersionPlan make_single_dm_plan(
     const gaffa::FilterbankHeader& header, double dm) {
   return gaffa::SingleDmDedispersionPlan{
@@ -179,6 +221,36 @@ gaffa::MultiDmDedispersionPlan make_multi_dm_plan(
       .chan_begin = 0,
       .chan_end = static_cast<std::size_t>(header.nchans),
   };
+}
+
+template <typename T>
+PyDedispersedSpectrum dedisperse_spectrum_typed(
+    const gaffa::python::PyFilterbank& filterbank, double dm,
+    PythonDedispersionBackend backend,
+    const gaffa::CudaDedispersionOptions& cuda_options) {
+  const auto samples = typed_sample_view<T>(filterbank);
+  const auto plan = make_single_dm_plan(filterbank.header, dm);
+  if (backend == PythonDedispersionBackend::Cpu) {
+    decltype(gaffa::dedisperse_spectrum_cpu(
+        samples, filterbank.header.frequency_table, plan)) result;
+    {
+      py::gil_scoped_release release;
+      result = gaffa::dedisperse_spectrum_cpu(
+          samples, filterbank.header.frequency_table, plan);
+    }
+    return make_python_spectrum(std::move(result), backend,
+                                filterbank.header.tsamp);
+  }
+
+  decltype(gaffa::dedisperse_spectrum_cuda(
+      samples, filterbank.header.frequency_table, plan, cuda_options)) result;
+  {
+    py::gil_scoped_release release;
+    result = gaffa::dedisperse_spectrum_cuda(
+        samples, filterbank.header.frequency_table, plan, cuda_options);
+  }
+  return make_python_spectrum(std::move(result), backend,
+                              filterbank.header.tsamp);
 }
 
 template <typename T>
@@ -291,6 +363,39 @@ PyDedispersedResult dispatch_filterbank_dtype(
   }
 }
 
+template <typename Func>
+PyDedispersedSpectrum dispatch_filterbank_spectrum_dtype(
+    const gaffa::python::PyFilterbank& filterbank, Func&& func) {
+  validate_filterbank_header(filterbank.header);
+  switch (filterbank.header.nbits) {
+    case 8:
+      return func.template operator()<std::uint8_t>();
+    case 16:
+      return func.template operator()<std::uint16_t>();
+    case 32:
+      return func.template operator()<float>();
+    default:
+      throw py::type_error("unsupported filterbank sample dtype");
+  }
+}
+
+PyDedispersedSpectrum dedisperse_spectrum_for_python(
+    const gaffa::python::PyFilterbank& filterbank, double dm,
+    const std::string& backend, int device_id, std::size_t threads_per_block,
+    std::size_t time_tile_samples) {
+  const PythonDedispersionBackend parsed_backend = parse_backend(backend);
+  const gaffa::CudaDedispersionOptions cuda_options{
+      .device_id = device_id,
+      .threads_per_block = threads_per_block,
+      .time_tile_samples = time_tile_samples,
+  };
+
+  return dispatch_filterbank_spectrum_dtype(filterbank, [&]<typename T>() {
+    return dedisperse_spectrum_typed<T>(filterbank, dm, parsed_backend,
+                                        cuda_options);
+  });
+}
+
 PyDedispersedResult dedisperse_single_dm_for_python(
     const gaffa::python::PyFilterbank& filterbank, double dm,
     const std::string& backend, int device_id, std::size_t threads_per_block,
@@ -353,6 +458,12 @@ std::string dedispersed_result_repr(const PyDedispersedResult& result) {
          std::to_string(result.nsamples) + ") backend=" + result.backend + ">";
 }
 
+std::string dedispersed_spectrum_repr(const PyDedispersedSpectrum& result) {
+  return "<DedispersedSpectrum shape=(" + std::to_string(result.nsamples) +
+         ", " + std::to_string(result.nchans) + ") backend=" + result.backend +
+         ">";
+}
+
 }  // namespace
 
 namespace gaffa::python {
@@ -380,6 +491,36 @@ void bind_dedispersion(py::module_& module) {
                                return result.data.attr("nbytes");
                              })
       .def("__repr__", &dedispersed_result_repr);
+
+  py::class_<PyDedispersedSpectrum>(module, "DedispersedSpectrum")
+      .def_readonly("data", &PyDedispersedSpectrum::data)
+      .def_readonly("backend", &PyDedispersedSpectrum::backend)
+      .def_readonly("dm", &PyDedispersedSpectrum::dm)
+      .def_readonly("nsamples", &PyDedispersedSpectrum::nsamples)
+      .def_readonly("nchans", &PyDedispersedSpectrum::nchans)
+      .def_readonly("tsamp", &PyDedispersedSpectrum::tsamp)
+      .def_readonly("chan_begin", &PyDedispersedSpectrum::chan_begin)
+      .def_readonly("chan_end", &PyDedispersedSpectrum::chan_end)
+      .def_property_readonly("shape",
+                             [](const PyDedispersedSpectrum& result) {
+                               return py::make_tuple(result.nsamples,
+                                                     result.nchans);
+                             })
+      .def_property_readonly("dtype",
+                             [](const PyDedispersedSpectrum& result) {
+                               return result.data.attr("dtype");
+                             })
+      .def_property_readonly("nbytes",
+                             [](const PyDedispersedSpectrum& result) {
+                               return result.data.attr("nbytes");
+                             })
+      .def("__repr__", &dedispersed_spectrum_repr);
+
+  module.def("dedisperse_spectrum", &dedisperse_spectrum_for_python,
+             py::arg("filterbank"), py::kw_only(), py::arg("dm"),
+             py::arg("backend") = "cpu", py::arg("device_id") = 0,
+             py::arg("threads_per_block") = 256,
+             py::arg("time_tile_samples") = 81920);
 
   module.def("dedisperse_single_dm", &dedisperse_single_dm_for_python,
              py::arg("filterbank"), py::kw_only(), py::arg("dm"),

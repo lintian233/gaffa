@@ -73,6 +73,96 @@ TEST(DedispersionCpu, SingleDmTrimsTailByMaxDelay) {
   EXPECT_EQ(result.data, (std::vector<std::uint32_t>{9}));
 }
 
+TEST(DedispersionCpu, SpectrumDmZeroCopiesSelectedChannels) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_begin = 1;
+  plan.chan_end = 3;
+
+  const auto result =
+      gaffa::dedisperse_spectrum_cpu(make_view(samples, 2, 3), frequency, plan);
+
+  EXPECT_EQ(result.shape.nsamples, 2);
+  EXPECT_EQ(result.shape.nifs, 1);
+  EXPECT_EQ(result.shape.nchans, 2);
+  EXPECT_EQ(result.nsamples(), 2);
+  EXPECT_EQ(result.nchans(), 2);
+  EXPECT_EQ(result.size(), 4);
+  EXPECT_EQ(result.dm, 0.0);
+  EXPECT_EQ(result.tsamp, plan.tsamp);
+  EXPECT_EQ(result.chan_begin, 1);
+  EXPECT_EQ(result.chan_end, 3);
+  EXPECT_EQ(result.data, (std::vector<std::uint8_t>{2, 3, 5, 6}));
+}
+
+TEST(DedispersionCpu, SpectrumTrimsTailAndAlignsChannels) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
+  const std::vector<double> frequency{1000.0, 2000.0, 2000.0};
+
+  const auto result = gaffa::dedisperse_spectrum_cpu(
+      make_view(samples, 2, 3), frequency, single_plan(1.0));
+
+  EXPECT_EQ(result.shape.nsamples, 1);
+  EXPECT_EQ(result.shape.nifs, 1);
+  EXPECT_EQ(result.shape.nchans, 3);
+  EXPECT_EQ(result.data, (std::vector<std::uint8_t>{4, 2, 3}));
+}
+
+TEST(DedispersionCpu, SpectrumChannelSumMatchesSingleDm) {
+  const std::vector<std::uint8_t> samples{
+      1,  2,  3,
+      4,  5,  6,
+      7,  8,  9,
+      10, 11, 12,
+  };
+  const std::vector<double> frequency{1000.0, 2000.0, 2000.0};
+
+  const auto spectrum = gaffa::dedisperse_spectrum_cpu(
+      make_view(samples, 4, 3), frequency, single_plan(1.0));
+  const auto single = gaffa::dedisperse_single_dm_cpu(
+      make_view(samples, 4, 3), frequency, single_plan(1.0));
+
+  ASSERT_EQ(single.shape.nsamples, spectrum.shape.nsamples);
+  ASSERT_EQ(spectrum.shape.nchans, 3);
+  for (std::size_t time = 0; time < spectrum.shape.nsamples; ++time) {
+    std::uint32_t sum = 0;
+    for (std::size_t channel = 0; channel < spectrum.shape.nchans; ++channel) {
+      sum += spectrum.data[time * spectrum.shape.nchans + channel];
+    }
+    EXPECT_EQ(single.data[time], sum);
+  }
+}
+
+TEST(DedispersionCpu, SpectrumPreservesInputDtype) {
+  const std::vector<std::uint16_t> samples_u16{1000, 2000, 3000, 4000};
+  const std::vector<float> samples_f32{1.5F, 2.5F, 3.5F, 4.5F};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
+  plan.chan_end = 2;
+
+  const auto result_u16 =
+      gaffa::dedisperse_spectrum_cpu(make_view(samples_u16, 2, 2), frequency,
+                                     plan);
+  const auto result_f32 =
+      gaffa::dedisperse_spectrum_cpu(make_view(samples_f32, 2, 2), frequency,
+                                     plan);
+
+  EXPECT_EQ(result_u16.data, samples_u16);
+  EXPECT_EQ(result_f32.data, samples_f32);
+}
+
+TEST(DedispersionCpu, SpectrumRejectsInvalidPlan) {
+  const std::vector<std::uint8_t> samples{1, 2, 3, 4};
+  const std::vector<double> frequency{1000.0, 2000.0};
+  gaffa::SingleDmDedispersionPlan plan = single_plan(-1.0);
+  plan.chan_end = 2;
+
+  EXPECT_THROW((void)gaffa::dedisperse_spectrum_cpu(
+                   make_view(samples, 2, 2), frequency, plan),
+               std::invalid_argument);
+}
+
 TEST(DedispersionCpu, SupportsUint16OutputAsUint32) {
   const std::vector<std::uint16_t> samples{1000, 2000, 3000, 4000};
   const std::vector<double> frequency{1000.0, 2000.0};

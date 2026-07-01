@@ -6,8 +6,10 @@ import pytest
 import gaffa
 from gaffa.dedispersion import (
     DedispersedResult,
+    DedispersedSpectrum,
     dedisperse_multi_dm,
     dedisperse_single_dm,
+    dedisperse_spectrum,
     dedisperse_subband,
 )
 from gaffa.io import Filterbank
@@ -30,6 +32,33 @@ def test_dedisperse_single_dm_returns_numpy_result() -> None:
     assert result.data.shape == result.shape
     assert result.data.dtype == np.uint32
     assert result.nbytes == result.data.nbytes
+
+
+def test_dedisperse_spectrum_dm_zero_returns_dynamic_spectrum() -> None:
+    fb = Filterbank(BASETEST)
+
+    result = dedisperse_spectrum(fb, dm=0.0, backend="cpu")
+
+    assert isinstance(result, DedispersedSpectrum)
+    assert result.backend == "cpu"
+    assert result.dm == 0.0
+    assert result.nsamples == fb.header.nsamples
+    assert result.nchans == fb.header.nchans
+    assert result.shape == (fb.header.nsamples, fb.header.nchans)
+    assert result.data.shape == result.shape
+    assert result.data.dtype == fb.data.dtype
+    assert result.nbytes == result.data.nbytes
+    np.testing.assert_array_equal(result.data, fb.data[:, 0, :])
+
+
+def test_dedisperse_spectrum_channel_sum_matches_single_dm() -> None:
+    fb = Filterbank(BASETEST)
+
+    spectrum = dedisperse_spectrum(fb, dm=1.0, backend="cpu")
+    single = dedisperse_single_dm(fb, dm=1.0, backend="cpu")
+
+    assert spectrum.nsamples == single.nsamples
+    np.testing.assert_array_equal(spectrum.data.sum(axis=1), single.data[0])
 
 
 def test_dedisperse_multi_dm_matches_single_dm_slices() -> None:
@@ -104,3 +133,16 @@ def test_dedisperse_single_dm_cuda_returns_host_numpy_result() -> None:
     assert result.backend == "cuda"
     assert result.shape == (1, fb.header.nsamples)
     assert result.data.dtype == np.uint32
+
+
+@pytest.mark.skipif(gaffa.cuda_device_count() == 0, reason="CUDA device is not visible")
+def test_dedisperse_spectrum_cuda_matches_cpu() -> None:
+    fb = Filterbank(BASETEST)
+
+    cpu = dedisperse_spectrum(fb, dm=1.0, backend="cpu")
+    cuda = dedisperse_spectrum(fb, dm=1.0, backend="cuda")
+
+    assert cuda.backend == "cuda"
+    assert cuda.shape == cpu.shape
+    assert cuda.data.dtype == cpu.data.dtype
+    np.testing.assert_array_equal(cuda.data, cpu.data)

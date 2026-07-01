@@ -243,6 +243,49 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cpu_impl(
 }
 
 template <typename T>
+DedispersedSpectrum<T> dedisperse_spectrum_cpu_impl(
+    HostSampleView<T> samples, std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan) {
+  validate_single_plan(samples, frequency_mhz, plan);
+
+  const std::size_t channel_count = plan.chan_end - plan.chan_begin;
+  const std::vector<std::int32_t> delays = internal::make_single_dm_delay_table(
+      frequency_mhz, plan.dm, plan.ref_frequency_mhz, plan.tsamp,
+      plan.chan_begin, plan.chan_end);
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::single_dm_max_delay(frequency_mhz,
+                                                                plan));
+
+  DedispersedSpectrum<T> result;
+  result.shape = SampleShape{output_nsamples, 1, channel_count};
+  result.data.resize(checked_output_size(output_nsamples, channel_count));
+  result.dm = plan.dm;
+  result.tsamp = plan.tsamp;
+  result.chan_begin = plan.chan_begin;
+  result.chan_end = plan.chan_end;
+
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static)
+#endif
+  for (std::int64_t time = 0;
+       time < static_cast<std::int64_t>(output_nsamples); ++time) {
+    for (std::int64_t offset = 0;
+         offset < static_cast<std::int64_t>(channel_count); ++offset) {
+      const auto output_time = static_cast<std::size_t>(time);
+      const auto channel_offset = static_cast<std::size_t>(offset);
+      const auto input_time =
+          output_time + static_cast<std::size_t>(delays[channel_offset]);
+      const auto input_channel = plan.chan_begin + channel_offset;
+      result.data[output_time * channel_count + channel_offset] =
+          sample_at(samples, input_time, input_channel);
+    }
+  }
+
+  return result;
+}
+
+template <typename T>
 DedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cpu_impl(
     HostSampleView<T> samples, std::span<const double> frequency_mhz,
     const MultiDmDedispersionPlan& plan) {
@@ -407,6 +450,26 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
 }
 
 }  // namespace
+
+DedispersedSpectrum<std::uint8_t> dedisperse_spectrum_cpu(
+    HostSampleView<std::uint8_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan) {
+  return dedisperse_spectrum_cpu_impl(samples, frequency_mhz, plan);
+}
+
+DedispersedSpectrum<std::uint16_t> dedisperse_spectrum_cpu(
+    HostSampleView<std::uint16_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan) {
+  return dedisperse_spectrum_cpu_impl(samples, frequency_mhz, plan);
+}
+
+DedispersedSpectrum<float> dedisperse_spectrum_cpu(
+    HostSampleView<float> samples, std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan) {
+  return dedisperse_spectrum_cpu_impl(samples, frequency_mhz, plan);
+}
 
 DedispersedResult<std::uint32_t> dedisperse_single_dm_cpu(
     HostSampleView<std::uint8_t> samples,

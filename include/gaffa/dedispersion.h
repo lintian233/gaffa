@@ -43,6 +43,41 @@ struct DedispersedResult {
   DedispersedShape shape{};
 };
 
+template <typename T>
+struct DedispersedSpectrum {
+  std::vector<T> data;
+  SampleShape shape{};
+  double dm = 0.0;
+  double tsamp = 0.0;
+  std::size_t chan_begin = 0;
+  std::size_t chan_end = 0;
+
+  [[nodiscard]] std::size_t nsamples() const noexcept {
+    return shape.nsamples;
+  }
+
+  [[nodiscard]] std::size_t nchans() const noexcept {
+    return shape.nchans;
+  }
+
+  [[nodiscard]] std::size_t size() const noexcept { return data.size(); }
+};
+
+DedispersedSpectrum<std::uint8_t> dedisperse_spectrum_cpu(
+    HostSampleView<std::uint8_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan);
+
+DedispersedSpectrum<std::uint16_t> dedisperse_spectrum_cpu(
+    HostSampleView<std::uint16_t> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan);
+
+DedispersedSpectrum<float> dedisperse_spectrum_cpu(
+    HostSampleView<float> samples,
+    std::span<const double> frequency_mhz,
+    const SingleDmDedispersionPlan& plan);
+
 DedispersedResult<std::uint32_t> dedisperse_single_dm_cpu(
     HostSampleView<std::uint8_t> samples,
     std::span<const double> frequency_mhz,
