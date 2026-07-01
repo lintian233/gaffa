@@ -117,9 +117,10 @@ TEST(DedispersionCuda, MultiDmUint8MatchesCpu) {
     GTEST_SKIP() << "CUDA device is not visible";
   }
 
-  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<std::uint8_t> samples{1,  2,  3,  4,  5,  6,  7,  8,
+                                          9,  10, 11, 12, 13, 14, 15, 16};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
-  const auto view = make_view(samples, 2, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
                                                  multi_plan(3));
@@ -136,9 +137,10 @@ TEST(DedispersionCuda, DeviceResultCopiesToHost) {
     GTEST_SKIP() << "CUDA device is not visible";
   }
 
-  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<std::uint8_t> samples{1,  2,  3,  4,  5,  6,  7,  8,
+                                          9,  10, 11, 12, 13, 14, 15, 16};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
-  const auto view = make_view(samples, 2, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
                                                  multi_plan(3));
@@ -171,9 +173,11 @@ TEST(DedispersionCuda, MultiDmUint16MatchesCpu) {
   }
 
   const std::vector<std::uint16_t> samples{100, 200, 300, 400,
-                                           500, 600, 700, 800};
+                                           500, 600, 700, 800,
+                                           900, 1000, 1100, 1200,
+                                           1300, 1400, 1500, 1600};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
-  const auto view = make_view(samples, 2, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
                                                  multi_plan(3));
@@ -191,9 +195,11 @@ TEST(DedispersionCuda, MultiDmFloatMatchesCpu) {
   }
 
   const std::vector<float> samples{1.0F, 2.0F, 3.0F, 4.0F,
-                                   5.0F, 6.0F, 7.0F, 8.0F};
+                                   5.0F, 6.0F, 7.0F, 8.0F,
+                                   9.0F, 10.0F, 11.0F, 12.0F,
+                                   13.0F, 14.0F, 15.0F, 16.0F};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
-  const auto view = make_view(samples, 2, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
                                                  multi_plan(3));
@@ -210,13 +216,14 @@ TEST(DedispersionCuda, SubbandDegenerateMatchesMultiDmCpu) {
     GTEST_SKIP() << "CUDA device is not visible";
   }
 
-  const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8};
+  const std::vector<std::uint8_t> samples{1,  2,  3,  4,  5,  6,  7,  8,
+                                          9,  10, 11, 12, 13, 14, 15, 16};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
   const gaffa::SubbandDedispersionOptions subband_options{
       .subband_channels = 1,
       .ndm_per_nominal = 1,
   };
-  const auto view = make_view(samples, 2, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency,
                                                  multi_plan(3));
@@ -234,7 +241,7 @@ TEST(DedispersionCuda, SubbandNormalMatchesCpuSubband) {
   }
 
   const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6, 7, 8,
-                                          9, 10, 11, 12};
+                                          9, 10, 11, 12, 13, 14, 15, 16};
   const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
   gaffa::MultiDmDedispersionPlan plan = multi_plan(4);
   plan.ndm = 4;
@@ -247,7 +254,7 @@ TEST(DedispersionCuda, SubbandNormalMatchesCpuSubband) {
       .threads_per_block = 128,
       .time_tile_samples = 2,
   };
-  const auto view = make_view(samples, 3, 4);
+  const auto view = make_view(samples, 4, 4);
 
   const auto cpu = gaffa::dedisperse_subband_cpu(view, frequency, plan,
                                                 subband_options);

@@ -1,4 +1,5 @@
 #include "gaffa/dedispersion.h"
+#include "gaffa/internal/dedispersion_delay.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,8 +13,6 @@
 
 namespace gaffa {
 namespace {
-
-inline constexpr double dispersion_delay_ms = 4148.808;
 
 template <typename T>
 struct DedispersedValue;
@@ -99,9 +98,11 @@ void validate_single_plan(HostSampleView<T> samples,
   validate_samples(samples, frequency_mhz);
   validate_plan_values(plan.ref_frequency_mhz, plan.tsamp);
   validate_channel_range(plan.chan_begin, plan.chan_end, samples.shape.nchans);
-  if (!std::isfinite(plan.dm)) {
-    throw std::invalid_argument("dm must be finite");
+  if (!std::isfinite(plan.dm) || plan.dm < 0.0) {
+    throw std::invalid_argument("dm must be finite and non-negative");
   }
+  internal::validate_nonnegative_delay_range(
+      frequency_mhz, plan.ref_frequency_mhz, plan.chan_begin, plan.chan_end);
 }
 
 template <typename T>
@@ -110,8 +111,8 @@ void validate_multi_plan(HostSampleView<T> samples,
                          const MultiDmDedispersionPlan& plan) {
   validate_samples(samples, frequency_mhz);
   validate_plan_values(plan.ref_frequency_mhz, plan.tsamp);
-  if (!std::isfinite(plan.dm_low)) {
-    throw std::invalid_argument("dm_low must be finite");
+  if (!std::isfinite(plan.dm_low) || plan.dm_low < 0.0) {
+    throw std::invalid_argument("dm_low must be finite and non-negative");
   }
   if (plan.ndm == 0) {
     throw std::invalid_argument("dedispersion requires at least one DM");
@@ -120,6 +121,8 @@ void validate_multi_plan(HostSampleView<T> samples,
     throw std::invalid_argument("dm_step must be positive");
   }
   validate_channel_range(plan.chan_begin, plan.chan_end, samples.shape.nchans);
+  internal::validate_nonnegative_delay_range(
+      frequency_mhz, plan.ref_frequency_mhz, plan.chan_begin, plan.chan_end);
 }
 
 void validate_subband_options(const SubbandDedispersionOptions& options) {
@@ -129,50 +132,6 @@ void validate_subband_options(const SubbandDedispersionOptions& options) {
   if (options.ndm_per_nominal == 0) {
     throw std::invalid_argument("ndm_per_nominal must be positive");
   }
-}
-
-std::int32_t delay_bins(double dm, double frequency_mhz,
-                        double ref_frequency_mhz, double tsamp) {
-  const double frequency2 = frequency_mhz * frequency_mhz;
-  const double ref2 = ref_frequency_mhz * ref_frequency_mhz;
-  const double delay =
-      dispersion_delay_ms * dm * (1.0 / frequency2 - 1.0 / ref2);
-  const double bins = std::round(delay / tsamp);
-  if (bins < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
-      bins > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
-    throw std::overflow_error("dedispersion delay exceeds int32 range");
-  }
-  return static_cast<std::int32_t>(bins);
-}
-
-std::vector<std::int32_t> make_single_dm_delay_table(
-    std::span<const double> frequency_mhz, double dm,
-    double ref_frequency_mhz, double tsamp, std::size_t chan_begin,
-    std::size_t chan_end) {
-  std::vector<std::int32_t> delays(chan_end - chan_begin);
-  for (std::size_t channel = chan_begin; channel < chan_end; ++channel) {
-    delays[channel - chan_begin] =
-        delay_bins(dm, frequency_mhz[channel], ref_frequency_mhz, tsamp);
-  }
-  return delays;
-}
-
-std::vector<std::int32_t> make_multi_dm_delay_table(
-    std::span<const double> frequency_mhz,
-    const MultiDmDedispersionPlan& plan) {
-  const std::size_t channel_count = plan.chan_end - plan.chan_begin;
-  std::vector<std::int32_t> delays(
-      checked_output_size(plan.ndm, channel_count));
-  for (std::size_t dm_index = 0; dm_index < plan.ndm; ++dm_index) {
-    const double dm = plan.dm_low + static_cast<double>(dm_index) * plan.dm_step;
-    for (std::size_t offset = 0; offset < channel_count; ++offset) {
-      const std::size_t channel = plan.chan_begin + offset;
-      delays[dm_index * channel_count + offset] =
-          delay_bins(dm, frequency_mhz[channel], plan.ref_frequency_mhz,
-                     plan.tsamp);
-    }
-  }
-  return delays;
 }
 
 std::vector<std::int32_t> make_subband_coarse_delay_table(
@@ -192,8 +151,9 @@ std::vector<std::int32_t> make_subband_coarse_delay_table(
     for (std::size_t offset = 0; offset < channel_count; ++offset) {
       const std::size_t channel = plan.chan_begin + offset;
       delays[nominal_index * channel_count + offset] =
-          delay_bins(nominal_dm, frequency_mhz[channel],
-                     plan.ref_frequency_mhz, plan.tsamp);
+          internal::dedispersion_delay_bins(
+              nominal_dm, frequency_mhz[channel], plan.ref_frequency_mhz,
+              plan.tsamp);
     }
   }
   return delays;
@@ -216,8 +176,9 @@ std::vector<std::int32_t> make_subband_residual_delay_table(
     for (std::size_t subband = 0; subband < subband_frequency.size();
          ++subband) {
       delays[dm_index * subband_frequency.size() + subband] =
-          delay_bins(final_dm - nominal_dm, subband_frequency[subband],
-                     plan.ref_frequency_mhz, plan.tsamp);
+          internal::dedispersion_delay_bins(
+              final_dm - nominal_dm, subband_frequency[subband],
+              plan.ref_frequency_mhz, plan.tsamp);
     }
   }
   return delays;
@@ -256,18 +217,22 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cpu_impl(
   validate_single_plan(samples, frequency_mhz, plan);
 
   using OutT = DedispersedValueT<T>;
-  const std::vector<std::int32_t> delays = make_single_dm_delay_table(
+  const std::vector<std::int32_t> delays = internal::make_single_dm_delay_table(
       frequency_mhz, plan.dm, plan.ref_frequency_mhz, plan.tsamp,
       plan.chan_begin, plan.chan_end);
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::single_dm_max_delay(frequency_mhz,
+                                                                plan));
   DedispersedResult<OutT> result;
-  result.shape = DedispersedShape{1, samples.shape.nsamples};
-  result.data.resize(samples.shape.nsamples);
+  result.shape = DedispersedShape{1, output_nsamples};
+  result.data.resize(output_nsamples);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
   for (std::int64_t time = 0;
-       time < static_cast<std::int64_t>(samples.shape.nsamples); ++time) {
+       time < static_cast<std::int64_t>(output_nsamples); ++time) {
     result.data[static_cast<std::size_t>(time)] =
         direct_sum_at(samples, std::span<const std::int32_t>(delays),
                       plan.chan_begin,
@@ -286,10 +251,14 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cpu_impl(
   using OutT = DedispersedValueT<T>;
   const std::size_t channel_count = plan.chan_end - plan.chan_begin;
   const std::vector<std::int32_t> delays =
-      make_multi_dm_delay_table(frequency_mhz, plan);
+      internal::make_multi_dm_delay_table(frequency_mhz, plan);
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::multi_dm_max_delay(frequency_mhz,
+                                                               plan));
   DedispersedResult<OutT> result;
-  result.shape = DedispersedShape{plan.ndm, samples.shape.nsamples};
-  result.data.resize(checked_output_size(plan.ndm, samples.shape.nsamples));
+  result.shape = DedispersedShape{plan.ndm, output_nsamples};
+  result.data.resize(checked_output_size(plan.ndm, output_nsamples));
 
 #ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(static)
@@ -297,13 +266,13 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cpu_impl(
   for (std::int64_t dm_index = 0;
        dm_index < static_cast<std::int64_t>(plan.ndm); ++dm_index) {
     for (std::int64_t time = 0;
-         time < static_cast<std::int64_t>(samples.shape.nsamples); ++time) {
+         time < static_cast<std::int64_t>(output_nsamples); ++time) {
       const auto delay_offset =
           static_cast<std::size_t>(dm_index) * channel_count;
       const std::span<const std::int32_t> dm_delays(delays.data() + delay_offset,
                                                     channel_count);
       result.data[static_cast<std::size_t>(dm_index) *
-                      samples.shape.nsamples +
+                      output_nsamples +
                   static_cast<std::size_t>(time)] =
           direct_sum_at(samples, dm_delays, plan.chan_begin,
                         static_cast<std::size_t>(time));
@@ -367,6 +336,10 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
   const std::vector<std::int32_t> residual_delays =
       make_subband_residual_delay_table(
           std::span<const double>(subband_frequency), plan, options);
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::multi_dm_max_delay(frequency_mhz,
+                                                               plan));
   const std::size_t inter_stride =
       checked_output_size(subband_count, samples.shape.nsamples);
   std::vector<OutT> intermediate(
@@ -399,8 +372,8 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
   }
 
   DedispersedResult<OutT> result;
-  result.shape = DedispersedShape{plan.ndm, samples.shape.nsamples};
-  result.data.resize(checked_output_size(plan.ndm, samples.shape.nsamples));
+  result.shape = DedispersedShape{plan.ndm, output_nsamples};
+  result.data.resize(checked_output_size(plan.ndm, output_nsamples));
 
 #ifdef _OPENMP
 #pragma omp parallel for collapse(2) schedule(static)
@@ -408,7 +381,7 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
   for (std::int64_t dm_index = 0;
        dm_index < static_cast<std::int64_t>(plan.ndm); ++dm_index) {
     for (std::int64_t time = 0;
-         time < static_cast<std::int64_t>(samples.shape.nsamples); ++time) {
+         time < static_cast<std::int64_t>(output_nsamples); ++time) {
       const auto dm_index_size = static_cast<std::size_t>(dm_index);
       const auto nominal_index = dm_index_size / options.ndm_per_nominal;
       const auto residual_offset = dm_index_size * subband_count;
@@ -425,7 +398,7 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
                               static_cast<std::size_t>(shifted_time)];
         }
       }
-      result.data[dm_index_size * samples.shape.nsamples +
+      result.data[dm_index_size * output_nsamples +
                   static_cast<std::size_t>(time)] = sum;
     }
   }

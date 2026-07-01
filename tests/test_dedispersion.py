@@ -43,10 +43,14 @@ def test_dedisperse_multi_dm_matches_single_dm_slices() -> None:
         backend="cpu",
     )
 
-    assert multi.shape == (3, fb.header.nsamples)
+    assert multi.nsamples <= fb.header.nsamples
+    assert multi.shape == (3, multi.nsamples)
     for dm_index in range(multi.ndm):
         single = dedisperse_single_dm(fb, dm=float(dm_index), backend="cpu")
-        np.testing.assert_array_equal(multi.data[dm_index], single.data[0])
+        assert single.nsamples >= multi.nsamples
+        np.testing.assert_array_equal(
+            multi.data[dm_index], single.data[0, : multi.nsamples]
+        )
 
 
 def test_dedisperse_subband_degenerate_matches_multi_dm() -> None:
@@ -69,6 +73,7 @@ def test_dedisperse_subband_degenerate_matches_multi_dm() -> None:
         ndm_per_nominal=1,
     )
 
+    assert subband.shape == multi.shape
     np.testing.assert_array_equal(subband.data, multi.data)
 
 

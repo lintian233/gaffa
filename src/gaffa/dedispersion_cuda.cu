@@ -1,4 +1,5 @@
 #include "gaffa/dedispersion_cuda.h"
+#include "gaffa/internal/dedispersion_delay.h"
 
 #include <cuda_runtime.h>
 
@@ -15,8 +16,6 @@
 
 namespace gaffa {
 namespace {
-
-inline constexpr double dispersion_delay_ms = 4148.808;
 
 template <typename T>
 struct DedispersedValue;
@@ -122,19 +121,6 @@ void validate_plan_values(double ref_frequency_mhz, double tsamp) {
   }
 }
 
-void validate_nonnegative_delay_range(std::span<const double> frequency_mhz,
-                                      double ref_frequency_mhz,
-                                      std::size_t chan_begin,
-                                      std::size_t chan_end) {
-  for (std::size_t channel = chan_begin; channel < chan_end; ++channel) {
-    if (frequency_mhz[channel] > ref_frequency_mhz) {
-      throw std::invalid_argument(
-          "CUDA dedispersion requires selected frequencies <= reference "
-          "frequency");
-    }
-  }
-}
-
 template <typename T>
 void validate_single_plan(HostSampleView<T> samples,
                           std::span<const double> frequency_mhz,
@@ -147,8 +133,8 @@ void validate_single_plan(HostSampleView<T> samples,
   if (!std::isfinite(plan.dm) || plan.dm < 0.0) {
     throw std::invalid_argument("dm must be finite and non-negative");
   }
-  validate_nonnegative_delay_range(frequency_mhz, plan.ref_frequency_mhz,
-                                   plan.chan_begin, plan.chan_end);
+  internal::validate_nonnegative_delay_range(
+      frequency_mhz, plan.ref_frequency_mhz, plan.chan_begin, plan.chan_end);
 }
 
 template <typename T>
@@ -169,8 +155,8 @@ void validate_multi_plan(HostSampleView<T> samples,
     throw std::invalid_argument("dm_step must be positive");
   }
   validate_channel_range(plan.chan_begin, plan.chan_end, samples.shape.nchans);
-  validate_nonnegative_delay_range(frequency_mhz, plan.ref_frequency_mhz,
-                                   plan.chan_begin, plan.chan_end);
+  internal::validate_nonnegative_delay_range(
+      frequency_mhz, plan.ref_frequency_mhz, plan.chan_begin, plan.chan_end);
 }
 
 void validate_subband_options(const SubbandDedispersionOptions& options) {
@@ -203,7 +189,7 @@ __device__ std::int32_t device_delay_bins(double dm, double frequency_mhz,
   const double frequency2 = frequency_mhz * frequency_mhz;
   const double ref2 = ref_frequency_mhz * ref_frequency_mhz;
   const double delay =
-      dispersion_delay_ms * dm * (1.0 / frequency2 - 1.0 / ref2);
+      internal::dispersion_delay_ms * dm * (1.0 / frequency2 - 1.0 / ref2);
   return static_cast<std::int32_t>(llround(delay / tsamp));
 }
 
@@ -279,11 +265,13 @@ __global__ void compute_subband_residual_delay_kernel(
 template <typename InT, typename OutT>
 __global__ void single_dm_kernel(OutT* output, const InT* input,
                                  const std::int32_t* delays,
-                                 std::size_t nsamples, std::size_t nchans,
+                                 std::size_t input_nsamples,
+                                 std::size_t output_nsamples,
+                                 std::size_t nchans,
                                  std::size_t chan_begin,
                                  std::size_t channel_count) {
   const std::size_t time = blockIdx.x * blockDim.x + threadIdx.x;
-  if (time >= nsamples) {
+  if (time >= output_nsamples) {
     return;
   }
   OutT sum = 0;
@@ -292,7 +280,7 @@ __global__ void single_dm_kernel(OutT* output, const InT* input,
     const std::int64_t shifted_time =
         static_cast<std::int64_t>(time) + delays[offset];
     if (shifted_time >= 0 &&
-        shifted_time < static_cast<std::int64_t>(nsamples)) {
+        shifted_time < static_cast<std::int64_t>(input_nsamples)) {
       sum += static_cast<OutT>(
           input[static_cast<std::size_t>(shifted_time) * nchans + channel]);
     }
@@ -303,16 +291,17 @@ __global__ void single_dm_kernel(OutT* output, const InT* input,
 template <typename InT, typename OutT>
 __global__ void multi_dm_kernel(OutT* output, const InT* input,
                                 const std::int32_t* delays,
-                                std::size_t ndm, std::size_t nsamples,
+                                std::size_t ndm, std::size_t input_nsamples,
+                                std::size_t output_nsamples,
                                 std::size_t nchans, std::size_t chan_begin,
                                 std::size_t channel_count) {
   const std::size_t index = blockIdx.x * blockDim.x + threadIdx.x;
-  const std::size_t total = ndm * nsamples;
+  const std::size_t total = ndm * output_nsamples;
   if (index >= total) {
     return;
   }
-  const std::size_t dm_index = index / nsamples;
-  const std::size_t time = index % nsamples;
+  const std::size_t dm_index = index / output_nsamples;
+  const std::size_t time = index % output_nsamples;
   const std::int32_t* dm_delays = delays + dm_index * channel_count;
 
   OutT sum = 0;
@@ -321,7 +310,7 @@ __global__ void multi_dm_kernel(OutT* output, const InT* input,
     const std::int64_t shifted_time =
         static_cast<std::int64_t>(time) + dm_delays[offset];
     if (shifted_time >= 0 &&
-        shifted_time < static_cast<std::int64_t>(nsamples)) {
+        shifted_time < static_cast<std::int64_t>(input_nsamples)) {
       sum += static_cast<OutT>(
           input[static_cast<std::size_t>(shifted_time) * nchans + channel]);
     }
@@ -371,8 +360,8 @@ template <typename OutT>
 __global__ void subband_stage2_kernel(
     OutT* output, const OutT* intermediate, const std::int32_t* residual_delays,
     std::size_t ndm, std::size_t ndm_per_nominal, std::size_t subband_count,
-    std::size_t nsamples, std::size_t tile_offset, std::size_t tile_len,
-    std::size_t tile1_len) {
+    std::size_t output_nsamples, std::size_t tile_offset,
+    std::size_t tile_len, std::size_t tile1_len) {
   const std::size_t time_in_tile = blockIdx.x * blockDim.x + threadIdx.x;
   const std::size_t dm_index = blockIdx.y;
   if (time_in_tile >= tile_len || dm_index >= ndm) {
@@ -395,7 +384,7 @@ __global__ void subband_stage2_kernel(
                         static_cast<std::size_t>(shifted_time)];
     }
   }
-  output[dm_index * nsamples + tile_offset + time_in_tile] = sum;
+  output[dm_index * output_nsamples + tile_offset + time_in_tile] = sum;
 }
 
 std::size_t block_count(std::size_t total, std::size_t threads_per_block) {
@@ -428,6 +417,10 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cuda_device_imp
   using OutT = DedispersedValueT<T>;
   const std::size_t input_size = samples.size();
   const std::size_t channel_count = plan.chan_end - plan.chan_begin;
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::single_dm_max_delay(frequency_mhz,
+                                                                plan));
   const int threads = static_cast<int>(options.threads_per_block);
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
   const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
@@ -436,7 +429,7 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cuda_device_imp
       copy_to_device<double>(std::span<const double>(frequency_copy),
                              "copy frequency table");
   CudaDeviceBuffer<std::int32_t> device_delays(channel_count);
-  CudaDeviceBuffer<OutT> device_output(samples.shape.nsamples);
+  CudaDeviceBuffer<OutT> device_output(output_nsamples);
 
   compute_single_dm_delay_kernel<<<block_count(channel_count,
                                                 options.threads_per_block),
@@ -446,14 +439,15 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cuda_device_imp
   launch_barrier("compute_single_dm_delay_kernel");
 
   single_dm_kernel<T, OutT>
-      <<<block_count(samples.shape.nsamples, options.threads_per_block),
+      <<<block_count(output_nsamples, options.threads_per_block),
          threads>>>(device_output.get(), device_input.get(),
                     device_delays.get(), samples.shape.nsamples,
-                    samples.shape.nchans, plan.chan_begin, channel_count);
+                    output_nsamples, samples.shape.nchans, plan.chan_begin,
+                    channel_count);
   launch_barrier("single_dm_kernel");
 
   CudaDedispersedResult<OutT> result;
-  result.shape = DedispersedShape{1, samples.shape.nsamples};
+  result.shape = DedispersedShape{1, output_nsamples};
   result.data = std::move(device_output);
   result.device_id = options.device_id;
   return result;
@@ -472,8 +466,12 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cuda_device_impl
   const std::size_t channel_count = plan.chan_end - plan.chan_begin;
   const std::size_t delay_size =
       checked_multiply(plan.ndm, channel_count, "multi-DM delay table");
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::multi_dm_max_delay(frequency_mhz,
+                                                               plan));
   const std::size_t output_size =
-      checked_multiply(plan.ndm, samples.shape.nsamples, "dedispersed output");
+      checked_multiply(plan.ndm, output_nsamples, "dedispersed output");
   const int threads = static_cast<int>(options.threads_per_block);
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
   const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
@@ -495,12 +493,12 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cuda_device_impl
   multi_dm_kernel<T, OutT>
       <<<block_count(output_size, options.threads_per_block), threads>>>(
           device_output.get(), device_input.get(), device_delays.get(),
-          plan.ndm, samples.shape.nsamples, samples.shape.nchans,
-          plan.chan_begin, channel_count);
+          plan.ndm, samples.shape.nsamples, output_nsamples,
+          samples.shape.nchans, plan.chan_begin, channel_count);
   launch_barrier("multi_dm_kernel");
 
   CudaDedispersedResult<OutT> result;
-  result.shape = DedispersedShape{plan.ndm, samples.shape.nsamples};
+  result.shape = DedispersedShape{plan.ndm, output_nsamples};
   result.data = std::move(device_output);
   result.device_id = options.device_id;
   return result;
@@ -527,8 +525,12 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_subband_cuda_device_impl(
       nominal_dm_count, channel_count, "subband coarse delay table");
   const std::size_t residual_delay_size =
       checked_multiply(plan.ndm, subband_count, "subband residual delay table");
+  const std::size_t output_nsamples =
+      internal::valid_output_nsamples(
+          samples.shape.nsamples, internal::multi_dm_max_delay(frequency_mhz,
+                                                               plan));
   const std::size_t output_size =
-      checked_multiply(plan.ndm, samples.shape.nsamples, "dedispersed output");
+      checked_multiply(plan.ndm, output_nsamples, "dedispersed output");
   const int threads = static_cast<int>(cuda_options.threads_per_block);
 
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
@@ -584,11 +586,11 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_subband_cuda_device_impl(
                        max_tile1_len, "subband intermediate");
   CudaDeviceBuffer<OutT> device_intermediate(intermediate_size);
 
-  for (std::size_t tile_offset = 0; tile_offset < samples.shape.nsamples;
+  for (std::size_t tile_offset = 0; tile_offset < output_nsamples;
        tile_offset += cuda_options.time_tile_samples) {
     const std::size_t tile_len =
         std::min(cuda_options.time_tile_samples,
-                 samples.shape.nsamples - tile_offset);
+                 output_nsamples - tile_offset);
     const std::size_t tile1_len =
         std::min(tile_len + static_cast<std::size_t>(max_residual),
                  samples.shape.nsamples - tile_offset);
@@ -619,13 +621,13 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_subband_cuda_device_impl(
                                    device_intermediate.get(),
                                    device_residual_delays.get(), plan.ndm,
                                    subband_options.ndm_per_nominal,
-                                   subband_count, samples.shape.nsamples,
+                                   subband_count, output_nsamples,
                                    tile_offset, tile_len, tile1_len);
     launch_barrier("subband_stage2_kernel");
   }
 
   CudaDedispersedResult<OutT> result;
-  result.shape = DedispersedShape{plan.ndm, samples.shape.nsamples};
+  result.shape = DedispersedShape{plan.ndm, output_nsamples};
   result.data = std::move(device_output);
   result.device_id = cuda_options.device_id;
   return result;

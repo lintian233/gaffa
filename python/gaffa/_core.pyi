@@ -176,7 +176,10 @@ class DedispersedResult:
     """Host-resident dedispersed time series.
 
     ``data`` has shape ``(ndm, nsamples)``. Integer filterbank inputs produce
-    ``uint32`` output; ``float32`` inputs produce ``float32`` output.
+    ``uint32`` output; ``float32`` inputs produce ``float32`` output. The time
+    axis contains only samples for which every selected channel contributes a
+    valid input sample, so ``nsamples`` can be smaller than the source
+    filterbank length by the global maximum dispersion delay.
     """
 
     data: DedispersedArray
@@ -261,7 +264,8 @@ def dedisperse_single_dm(
     Notes
     -----
     Integer filterbank inputs produce ``uint32`` output. ``float32`` input
-    produces ``float32`` output.
+    produces ``float32`` output. The returned time axis is valid-only: trailing
+    samples that would require out-of-range delayed input samples are omitted.
     """
     ...
 
@@ -316,7 +320,8 @@ def dedisperse_multi_dm(
     Notes
     -----
     Integer filterbank inputs produce ``uint32`` output. ``float32`` input
-    produces ``float32`` output.
+    produces ``float32`` output. All DM rows share the same valid-only length,
+    determined by the largest delay over the requested DM/channel grid.
     """
     ...
 
@@ -378,6 +383,8 @@ def dedisperse_subband(
     -----
     This is the preferred CUDA-facing many-DM API. Integer filterbank inputs
     produce ``uint32`` output. ``float32`` input produces ``float32`` output.
+    All DM rows share the same valid-only length, determined by the largest
+    delay over the requested DM/channel grid.
     """
     ...
 
