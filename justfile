@@ -57,8 +57,8 @@ bench-cuda: build-benchmarks
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/basedata_240M.fil 3
     # source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_cuda_benchmark all tests/data/FRB20241112A_01.fil 3
 
-# bench-dm-search file="tests/data/Mercer_5_tracking-M03_filtool_01.fil" backend="cuda-subband" ndm="32" dm_low="1040" dm_step="3" period_min="0.021" period_max="1" max_peaks="0" print_peaks="64" snr_threshold="10" bins_min="200" bins_max="256" preprocess="riptide" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32" max_candidates="0": build-benchmarks
-#     source env/dev.sh && /usr/bin/time -v build/release/gaffa_dm_search_benchmark {{file}} {{backend}} {{ndm}} {{dm_low}} {{dm_step}} {{period_min}} {{period_max}} {{max_peaks}} {{print_peaks}} {{snr_threshold}} {{bins_min}} {{bins_max}} {{preprocess}} {{running_median_seconds}} {{subband_channels}} {{ndm_per_nominal}} {{max_candidates}}
+bench-spectrum-cpu file="tests/data/Mercer_5_tracking-M03_filtool_01.fil" dm="1050.2" iterations="3" chan_begin="0" chan_end="0": build-benchmarks
+    source env/dev.sh && /usr/bin/time -v build/release/gaffa_dedispersion_spectrum_cpu_benchmark {{file}} {{dm}} {{iterations}} {{chan_begin}} {{chan_end}}
 
 bench-dm-search file="tests/data/19C113_J1846-05N2_onoff-M02_add_0001-0466_filtool_01.fil" backend="cuda-subband" ndm="256" dm_low="150" dm_step="0.5" period_min="0.018" period_max="1" max_peaks="0" print_peaks="64" snr_threshold="7.5" bins_min="180" bins_max="256" preprocess="riptide" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32" max_candidates="0": build-benchmarks
     source env/dev.sh && /usr/bin/time -v build/release/gaffa_dm_search_benchmark {{file}} {{backend}} {{ndm}} {{dm_low}} {{dm_step}} {{period_min}} {{period_max}} {{max_peaks}} {{print_peaks}} {{snr_threshold}} {{bins_min}} {{bins_max}} {{preprocess}} {{running_median_seconds}} {{subband_channels}} {{ndm_per_nominal}} {{max_candidates}}

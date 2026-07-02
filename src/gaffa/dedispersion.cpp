@@ -266,19 +266,18 @@ DedispersedSpectrum<T> dedisperse_spectrum_cpu_impl(
   result.chan_end = plan.chan_end;
 
 #ifdef _OPENMP
-#pragma omp parallel for collapse(2) schedule(static)
+#pragma omp parallel for schedule(static)
 #endif
   for (std::int64_t time = 0;
        time < static_cast<std::int64_t>(output_nsamples); ++time) {
-    for (std::int64_t offset = 0;
-         offset < static_cast<std::int64_t>(channel_count); ++offset) {
-      const auto output_time = static_cast<std::size_t>(time);
-      const auto channel_offset = static_cast<std::size_t>(offset);
+    const auto output_time = static_cast<std::size_t>(time);
+    T* const output_row = result.data.data() + output_time * channel_count;
+    for (std::size_t channel_offset = 0; channel_offset < channel_count;
+         ++channel_offset) {
       const auto input_time =
           output_time + static_cast<std::size_t>(delays[channel_offset]);
       const auto input_channel = plan.chan_begin + channel_offset;
-      result.data[output_time * channel_count + channel_offset] =
-          sample_at(samples, input_time, input_channel);
+      output_row[channel_offset] = sample_at(samples, input_time, input_channel);
     }
   }
 
