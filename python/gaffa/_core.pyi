@@ -24,6 +24,8 @@ DedispersedArray: TypeAlias = NDArray[np.uint32] | NDArray[np.float32]
 DedispersedSpectrumArray: TypeAlias = (
     NDArray[np.uint8] | NDArray[np.uint16] | NDArray[np.float32]
 )
+FoldCubeArray: TypeAlias = NDArray[np.float32]
+FoldExposureArray: TypeAlias = NDArray[np.float64]
 
 
 class ChannelOrderPolicy(Enum):
@@ -274,6 +276,68 @@ class DedispersedSpectrum:
         ...
 
     def __repr__(self) -> str: ...
+
+
+class FoldResult:
+    """Folded products for a dedispersed dynamic spectrum.
+
+    The main cube has shape ``(nsubint, nchans, nbin)``. Projected products are
+    provided for common plotting and inspection workflows.
+    """
+
+    cube: FoldCubeArray
+    """Folded data with shape ``(nsubint, nchans, nbin)``."""
+
+    exposure: FoldExposureArray
+    """Phase exposure with shape ``(nsubint, nbin)``."""
+
+    profile: NDArray[np.float32]
+    """Frequency- and time-averaged profile with shape ``(nbin,)``."""
+
+    freq_phase: NDArray[np.float32]
+    """Frequency-phase image with shape ``(nchans, nbin)``."""
+
+    time_phase: NDArray[np.float32]
+    """Time-phase image with shape ``(nsubint, nbin)``."""
+
+    phase: NDArray[np.float32]
+    """Phase coordinate with shape ``(nbin,)``."""
+
+    time: NDArray[np.float64]
+    """Subintegration center time in seconds with shape ``(nsubint,)``."""
+
+    nsubint: int
+    """Number of subintegrations."""
+
+    nchans: int
+    """Number of folded frequency channels or subbands."""
+
+    nbin: int
+    """Number of phase bins."""
+
+    period: float
+    """Folding period in seconds."""
+
+    tsamp: float
+    """Input sampling interval in seconds."""
+
+    tsubint: float
+    """Actual subintegration length in seconds after rounding to samples."""
+
+    def __repr__(self) -> str: ...
+
+
+def _fold_dedispersed_spectrum(
+    data: DedispersedSpectrumArray,
+    *,
+    tsamp: float,
+    period: float,
+    nbin: int,
+    tsubint: float,
+    output_channels: int,
+) -> FoldResult:
+    """Private binding used by ``gaffa.pfold.fold``."""
+    ...
 
 
 def dedisperse_spectrum(

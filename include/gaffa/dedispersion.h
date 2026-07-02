@@ -61,6 +61,14 @@ struct DedispersedSpectrum {
   }
 
   [[nodiscard]] std::size_t size() const noexcept { return data.size(); }
+
+  [[nodiscard]] HostSampleView<T> view() const noexcept {
+    return HostSampleView<T>{data.data(), shape};
+  }
+
+  [[nodiscard]] MutableHostSampleView<T> mutable_view() noexcept {
+    return MutableHostSampleView<T>{data.data(), shape};
+  }
 };
 
 DedispersedSpectrum<std::uint8_t> dedisperse_spectrum_cpu(
