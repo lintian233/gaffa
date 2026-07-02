@@ -70,6 +70,9 @@ struct FoldDedispersedSpectrumResult {
   double tsubint = 0.0;
 };
 
+FoldedProfile fold_time_series_cpu(std::span<const std::uint32_t> input,
+                                   const FoldOptions& options);
+
 FoldedProfile fold_time_series_cpu(std::span<const float> input,
                                    const FoldOptions& options);
 

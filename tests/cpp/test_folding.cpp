@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -39,6 +40,55 @@ gaffa::HostSampleView<T> make_typed_view(const std::vector<T>& data,
 std::size_t cube_index(const gaffa::FoldedCube& cube, std::size_t subint,
                        std::size_t channel, std::size_t phase) {
   return (subint * cube.nchans + channel) * cube.nbin + phase;
+}
+
+gaffa::FoldedProfile reference_fold_time_series(
+    const std::vector<float>& input,
+    const gaffa::FoldOptions& options) {
+  std::vector<double> sums(options.nbin, 0.0);
+  std::vector<double> exposure(options.nbin, 0.0);
+  const double bin_step =
+      options.tsamp / options.period * static_cast<double>(options.nbin);
+
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    const double low_scaled =
+        static_cast<double>(options.start_sample + index) * bin_step;
+    const double high_scaled = low_scaled + bin_step;
+    const auto first_bin = static_cast<std::int64_t>(std::floor(low_scaled));
+    const auto last_bin =
+        static_cast<std::int64_t>(std::ceil(high_scaled) - 1.0);
+
+    for (std::int64_t bin = first_bin; bin <= last_bin; ++bin) {
+      const double bin_left = static_cast<double>(bin);
+      const double bin_right = bin_left + 1.0;
+      const double weight =
+          std::min(high_scaled, bin_right) - std::max(low_scaled, bin_left);
+      if (!(weight > 0.0)) {
+        continue;
+      }
+      const auto signed_nbin = static_cast<std::int64_t>(options.nbin);
+      std::int64_t wrapped = bin % signed_nbin;
+      if (wrapped < 0) {
+        wrapped += signed_nbin;
+      }
+      const auto phase = static_cast<std::size_t>(wrapped);
+      sums[phase] += static_cast<double>(input[index]) * weight;
+      exposure[phase] += weight;
+    }
+  }
+
+  std::vector<float> profile(options.nbin, 0.0F);
+  for (std::size_t phase = 0; phase < options.nbin; ++phase) {
+    if (exposure[phase] > 0.0) {
+      profile[phase] = static_cast<float>(sums[phase] / exposure[phase]);
+    }
+  }
+
+  return gaffa::FoldedProfile{
+      .profile = std::move(profile),
+      .exposure = std::move(exposure),
+      .nbin = options.nbin,
+  };
 }
 
 }  // namespace
@@ -136,6 +186,32 @@ TEST(Folding, TimeSeriesStartSampleOffsetsPhase) {
   EXPECT_FLOAT_EQ(folded.profile[2], 0.0F);
   EXPECT_FLOAT_EQ(folded.profile[3], 0.0F);
   EXPECT_DOUBLE_EQ(folded.exposure[1], 1.0);
+}
+
+TEST(Folding, TimeSeriesParallelReductionMatchesReference) {
+  std::vector<float> input(8192);
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    input[index] = static_cast<float>(static_cast<int>(index % 17) - 8) *
+                       0.25F +
+                   static_cast<float>(index % 5) * 0.1F;
+  }
+  const gaffa::FoldOptions options{
+      .period = 1.0,
+      .tsamp = 0.375,
+      .nbin = 16,
+      .start_sample = 3,
+  };
+
+  const auto folded = gaffa::fold_time_series_cpu(input, options);
+  const auto expected = reference_fold_time_series(input, options);
+
+  ASSERT_EQ(folded.nbin, expected.nbin);
+  ASSERT_EQ(folded.profile.size(), expected.profile.size());
+  ASSERT_EQ(folded.exposure.size(), expected.exposure.size());
+  for (std::size_t phase = 0; phase < options.nbin; ++phase) {
+    EXPECT_NEAR(folded.profile[phase], expected.profile[phase], 1.0e-5F);
+    EXPECT_NEAR(folded.exposure[phase], expected.exposure[phase], 1.0e-9);
+  }
 }
 
 TEST(Folding, TimeSeriesRejectsInvalidInputs) {

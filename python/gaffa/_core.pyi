@@ -327,6 +327,46 @@ class FoldResult:
     def __repr__(self) -> str: ...
 
 
+class FoldedProfile:
+    """Folded profile for a dedispersed 1D time series.
+
+    The profile is exposure-normalized where phase bins received samples and
+    zero elsewhere.
+    """
+
+    profile: NDArray[np.float32]
+    """Integrated folded profile with shape ``(nbin,)``."""
+
+    exposure: NDArray[np.float64]
+    """Phase exposure with shape ``(nbin,)``."""
+
+    phase: NDArray[np.float32]
+    """Phase coordinate with shape ``(nbin,)``."""
+
+    nbin: int
+    """Number of phase bins."""
+
+    period: float
+    """Folding period in seconds."""
+
+    tsamp: float
+    """Input sampling interval in seconds."""
+
+    def __repr__(self) -> str: ...
+
+
+def _fold_dedispersed_profile(
+    data: DedispersedArray,
+    *,
+    tsamp: float,
+    period: float,
+    nbin: int,
+    dm_index: int = 0,
+) -> FoldedProfile:
+    """Private binding used by ``gaffa.pfold.fold_profile``."""
+    ...
+
+
 def _fold_dedispersed_spectrum(
     data: DedispersedSpectrumArray,
     *,

@@ -57,15 +57,18 @@ void validate_fold_shape(double period, double tsamp, std::size_t nbin) {
   }
 }
 
-void validate_time_series_input(std::span<const float> input,
+template <typename T>
+void validate_time_series_input(std::span<const T> input,
                                 const FoldOptions& options) {
   validate_fold_shape(options.period, options.tsamp, options.nbin);
   if (input.empty()) {
     throw std::invalid_argument("fold input must not be empty");
   }
-  if (!std::all_of(input.begin(), input.end(),
-                   [](float value) { return std::isfinite(value); })) {
-    throw std::invalid_argument("fold input must contain only finite samples");
+  if constexpr (std::is_floating_point_v<T>) {
+    if (!std::all_of(input.begin(), input.end(),
+                     [](T value) { return std::isfinite(value); })) {
+      throw std::invalid_argument("fold input must contain only finite samples");
+    }
   }
 }
 
@@ -441,22 +444,38 @@ FoldDedispersedSpectrumResult fold_dedispersed_spectrum_impl(
                                              options);
 }
 
-}  // namespace
-
-FoldedProfile fold_time_series_cpu(std::span<const float> input,
-                                   const FoldOptions& options) {
+template <typename T>
+FoldedProfile fold_time_series_impl(std::span<const T> input,
+                                    const FoldOptions& options) {
   validate_time_series_input(input, options);
 
   std::vector<double> sums(options.nbin, 0.0);
   std::vector<double> exposure(options.nbin, 0.0);
   const double bin_step = options.tsamp / options.period *
                           static_cast<double>(options.nbin);
+  validate_phase_index_range(options.start_sample, input.size(), bin_step);
 
-  for (std::size_t index = 0; index < input.size(); ++index) {
-    accumulate_sample(static_cast<double>(input[index]),
-                      checked_add(options.start_sample, index,
-                                  "fold sample index overflow"),
-                      bin_step, sums, exposure);
+#pragma omp parallel
+  {
+    std::vector<double> local_sums(options.nbin, 0.0);
+    std::vector<double> local_exposure(options.nbin, 0.0);
+
+#pragma omp for schedule(static)
+    for (std::int64_t index = 0;
+         index < static_cast<std::int64_t>(input.size()); ++index) {
+      const auto sample_offset = static_cast<std::size_t>(index);
+      accumulate_sample(static_cast<double>(input[sample_offset]),
+                        options.start_sample + sample_offset, bin_step,
+                        local_sums, local_exposure);
+    }
+
+#pragma omp critical(fold_time_series_reduce)
+    {
+      for (std::size_t bin = 0; bin < options.nbin; ++bin) {
+        sums[bin] += local_sums[bin];
+        exposure[bin] += local_exposure[bin];
+      }
+    }
   }
 
   return FoldedProfile{
@@ -464,6 +483,18 @@ FoldedProfile fold_time_series_cpu(std::span<const float> input,
       .exposure = std::move(exposure),
       .nbin = options.nbin,
   };
+}
+
+}  // namespace
+
+FoldedProfile fold_time_series_cpu(std::span<const std::uint32_t> input,
+                                   const FoldOptions& options) {
+  return fold_time_series_impl(input, options);
+}
+
+FoldedProfile fold_time_series_cpu(std::span<const float> input,
+                                   const FoldOptions& options) {
+  return fold_time_series_impl(input, options);
 }
 
 FoldedCube fold_spectrum_cpu(HostSampleView<std::uint8_t> samples,
