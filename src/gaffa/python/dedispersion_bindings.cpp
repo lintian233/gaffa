@@ -7,9 +7,12 @@
 #include "gaffa/sample_view.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -18,6 +21,7 @@
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 
 namespace py = pybind11;
 
@@ -67,6 +71,124 @@ std::string backend_name(PythonDedispersionBackend backend) {
       return "cuda";
   }
   throw std::logic_error("unknown dedispersion backend");
+}
+
+py::array require_numpy_array(const py::object& value, const char* name) {
+  if (!py::isinstance<py::array>(value)) {
+    throw py::type_error(std::string(name) + " must be a numpy.ndarray");
+  }
+  return py::reinterpret_borrow<py::array>(value);
+}
+
+template <typename T>
+bool buffer_matches_dtype(const py::buffer_info& info) {
+  return info.itemsize == static_cast<py::ssize_t>(sizeof(T)) &&
+         info.format == py::format_descriptor<T>::format();
+}
+
+void validate_2d_c_contiguous(const py::buffer_info& info,
+                              const char* name) {
+  if (info.ndim != 2) {
+    throw py::value_error(std::string(name) + " must be a 2D array");
+  }
+  if (info.shape[0] <= 0 || info.shape[1] <= 0) {
+    throw py::value_error(std::string(name) + " must not be empty");
+  }
+  if (info.strides[1] != static_cast<py::ssize_t>(info.itemsize) ||
+      info.strides[0] != info.shape[1] * info.strides[1]) {
+    throw py::value_error(
+        std::string(name) +
+        " must be C-contiguous; use numpy.ascontiguousarray explicitly if a "
+        "copy is intended");
+  }
+}
+
+void validate_positive_tsamp(double tsamp) {
+  if (!std::isfinite(tsamp) || !(tsamp > 0.0)) {
+    throw py::value_error("tsamp must be finite and positive");
+  }
+}
+
+PyDedispersedResult make_external_dedispersed_result(
+    const py::object& data_object, double tsamp, double dm_low,
+    double dm_step, std::string backend) {
+  validate_positive_tsamp(tsamp);
+  if (!std::isfinite(dm_low)) {
+    throw py::value_error("dm_low must be finite");
+  }
+  if (!std::isfinite(dm_step) || dm_step < 0.0) {
+    throw py::value_error("dm_step must be finite and non-negative");
+  }
+
+  py::array data = require_numpy_array(data_object, "data");
+  const py::buffer_info info = data.request();
+  validate_2d_c_contiguous(info, "data");
+  if (!buffer_matches_dtype<std::uint32_t>(info) &&
+      !buffer_matches_dtype<float>(info)) {
+    throw py::type_error(
+        "DedispersedResult data must have dtype uint32 or float32");
+  }
+
+  PyDedispersedResult result;
+  result.data = std::move(data);
+  result.backend = std::move(backend);
+  result.dm_low = dm_low;
+  result.dm_step = dm_step;
+  result.ndm = static_cast<std::size_t>(info.shape[0]);
+  result.nsamples = static_cast<std::size_t>(info.shape[1]);
+  result.tsamp = tsamp;
+  return result;
+}
+
+PyDedispersedSpectrum make_external_dedispersed_spectrum(
+    const py::object& data_object, double tsamp, double dm,
+    py::ssize_t chan_begin, std::optional<py::ssize_t> chan_end,
+    std::string backend) {
+  validate_positive_tsamp(tsamp);
+  if (!std::isfinite(dm) || dm < 0.0) {
+    throw py::value_error("dm must be finite and non-negative");
+  }
+  if (chan_begin < 0) {
+    throw py::value_error("chan_begin must be non-negative");
+  }
+
+  py::array data = require_numpy_array(data_object, "data");
+  const py::buffer_info info = data.request();
+  validate_2d_c_contiguous(info, "data");
+  if (!buffer_matches_dtype<std::uint8_t>(info) &&
+      !buffer_matches_dtype<std::uint16_t>(info) &&
+      !buffer_matches_dtype<float>(info)) {
+    throw py::type_error(
+        "DedispersedSpectrum data must have dtype uint8, uint16, or float32");
+  }
+
+  if (chan_end.has_value() && chan_end.value() < 0) {
+    throw py::value_error("chan_end must be non-negative");
+  }
+  const auto nchans = static_cast<std::size_t>(info.shape[1]);
+  const auto begin = static_cast<std::size_t>(chan_begin);
+  if (!chan_end.has_value() &&
+      nchans > std::numeric_limits<std::size_t>::max() - begin) {
+    throw std::overflow_error("chan_end exceeds size_t range");
+  }
+  const std::size_t end =
+      chan_end.has_value()
+          ? static_cast<std::size_t>(chan_end.value())
+          : begin + nchans;
+  if (end < begin || end - begin != nchans) {
+    throw py::value_error("chan_end - chan_begin must equal data.shape[1]");
+  }
+
+  PyDedispersedSpectrum result;
+  result.data = std::move(data);
+  result.backend = std::move(backend);
+  result.dm = dm;
+  result.nsamples = static_cast<std::size_t>(info.shape[0]);
+  result.nchans = nchans;
+  result.tsamp = tsamp;
+  result.chan_begin = begin;
+  result.chan_end = end;
+  return result;
 }
 
 void validate_filterbank_header(const gaffa::FilterbankHeader& header) {
@@ -470,6 +592,9 @@ namespace gaffa::python {
 
 void bind_dedispersion(py::module_& module) {
   py::class_<PyDedispersedResult>(module, "DedispersedResult")
+      .def(py::init(&make_external_dedispersed_result), py::arg("data"),
+           py::kw_only(), py::arg("tsamp"), py::arg("dm_low") = 0.0,
+           py::arg("dm_step") = 0.0, py::arg("backend") = "external")
       .def_readonly("data", &PyDedispersedResult::data)
       .def_readonly("backend", &PyDedispersedResult::backend)
       .def_readonly("dm_low", &PyDedispersedResult::dm_low)
@@ -493,6 +618,10 @@ void bind_dedispersion(py::module_& module) {
       .def("__repr__", &dedispersed_result_repr);
 
   py::class_<PyDedispersedSpectrum>(module, "DedispersedSpectrum")
+      .def(py::init(&make_external_dedispersed_spectrum), py::arg("data"),
+           py::kw_only(), py::arg("tsamp"), py::arg("dm") = 0.0,
+           py::arg("chan_begin") = 0, py::arg("chan_end") = py::none(),
+           py::arg("backend") = "external")
       .def_readonly("data", &PyDedispersedSpectrum::data)
       .def_readonly("backend", &PyDedispersedSpectrum::backend)
       .def_readonly("dm", &PyDedispersedSpectrum::dm)

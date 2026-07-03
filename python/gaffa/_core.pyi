@@ -190,8 +190,8 @@ class DedispersedResult:
     data: DedispersedArray
     """Dedispersed time series with shape ``(ndm, nsamples)``."""
 
-    backend: Backend
-    """Backend that produced the result: ``"cpu"`` or ``"cuda"``."""
+    backend: str
+    """Backend or provenance label that produced the result."""
 
     dm_low: float
     """First DM represented by the result."""
@@ -207,6 +207,33 @@ class DedispersedResult:
 
     tsamp: float
     """Sampling interval in seconds."""
+
+    def __init__(
+        self,
+        data: DedispersedArray,
+        *,
+        tsamp: float,
+        dm_low: float = 0.0,
+        dm_step: float = 0.0,
+        backend: str = "external",
+    ) -> None:
+        """Wrap an existing dedispersed time-series array without copying.
+
+        Parameters
+        ----------
+        data
+            C-contiguous array with shape ``(ndm, nsamples)`` and dtype
+            ``uint32`` or ``float32``.
+        tsamp
+            Sampling interval in seconds.
+        dm_low
+            First DM represented by ``data``.
+        dm_step
+            DM spacing between adjacent rows. Single-DM arrays usually use 0.
+        backend
+            Provenance label. External arrays default to ``"external"``.
+        """
+        ...
 
     @property
     def shape(self) -> tuple[int, int]:
@@ -239,8 +266,8 @@ class DedispersedSpectrum:
     data: DedispersedSpectrumArray
     """Aligned dynamic spectrum with shape ``(nsamples, nchans)``."""
 
-    backend: Backend
-    """Backend that produced the result: ``"cpu"`` or ``"cuda"``."""
+    backend: str
+    """Backend or provenance label that produced the result."""
 
     dm: float
     """Dispersion measure used for channel alignment. Must be non-negative."""
@@ -259,6 +286,37 @@ class DedispersedSpectrum:
 
     chan_end: int
     """Exclusive end channel in the source filterbank."""
+
+    def __init__(
+        self,
+        data: DedispersedSpectrumArray,
+        *,
+        tsamp: float,
+        dm: float = 0.0,
+        chan_begin: int = 0,
+        chan_end: int | None = None,
+        backend: str = "external",
+    ) -> None:
+        """Wrap an existing aligned dynamic spectrum without copying.
+
+        Parameters
+        ----------
+        data
+            C-contiguous array with shape ``(nsamples, nchans)`` and dtype
+            ``uint8``, ``uint16``, or ``float32``.
+        tsamp
+            Sampling interval in seconds.
+        dm
+            Dispersion measure used for channel alignment.
+        chan_begin
+            Inclusive source-channel start.
+        chan_end
+            Exclusive source-channel end. Defaults to
+            ``chan_begin + data.shape[1]``.
+        backend
+            Provenance label. External arrays default to ``"external"``.
+        """
+        ...
 
     @property
     def shape(self) -> tuple[int, int]:
