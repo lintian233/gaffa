@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <vector>
 
@@ -13,28 +14,26 @@ namespace {
 gaffa::HostSampleView<float> make_view(const std::vector<float>& data,
                                        std::size_t nsamples,
                                        std::size_t nchans) {
-  return gaffa::HostSampleView<float>{
-      .data = data.data(),
-      .shape = gaffa::SampleShape{
+  return gaffa::make_host_sample_view<float>(
+      std::span<const float>(data),
+      gaffa::SampleShape{
           .nsamples = nsamples,
           .nifs = 1,
           .nchans = nchans,
-      },
-  };
+      });
 }
 
 template <typename T>
 gaffa::HostSampleView<T> make_typed_view(const std::vector<T>& data,
                                          std::size_t nsamples,
                                          std::size_t nchans) {
-  return gaffa::HostSampleView<T>{
-      .data = data.data(),
-      .shape = gaffa::SampleShape{
+  return gaffa::make_host_sample_view<T>(
+      std::span<const T>(data),
+      gaffa::SampleShape{
           .nsamples = nsamples,
           .nifs = 1,
           .nchans = nchans,
-      },
-  };
+      });
 }
 
 std::size_t cube_index(const gaffa::FoldedCube& cube, std::size_t subint,
@@ -400,14 +399,13 @@ TEST(Folding, SpectrumRejectsInvalidInputs) {
                    }),
                std::invalid_argument);
   EXPECT_THROW((void)gaffa::fold_spectrum_cpu(
-                   gaffa::HostSampleView<float>{
-                       .data = samples.data(),
-                       .shape = gaffa::SampleShape{
+                   gaffa::make_host_sample_view<float>(
+                       std::span<const float>(samples),
+                       gaffa::SampleShape{
                            .nsamples = 1,
                            .nifs = 2,
                            .nchans = 1,
-                       },
-                   },
+                       }),
                    gaffa::FoldSpectrumOptions{
                        .period = 1.0,
                        .tsamp = 0.1,

@@ -76,7 +76,7 @@ template <typename T>
 void validate_spectrum_input(HostSampleView<T> samples,
                              const FoldSpectrumOptions& options) {
   validate_fold_shape(options.period, options.tsamp, options.nbin);
-  if (samples.data == nullptr) {
+  if (samples.data.empty()) {
     throw std::invalid_argument("fold spectrum data must not be null");
   }
   if (samples.shape.nifs != 1) {
@@ -84,6 +84,10 @@ void validate_spectrum_input(HostSampleView<T> samples,
   }
   if (samples.shape.nsamples == 0 || samples.shape.nchans == 0) {
     throw std::invalid_argument("fold spectrum shape must be non-empty");
+  }
+  if (samples.data.size() != samples.size()) {
+    throw std::invalid_argument(
+        "fold spectrum data size does not match shape");
   }
   if (options.subint_samples == 0) {
     throw std::invalid_argument("fold subint_samples must be positive");
@@ -342,7 +346,7 @@ FoldedCube fold_spectrum_impl(HostSampleView<T> samples,
       const auto first_bin = static_cast<std::int64_t>(std::floor(low_scaled));
       const auto last_bin =
           static_cast<std::int64_t>(std::ceil(high_scaled) - 1.0);
-      const T* const row = samples.data + time * input_channels;
+      const T* const row = samples.data.data() + time * input_channels;
 
       if (channel_factor != 1) {
         for (std::size_t output_channel = 0; output_channel < output_channels;

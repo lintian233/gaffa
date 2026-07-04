@@ -113,8 +113,8 @@ PyDedispersedResult make_external_dedispersed_result(
     const py::object& data_object, double tsamp, double dm_low,
     double dm_step, std::string backend) {
   validate_positive_tsamp(tsamp);
-  if (!std::isfinite(dm_low)) {
-    throw py::value_error("dm_low must be finite");
+  if (!std::isfinite(dm_low) || dm_low < 0.0) {
+    throw py::value_error("dm_low must be finite and non-negative");
   }
   if (!std::isfinite(dm_step) || dm_step < 0.0) {
     throw py::value_error("dm_step must be finite and non-negative");
@@ -252,10 +252,10 @@ gaffa::HostSampleView<T> typed_sample_view(
         "filterbank data must be C-contiguous in (time, if, channel) order");
   }
 
-  return gaffa::HostSampleView<T>{
-      .data = static_cast<const T*>(info.ptr),
-      .shape = shape,
-  };
+  return gaffa::make_host_sample_view<T>(
+      std::span<const T>(static_cast<const T*>(info.ptr),
+                         gaffa::sample_element_count(shape)),
+      shape);
 }
 
 template <typename T>

@@ -27,7 +27,8 @@ TEST(FilterbankView, CreatesTypedHostSampleView) {
 
   const auto view = gaffa::sample_view<std::uint8_t>(filterbank);
 
-  EXPECT_EQ(view.data, std::get<std::vector<std::uint8_t>>(filterbank.samples).data());
+  EXPECT_EQ(view.data.data(),
+            std::get<std::vector<std::uint8_t>>(filterbank.samples).data());
   EXPECT_EQ(view.shape.nsamples, 2);
   EXPECT_EQ(view.shape.nifs, 1);
   EXPECT_EQ(view.shape.nchans, 4);

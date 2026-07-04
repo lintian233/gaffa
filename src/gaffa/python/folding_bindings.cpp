@@ -154,15 +154,16 @@ gaffa::FoldDedispersedSpectrumResult fold_array_view(
 
   const auto nsamples = static_cast<std::size_t>(info.shape[0]);
   const auto nchans = static_cast<std::size_t>(info.shape[1]);
-  const T* const pointer = static_cast<const T*>(info.ptr);
-  const gaffa::HostSampleView<T> samples{
-      .data = pointer,
-      .shape = gaffa::SampleShape{
-          .nsamples = nsamples,
-          .nifs = 1,
-          .nchans = nchans,
-      },
+  const gaffa::SampleShape shape{
+      .nsamples = nsamples,
+      .nifs = 1,
+      .nchans = nchans,
   };
+  const gaffa::HostSampleView<T> samples =
+      gaffa::make_host_sample_view<T>(
+          std::span<const T>(static_cast<const T*>(info.ptr),
+                             gaffa::sample_element_count(shape)),
+          shape);
 
   const gaffa::FoldDedispersedSpectrumOptions options{
       .period = period,

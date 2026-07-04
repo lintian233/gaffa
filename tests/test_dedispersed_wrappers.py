@@ -45,6 +45,15 @@ def test_dedispersed_result_rejects_inputs_that_would_copy() -> None:
         DedispersedResult(np.ones((1, 4), dtype=np.uint16), tsamp=0.25)
 
 
+def test_dedispersed_result_rejects_invalid_metadata() -> None:
+    data = np.ones((1, 4), dtype=np.uint32)
+
+    with pytest.raises(ValueError, match="dm_low must be finite and non-negative"):
+        DedispersedResult(data, tsamp=0.25, dm_low=-1.0)
+    with pytest.raises(ValueError, match="dm_step must be finite and non-negative"):
+        DedispersedResult(data, tsamp=0.25, dm_step=-1.0)
+
+
 def test_dedispersed_spectrum_wraps_array_without_copy() -> None:
     data = np.array([[1, 2], [3, 4]], dtype=np.uint8)
 

@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -17,8 +18,9 @@ template <typename T>
 gaffa::HostSampleView<T> make_view(const std::vector<T>& samples,
                                    std::size_t nsamples,
                                    std::size_t nchans) {
-  return gaffa::HostSampleView<T>{samples.data(),
-                                  gaffa::SampleShape{nsamples, 1, nchans}};
+  return gaffa::make_host_sample_view<T>(
+      std::span<const T>(samples),
+      gaffa::SampleShape{nsamples, 1, nchans});
 }
 
 bool has_cuda_device() {

@@ -49,7 +49,7 @@ std::size_t ceil_div(std::size_t value, std::size_t divisor) {
 template <typename T>
 void validate_samples(HostSampleView<T> samples,
                       std::span<const double> frequency_mhz) {
-  if (samples.data == nullptr) {
+  if (samples.data.empty()) {
     throw std::invalid_argument("dedispersion samples data must not be null");
   }
   if (samples.shape.nifs != 1) {
@@ -60,6 +60,10 @@ void validate_samples(HostSampleView<T> samples,
   }
   if (samples.shape.nchans == 0) {
     throw std::invalid_argument("dedispersion requires at least one channel");
+  }
+  if (samples.data.size() != samples.size()) {
+    throw std::invalid_argument(
+        "dedispersion sample data size does not match shape");
   }
   if (frequency_mhz.size() != samples.shape.nchans) {
     throw std::invalid_argument(

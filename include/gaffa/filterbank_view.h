@@ -37,7 +37,7 @@ HostSampleView<T> sample_view(const FilterbankData& filterbank) {
     throw std::runtime_error("filterbank sample size does not match header shape");
   }
 
-  return HostSampleView<T>{samples->data(), shape};
+  return make_host_sample_view<T>(std::span<const T>(*samples), shape);
 }
 
 template <typename T>
@@ -52,7 +52,7 @@ MutableHostSampleView<T> mutable_sample_view(FilterbankData& filterbank) {
     throw std::runtime_error("filterbank sample size does not match header shape");
   }
 
-  return MutableHostSampleView<T>{samples->data(), shape};
+  return make_mutable_host_sample_view<T>(std::span<T>(*samples), shape);
 }
 
 AnyHostSampleView sample_view(const FilterbankData& filterbank);

@@ -4,7 +4,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 namespace gaffa {
@@ -37,10 +39,78 @@ struct DedispersedShape {
   std::size_t nsamples = 0;
 };
 
+inline std::size_t dedispersed_element_count(DedispersedShape shape) {
+  if (shape.ndm != 0 &&
+      shape.nsamples > std::numeric_limits<std::size_t>::max() / shape.ndm) {
+    throw std::overflow_error("dedispersed shape size overflow");
+  }
+  return shape.ndm * shape.nsamples;
+}
+
+template <typename T>
+struct DedispersedResultView {
+  std::span<const T> data;
+  DedispersedShape shape{};
+
+  [[nodiscard]] std::size_t size() const {
+    return dedispersed_element_count(shape);
+  }
+
+  [[nodiscard]] bool empty() const noexcept {
+    return data.empty();
+  }
+
+  [[nodiscard]] std::span<const T> dm_series(std::size_t dm_index) const {
+    const std::size_t expected_size = size();
+    if (data.size() != expected_size) {
+      throw std::invalid_argument(
+          "dedispersed result view data size does not match shape");
+    }
+    if (dm_index >= shape.ndm) {
+      throw std::out_of_range("dedispersed result dm_index is out of range");
+    }
+    return data.subspan(dm_index * shape.nsamples, shape.nsamples);
+  }
+};
+
+template <typename T>
+struct MutableDedispersedResultView {
+  std::span<T> data;
+  DedispersedShape shape{};
+
+  [[nodiscard]] std::size_t size() const {
+    return dedispersed_element_count(shape);
+  }
+
+  [[nodiscard]] bool empty() const noexcept {
+    return data.empty();
+  }
+
+  [[nodiscard]] std::span<T> dm_series(std::size_t dm_index) const {
+    const std::size_t expected_size = size();
+    if (data.size() != expected_size) {
+      throw std::invalid_argument(
+          "dedispersed result view data size does not match shape");
+    }
+    if (dm_index >= shape.ndm) {
+      throw std::out_of_range("dedispersed result dm_index is out of range");
+    }
+    return data.subspan(dm_index * shape.nsamples, shape.nsamples);
+  }
+};
+
 template <typename T>
 struct DedispersedResult {
   std::vector<T> data;
   DedispersedShape shape{};
+
+  [[nodiscard]] DedispersedResultView<T> view() const noexcept {
+    return DedispersedResultView<T>{std::span<const T>(data), shape};
+  }
+
+  [[nodiscard]] MutableDedispersedResultView<T> mutable_view() noexcept {
+    return MutableDedispersedResultView<T>{std::span<T>(data), shape};
+  }
 };
 
 template <typename T>
@@ -62,12 +132,12 @@ struct DedispersedSpectrum {
 
   [[nodiscard]] std::size_t size() const noexcept { return data.size(); }
 
-  [[nodiscard]] HostSampleView<T> view() const noexcept {
-    return HostSampleView<T>{data.data(), shape};
+  [[nodiscard]] HostSampleView<T> view() const {
+    return make_host_sample_view<T>(std::span<const T>(data), shape);
   }
 
-  [[nodiscard]] MutableHostSampleView<T> mutable_view() noexcept {
-    return MutableHostSampleView<T>{data.data(), shape};
+  [[nodiscard]] MutableHostSampleView<T> mutable_view() {
+    return make_mutable_host_sample_view<T>(std::span<T>(data), shape);
   }
 };
 

@@ -79,7 +79,7 @@ void validate_options(const CudaDedispersionOptions& options) {
 template <typename T>
 void validate_samples(HostSampleView<T> samples,
                       std::span<const double> frequency_mhz) {
-  if (samples.data == nullptr) {
+  if (samples.data.empty()) {
     throw std::invalid_argument("dedispersion samples data must not be null");
   }
   if (samples.shape.nifs != 1) {
@@ -90,6 +90,10 @@ void validate_samples(HostSampleView<T> samples,
   }
   if (samples.shape.nchans == 0) {
     throw std::invalid_argument("dedispersion requires at least one channel");
+  }
+  if (samples.data.size() != samples.size()) {
+    throw std::invalid_argument(
+        "dedispersion sample data size does not match shape");
   }
   if (frequency_mhz.size() != samples.shape.nchans) {
     throw std::invalid_argument(
@@ -448,8 +452,8 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_single_dm_cuda_device_imp
                                                                 plan));
   const int threads = static_cast<int>(options.threads_per_block);
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
-  const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
-      std::span<const T>(samples.data, input_size), "copy samples");
+  const CudaDeviceBuffer<T> device_input =
+      copy_to_device<T>(samples.data.first(input_size), "copy samples");
   const CudaDeviceBuffer<double> device_frequency =
       copy_to_device<double>(std::span<const double>(frequency_copy),
                              "copy frequency table");
@@ -496,8 +500,8 @@ CudaDedispersedSpectrum<T> dedisperse_spectrum_cuda_device_impl(
       checked_multiply(output_nsamples, channel_count, "dedispersed spectrum");
   const int threads = static_cast<int>(options.threads_per_block);
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
-  const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
-      std::span<const T>(samples.data, input_size), "copy samples");
+  const CudaDeviceBuffer<T> device_input =
+      copy_to_device<T>(samples.data.first(input_size), "copy samples");
   const CudaDeviceBuffer<double> device_frequency =
       copy_to_device<double>(std::span<const double>(frequency_copy),
                              "copy frequency table");
@@ -550,8 +554,8 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_multi_dm_cuda_device_impl
       checked_multiply(plan.ndm, output_nsamples, "dedispersed output");
   const int threads = static_cast<int>(options.threads_per_block);
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
-  const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
-      std::span<const T>(samples.data, input_size), "copy samples");
+  const CudaDeviceBuffer<T> device_input =
+      copy_to_device<T>(samples.data.first(input_size), "copy samples");
   const CudaDeviceBuffer<double> device_frequency =
       copy_to_device<double>(std::span<const double>(frequency_copy),
                              "copy frequency table");
@@ -612,8 +616,8 @@ CudaDedispersedResult<DedispersedValueT<T>> dedisperse_subband_cuda_device_impl(
   const std::vector<double> frequency_copy = copy_span_to_vector(frequency_mhz);
   const std::vector<double> subband_frequency = make_subband_frequency(
       frequency_mhz, plan, subband_options, subband_count);
-  const CudaDeviceBuffer<T> device_input = copy_to_device<T>(
-      std::span<const T>(samples.data, input_size), "copy samples");
+  const CudaDeviceBuffer<T> device_input =
+      copy_to_device<T>(samples.data.first(input_size), "copy samples");
   const CudaDeviceBuffer<double> device_frequency =
       copy_to_device<double>(std::span<const double>(frequency_copy),
                              "copy frequency table");

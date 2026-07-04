@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -17,8 +18,9 @@ template <typename T>
 gaffa::HostSampleView<T> make_view(const std::vector<T>& samples,
                                    std::size_t nsamples,
                                    std::size_t nchans) {
-  return gaffa::HostSampleView<T>{samples.data(),
-                                  gaffa::SampleShape{nsamples, 1, nchans}};
+  return gaffa::make_host_sample_view<T>(
+      std::span<const T>(samples),
+      gaffa::SampleShape{nsamples, 1, nchans});
 }
 
 gaffa::SingleDmDedispersionPlan single_plan(double dm) {
@@ -48,6 +50,46 @@ std::filesystem::path test_data_path(const std::string& filename) {
 }
 
 }  // namespace
+
+TEST(DedispersedResultView, ExposesRowsWithoutCopying) {
+  gaffa::DedispersedResult<float> result{
+      .data = {1.0F, 2.0F, 3.0F, 4.0F, 5.0F, 6.0F},
+      .shape = gaffa::DedispersedShape{2, 3},
+  };
+
+  const auto view = result.view();
+  EXPECT_EQ(view.size(), 6);
+  EXPECT_FALSE(view.empty());
+  EXPECT_EQ(view.dm_series(0)[0], 1.0F);
+  EXPECT_EQ(view.dm_series(0)[2], 3.0F);
+  EXPECT_EQ(view.dm_series(1)[0], 4.0F);
+  EXPECT_EQ(view.dm_series(1)[2], 6.0F);
+
+  auto mutable_view = result.mutable_view();
+  mutable_view.dm_series(1)[1] = 42.0F;
+  EXPECT_EQ(result.data[4], 42.0F);
+}
+
+TEST(DedispersedResultView, RejectsInvalidRowsAndShape) {
+  const std::vector<float> data{1.0F, 2.0F, 3.0F};
+  const gaffa::DedispersedResultView<float> mismatched{
+      std::span<const float>(data),
+      gaffa::DedispersedShape{2, 2},
+  };
+  EXPECT_THROW((void)mismatched.dm_series(0), std::invalid_argument);
+
+  const gaffa::DedispersedResultView<float> valid{
+      std::span<const float>(data),
+      gaffa::DedispersedShape{1, 3},
+  };
+  EXPECT_THROW((void)valid.dm_series(1), std::out_of_range);
+
+  const gaffa::DedispersedResultView<float> overflowing{
+      std::span<const float>{},
+      gaffa::DedispersedShape{std::numeric_limits<std::size_t>::max(), 2},
+  };
+  EXPECT_THROW((void)overflowing.size(), std::overflow_error);
+}
 
 TEST(DedispersionCpu, SingleDmZeroEqualsChannelSumForUint8) {
   const std::vector<std::uint8_t> samples{1, 2, 3, 4, 5, 6};
@@ -274,8 +316,10 @@ TEST(DedispersionCpu, SubbandNormalModeProducesExpectedDmZeroSums) {
 TEST(DedispersionCpu, RejectsNifsOtherThanOne) {
   const std::vector<std::uint8_t> samples{1, 2, 3, 4};
   const std::vector<double> frequency{1000.0, 2000.0};
-  const gaffa::HostSampleView<std::uint8_t> view{
-      samples.data(), gaffa::SampleShape{1, 2, 2}};
+  const gaffa::HostSampleView<std::uint8_t> view =
+      gaffa::make_host_sample_view<std::uint8_t>(
+          std::span<const std::uint8_t>(samples),
+          gaffa::SampleShape{1, 2, 2});
 
   EXPECT_THROW((void)gaffa::dedisperse_single_dm_cpu(view, frequency,
                                                      single_plan(0.0)),
@@ -296,7 +340,7 @@ TEST(DedispersionCpu, RejectsFrequencySizeMismatch) {
 TEST(DedispersionCpu, RejectsNullSampleData) {
   const std::vector<double> frequency{1000.0, 2000.0};
   const gaffa::HostSampleView<std::uint8_t> view{
-      nullptr, gaffa::SampleShape{2, 1, 2}};
+      std::span<const std::uint8_t>{}, gaffa::SampleShape{2, 1, 2}};
   gaffa::SingleDmDedispersionPlan plan = single_plan(0.0);
   plan.chan_end = 2;
 

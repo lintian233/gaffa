@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <stdexcept>
 #include <variant>
 
@@ -38,31 +39,57 @@ inline std::size_t sample_row_element_count(const SampleShape& shape) {
 
 template <typename T>
 struct HostSampleView {
-  const T* data = nullptr;
+  std::span<const T> data;
   SampleShape shape{};
 
   std::size_t size() const {
     return sample_element_count(shape);
   }
 
-  bool empty() const {
-    return data == nullptr || size() == 0;
+  const T* data_ptr() const noexcept {
+    return data.data();
+  }
+
+  bool empty() const noexcept {
+    return data.empty();
   }
 };
 
 template <typename T>
 struct MutableHostSampleView {
-  T* data = nullptr;
+  std::span<T> data;
   SampleShape shape{};
 
   std::size_t size() const {
     return sample_element_count(shape);
   }
 
-  bool empty() const {
-    return data == nullptr || size() == 0;
+  T* data_ptr() const noexcept {
+    return data.data();
+  }
+
+  bool empty() const noexcept {
+    return data.empty();
   }
 };
+
+template <typename T>
+HostSampleView<T> make_host_sample_view(std::span<const T> data,
+                                        SampleShape shape) {
+  if (data.size() != sample_element_count(shape)) {
+    throw std::invalid_argument("sample view data size does not match shape");
+  }
+  return HostSampleView<T>{data, shape};
+}
+
+template <typename T>
+MutableHostSampleView<T> make_mutable_host_sample_view(std::span<T> data,
+                                                       SampleShape shape) {
+  if (data.size() != sample_element_count(shape)) {
+    throw std::invalid_argument("sample view data size does not match shape");
+  }
+  return MutableHostSampleView<T>{data, shape};
+}
 
 using AnyHostSampleView =
     std::variant<HostSampleView<std::uint8_t>,

@@ -227,9 +227,10 @@ class DedispersedResult:
         tsamp
             Sampling interval in seconds.
         dm_low
-            First DM represented by ``data``.
+            First DM represented by ``data``. Must be non-negative.
         dm_step
-            DM spacing between adjacent rows. Single-DM arrays usually use 0.
+            DM spacing between adjacent rows. Must be non-negative. Single-DM
+            arrays usually use 0.
         backend
             Provenance label. External arrays default to ``"external"``.
         """
