@@ -171,6 +171,23 @@ TEST(FfaDetectionCpu, DetectsCircularBoxcarAcrossBoundary) {
                   expected_riptide_snr(4, 2, 9.0F, 9.0F, 1.0F));
 }
 
+TEST(FfaDetectionCpu, KeepsFirstPhaseWhenBoxcarSumsTie) {
+  const gaffa::FfaTransformShape shape{.rows = 1, .bins = 6};
+  const std::vector<float> transform{1.0F, 1.0F, 0.0F,
+                                     1.0F, 1.0F, 0.0F};
+  const auto task = task_for_shape(shape);
+  const std::vector<std::size_t> widths{2};
+
+  const auto peaks = gaffa::find_ffa_peaks_cpu(
+      transform, shape, task, widths, 1.0F,
+      gaffa::FfaDetectionOptions{.snr_threshold = 0.0F});
+
+  ASSERT_EQ(peaks.size(), 1);
+  EXPECT_EQ(peaks[0].phase, 0);
+  EXPECT_FLOAT_EQ(peaks[0].snr,
+                  expected_riptide_snr(6, 2, 2.0F, 4.0F, 1.0F));
+}
+
 TEST(FfaDetectionCpu, ComputesPeriodFromTaskRowsNotRowsEval) {
   const gaffa::FfaTransformShape shape{.rows = 4, .bins = 4};
   std::vector<float> transform(shape.rows * shape.bins, 0.0F);

@@ -7,6 +7,11 @@
 #include <stdexcept>
 #include <vector>
 
+#if (defined(__GNUC__) || defined(__clang__)) && defined(__x86_64__)
+#include <immintrin.h>
+#define GAFFA_HAS_X86_AVX2_DISPATCH 1
+#endif
+
 namespace gaffa {
 namespace {
 
@@ -69,24 +74,60 @@ void validate_shape(FfaTransformShape shape) {
   }
 }
 
-void add(const float* lhs, const float* rhs, std::size_t size, float* output) {
-  for (std::size_t index = 0; index < size; ++index) {
-    output[index] = lhs[index] + rhs[index];
+struct PortableTransformKernel {
+  static inline void add(const float* lhs,
+                         const float* rhs,
+                         std::size_t size,
+                         float* output) {
+#pragma omp simd
+    for (std::size_t index = 0; index < size; ++index) {
+      output[index] = lhs[index] + rhs[index];
+    }
   }
-}
+};
 
+#if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
+struct Avx2TransformKernel {
+  __attribute__((target("avx2"))) static inline void add(
+      const float* lhs,
+      const float* rhs,
+      std::size_t size,
+      float* output) {
+    std::size_t index = 0;
+    for (; index + 8 <= size; index += 8) {
+      const __m256 lhs_values = _mm256_loadu_ps(lhs + index);
+      const __m256 rhs_values = _mm256_loadu_ps(rhs + index);
+      _mm256_storeu_ps(output + index,
+                       _mm256_add_ps(lhs_values, rhs_values));
+    }
+    for (; index < size; ++index) {
+      output[index] = lhs[index] + rhs[index];
+    }
+  }
+};
+#endif
+
+template <typename Kernel>
 void fused_rollback_add(const float* lhs,
                         const float* rhs,
                         std::size_t size,
                         std::size_t shift,
                         float* output) {
   const std::size_t rolled = shift % size;
+  if (rolled == 0) {
+    Kernel::add(lhs, rhs, size, output);
+    return;
+  }
+
   const std::size_t first_count = size - rolled;
-  add(lhs, rhs + rolled, first_count, output);
-  add(lhs + first_count, rhs, rolled, output + first_count);
+  Kernel::add(lhs, rhs + rolled, first_count, output);
+  Kernel::add(lhs + first_count, rhs, rolled, output + first_count);
 }
 
-void merge(ConstBlockView head, ConstBlockView tail, BlockView output) {
+template <typename Kernel>
+void merge(ConstBlockView head,
+           ConstBlockView tail,
+           BlockView output) {
   const std::size_t rows = output.rows;
   const std::size_t bins = output.bins;
   const float head_scale =
@@ -101,12 +142,17 @@ void merge(ConstBlockView head, ConstBlockView tail, BlockView output) {
         static_cast<std::size_t>(tail_scale * static_cast<float>(shift) + 0.5F);
     const std::size_t compensation = shift - (head_shift + tail_shift);
 
-    fused_rollback_add(head.row_ptr(head_shift), tail.row_ptr(tail_shift), bins,
-                       head_shift + compensation, output.row_ptr(shift));
+    fused_rollback_add<Kernel>(head.row_ptr(head_shift),
+                               tail.row_ptr(tail_shift), bins,
+                               head_shift + compensation,
+                               output.row_ptr(shift));
   }
 }
 
-void transform_recursive(ConstBlockView input, BlockView scratch, BlockView output) {
+template <typename Kernel>
+void transform_recursive(ConstBlockView input,
+                         BlockView scratch,
+                         BlockView output) {
   const std::size_t rows = input.rows;
   const std::size_t bins = input.bins;
 
@@ -116,16 +162,38 @@ void transform_recursive(ConstBlockView input, BlockView scratch, BlockView outp
   }
 
   if (rows == 2) {
-    add(input.row_ptr(0), input.row_ptr(1), bins, output.row_ptr(0));
-    fused_rollback_add(input.row_ptr(0), input.row_ptr(1), bins, 1,
-                       output.row_ptr(1));
+    Kernel::add(input.row_ptr(0), input.row_ptr(1), bins, output.row_ptr(0));
+    fused_rollback_add<Kernel>(input.row_ptr(0), input.row_ptr(1), bins, 1,
+                               output.row_ptr(1));
     return;
   }
 
-  transform_recursive(input.head(), output.head(), scratch.head());
-  transform_recursive(input.tail(), output.tail(), scratch.tail());
-  merge(scratch.head().as_const(), scratch.tail().as_const(), output);
+  transform_recursive<Kernel>(input.head(), output.head(), scratch.head());
+  transform_recursive<Kernel>(input.tail(), output.tail(), scratch.tail());
+  merge<Kernel>(scratch.head().as_const(), scratch.tail().as_const(), output);
 }
+
+void transform_recursive_portable(ConstBlockView input,
+                                  BlockView scratch,
+                                  BlockView output) {
+  transform_recursive<PortableTransformKernel>(input, scratch, output);
+}
+
+#if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
+__attribute__((target("avx2"))) void transform_recursive_avx2(
+    ConstBlockView input,
+    BlockView scratch,
+    BlockView output) {
+  // Dispatch once per transform block. FFA rows are short, so per-row function
+  // pointer dispatch is measurable in the recursive merge hot path.
+  transform_recursive<Avx2TransformKernel>(input, scratch, output);
+}
+
+bool cpu_supports_avx2() {
+  __builtin_cpu_init();
+  return __builtin_cpu_supports("avx2");
+}
+#endif
 
 void validate_transform_buffers(std::span<const float> input,
                                 std::span<float> scratch,
@@ -153,9 +221,18 @@ void ffa_transform_block_cpu(std::span<const float> input,
                              std::span<float> output) {
   validate_transform_buffers(input, scratch, output, shape);
 
-  transform_recursive(ConstBlockView{input.data(), shape.rows, shape.bins},
-                      BlockView{scratch.data(), shape.rows, shape.bins},
-                      BlockView{output.data(), shape.rows, shape.bins});
+  const ConstBlockView input_view{input.data(), shape.rows, shape.bins};
+  const BlockView scratch_view{scratch.data(), shape.rows, shape.bins};
+  const BlockView output_view{output.data(), shape.rows, shape.bins};
+
+#if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
+  if (cpu_supports_avx2()) {
+    transform_recursive_avx2(input_view, scratch_view, output_view);
+    return;
+  }
+#endif
+
+  transform_recursive_portable(input_view, scratch_view, output_view);
 }
 
 FfaTransformResult<float> ffa_transform_cpu(
