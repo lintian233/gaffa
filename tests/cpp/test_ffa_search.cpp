@@ -1,5 +1,8 @@
 #include "gaffa/ffa_search.h"
 
+#include "gaffa/ffa_detection.h"
+#include "gaffa/ffa_executor.h"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -135,4 +138,50 @@ TEST(FfaSearchCpu, AllowsExternalPlan) {
 
   ASSERT_FALSE(result.peaks.empty());
   EXPECT_EQ(result.peaks.front().bins, 2);
+}
+
+TEST(FfaSearchCpu, MatchesMaterializedBlockReference) {
+  const std::vector<float> input{0, 0, 3, 0, 1, 0, 3, 0,
+                                 0, 4, 0, 1, 0, 4, 0, 1};
+  const gaffa::FfaSearchPlan plan{
+      .tasks = {
+          make_task(input.size(), 1.0, input.size(), 4, 4, 4),
+          make_task(input.size(), 2.0, 8, 2, 2, 4),
+      },
+      .width_trials = {1, 2},
+  };
+  const gaffa::FfaSearchOptions search_options{
+      .snr_threshold = 0.0F,
+  };
+
+  const auto result = gaffa::search_ffa_cpu(input, plan, search_options);
+
+  std::vector<gaffa::FfaPeak> reference;
+  const gaffa::FfaDetectionOptions detection_options{
+      .snr_threshold = search_options.snr_threshold,
+      .max_peaks = search_options.max_peaks,
+  };
+  gaffa::for_each_ffa_block_cpu(
+      input, plan, [&](const gaffa::FfaBlockView& block) {
+        const auto peaks = gaffa::find_ffa_peaks_cpu(
+            block.transform, block.shape, *block.task, plan.width_trials,
+            block.stdnoise, detection_options);
+        reference.insert(reference.end(), peaks.begin(), peaks.end());
+      });
+  gaffa::sort_ffa_peaks(reference);
+
+  ASSERT_EQ(result.peaks.size(), reference.size());
+  for (std::size_t index = 0; index < reference.size(); ++index) {
+    EXPECT_EQ(result.peaks[index].width, reference[index].width);
+    EXPECT_EQ(result.peaks[index].width_index, reference[index].width_index);
+    EXPECT_EQ(result.peaks[index].period_index,
+              reference[index].period_index);
+    EXPECT_EQ(result.peaks[index].phase, reference[index].phase);
+    EXPECT_EQ(result.peaks[index].shift, reference[index].shift);
+    EXPECT_EQ(result.peaks[index].bins, reference[index].bins);
+    EXPECT_DOUBLE_EQ(result.peaks[index].period, reference[index].period);
+    EXPECT_DOUBLE_EQ(result.peaks[index].frequency,
+                     reference[index].frequency);
+    EXPECT_FLOAT_EQ(result.peaks[index].snr, reference[index].snr);
+  }
 }

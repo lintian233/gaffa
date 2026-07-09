@@ -266,6 +266,43 @@ TEST(FfaDetectionCpu, DoesNotClusterAcrossWidthTrials) {
   EXPECT_NE(peaks[0].width, peaks[1].width);
 }
 
+TEST(FfaDetectionCpu, RowDetectionMatchesBlockDetection) {
+  const gaffa::FfaTransformShape shape{.rows = 2, .bins = 4};
+  const std::vector<float> transform{
+      0.0F, 0.0F, 5.0F, 0.0F,
+      4.0F, 0.0F, 0.0F, 5.0F,
+  };
+  const auto task = task_for_shape(shape);
+  const std::vector<std::size_t> widths{1, 2};
+  const gaffa::FfaDetectionOptions options{.snr_threshold = 0.0F};
+
+  const auto expected =
+      gaffa::find_ffa_peaks_cpu(transform, shape, task, widths, 1.0F, options);
+
+  std::vector<gaffa::FfaPeak> observed;
+  auto plan = gaffa::make_ffa_detection_plan(widths, shape.bins);
+  std::vector<float> circular_prefix(shape.bins + plan.max_width + 1, 0.0F);
+  gaffa::FfaPeakCollector collector{
+      .peaks = &observed,
+      .max_peaks = options.max_peaks,
+  };
+  for (std::size_t shift = 0; shift < shape.rows; ++shift) {
+    const auto row = std::span<const float>(transform).subspan(
+        shift * shape.bins, shape.bins);
+    gaffa::detect_ffa_row_cpu(row, shift, task, plan, 1.0F, options,
+                              circular_prefix, collector);
+  }
+  gaffa::sort_ffa_peaks(observed);
+
+  ASSERT_EQ(observed.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(observed[index].shift, expected[index].shift);
+    EXPECT_EQ(observed[index].width, expected[index].width);
+    EXPECT_EQ(observed[index].phase, expected[index].phase);
+    EXPECT_FLOAT_EQ(observed[index].snr, expected[index].snr);
+  }
+}
+
 TEST(FfaDetectionCpu, FiltersBelowThreshold) {
   const gaffa::FfaTransformShape shape{.rows = 1, .bins = 4};
   const std::vector<float> transform{0.0F, 0.0F, 5.0F, 0.0F};

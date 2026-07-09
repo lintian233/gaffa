@@ -150,6 +150,27 @@ void merge(ConstBlockView head,
 }
 
 template <typename Kernel>
+void merge_row(ConstBlockView head,
+               ConstBlockView tail,
+               std::size_t output_rows,
+               std::size_t shift,
+               float* output) {
+  const std::size_t bins = head.bins;
+  const float head_scale =
+      static_cast<float>(head.rows - 1) / static_cast<float>(output_rows - 1);
+  const float tail_scale =
+      static_cast<float>(tail.rows - 1) / static_cast<float>(output_rows - 1);
+  const auto head_shift =
+      static_cast<std::size_t>(head_scale * static_cast<float>(shift) + 0.5F);
+  const auto tail_shift =
+      static_cast<std::size_t>(tail_scale * static_cast<float>(shift) + 0.5F);
+  const std::size_t compensation = shift - (head_shift + tail_shift);
+
+  fused_rollback_add<Kernel>(head.row_ptr(head_shift), tail.row_ptr(tail_shift),
+                             bins, head_shift + compensation, output);
+}
+
+template <typename Kernel>
 void transform_recursive(ConstBlockView input,
                          BlockView scratch,
                          BlockView output) {
@@ -179,6 +200,66 @@ void transform_recursive_portable(ConstBlockView input,
   transform_recursive<PortableTransformKernel>(input, scratch, output);
 }
 
+template <typename Kernel>
+void emit_transform_rows(ConstBlockView input,
+                         std::size_t rows_eval,
+                         BlockView scratch,
+                         BlockView work,
+                         std::span<float> row_buffer,
+                         const FfaTransformRowConsumer& consumer) {
+  const std::size_t rows = input.rows;
+  const std::size_t bins = input.bins;
+
+  if (rows == 1) {
+    consumer(FfaTransformRowView{
+        .shift = 0,
+        .profile = std::span<const float>(input.row_ptr(0), bins),
+    });
+    return;
+  }
+
+  if (rows == 2) {
+    Kernel::add(input.row_ptr(0), input.row_ptr(1), bins, row_buffer.data());
+    consumer(FfaTransformRowView{
+        .shift = 0,
+        .profile = row_buffer.first(bins),
+    });
+
+    if (rows_eval > 1) {
+      fused_rollback_add<Kernel>(input.row_ptr(0), input.row_ptr(1), bins, 1,
+                                 row_buffer.data());
+      consumer(FfaTransformRowView{
+          .shift = 1,
+          .profile = row_buffer.first(bins),
+      });
+    }
+    return;
+  }
+
+  transform_recursive<Kernel>(input.head(), scratch.head(), work.head());
+  transform_recursive<Kernel>(input.tail(), scratch.tail(), work.tail());
+
+  const ConstBlockView head = work.head().as_const();
+  const ConstBlockView tail = work.tail().as_const();
+  for (std::size_t shift = 0; shift < rows_eval; ++shift) {
+    merge_row<Kernel>(head, tail, rows, shift, row_buffer.data());
+    consumer(FfaTransformRowView{
+        .shift = shift,
+        .profile = row_buffer.first(bins),
+    });
+  }
+}
+
+void emit_transform_rows_portable(ConstBlockView input,
+                                  std::size_t rows_eval,
+                                  BlockView scratch,
+                                  BlockView work,
+                                  std::span<float> row_buffer,
+                                  const FfaTransformRowConsumer& consumer) {
+  emit_transform_rows<PortableTransformKernel>(input, rows_eval, scratch, work,
+                                               row_buffer, consumer);
+}
+
 #if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
 __attribute__((target("avx2"))) void transform_recursive_avx2(
     ConstBlockView input,
@@ -187,6 +268,17 @@ __attribute__((target("avx2"))) void transform_recursive_avx2(
   // Dispatch once per transform block. FFA rows are short, so per-row function
   // pointer dispatch is measurable in the recursive merge hot path.
   transform_recursive<Avx2TransformKernel>(input, scratch, output);
+}
+
+__attribute__((target("avx2"))) void emit_transform_rows_avx2(
+    ConstBlockView input,
+    std::size_t rows_eval,
+    BlockView scratch,
+    BlockView work,
+    std::span<float> row_buffer,
+    const FfaTransformRowConsumer& consumer) {
+  emit_transform_rows<Avx2TransformKernel>(input, rows_eval, scratch, work,
+                                           row_buffer, consumer);
 }
 
 bool cpu_supports_avx2() {
@@ -213,6 +305,38 @@ void validate_transform_buffers(std::span<const float> input,
   }
 }
 
+void validate_transform_row_buffers(std::span<const float> input,
+                                    FfaTransformShape shape,
+                                    std::size_t rows_eval,
+                                    std::span<float> scratch,
+                                    std::span<float> work,
+                                    std::span<float> row_buffer,
+                                    const FfaTransformRowConsumer& consumer) {
+  validate_shape(shape);
+
+  if (rows_eval == 0 || rows_eval > shape.rows) {
+    throw std::invalid_argument(
+        "FFA transform rows_eval must satisfy 0 < rows_eval <= rows");
+  }
+
+  const std::size_t expected_size = shape.rows * shape.bins;
+  if (input.size() != expected_size) {
+    throw std::invalid_argument("FFA input size does not match transform shape");
+  }
+  if (scratch.size() < expected_size) {
+    throw std::invalid_argument("FFA scratch buffer is too small");
+  }
+  if (work.size() < expected_size) {
+    throw std::invalid_argument("FFA work buffer is too small");
+  }
+  if (row_buffer.size() < shape.bins) {
+    throw std::invalid_argument("FFA row buffer is too small");
+  }
+  if (!consumer) {
+    throw std::invalid_argument("FFA transform row consumer must be callable");
+  }
+}
+
 }  // namespace
 
 void ffa_transform_block_cpu(std::span<const float> input,
@@ -233,6 +357,33 @@ void ffa_transform_block_cpu(std::span<const float> input,
 #endif
 
   transform_recursive_portable(input_view, scratch_view, output_view);
+}
+
+void for_each_ffa_transform_row_cpu(
+    std::span<const float> input,
+    FfaTransformShape shape,
+    std::size_t rows_eval,
+    std::span<float> scratch,
+    std::span<float> work,
+    std::span<float> row_buffer,
+    const FfaTransformRowConsumer& consumer) {
+  validate_transform_row_buffers(input, shape, rows_eval, scratch, work,
+                                 row_buffer, consumer);
+
+  const ConstBlockView input_view{input.data(), shape.rows, shape.bins};
+  const BlockView scratch_view{scratch.data(), shape.rows, shape.bins};
+  const BlockView work_view{work.data(), shape.rows, shape.bins};
+
+#if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
+  if (cpu_supports_avx2()) {
+    emit_transform_rows_avx2(input_view, rows_eval, scratch_view, work_view,
+                             row_buffer, consumer);
+    return;
+  }
+#endif
+
+  emit_transform_rows_portable(input_view, rows_eval, scratch_view, work_view,
+                               row_buffer, consumer);
 }
 
 FfaTransformResult<float> ffa_transform_cpu(

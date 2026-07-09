@@ -23,15 +23,7 @@ struct BoxcarPeak {
   std::size_t phase = 0;
 };
 
-struct BoxcarTrial {
-  std::size_t width = 0;
-  std::size_t width_index = 0;
-  float height = 0.0F;
-  float baseline = 0.0F;
-  double duty_cycle = 0.0;
-};
-
-using ScanBoxcarPeakFn = BoxcarPeak (*)(const BoxcarTrial&,
+using ScanBoxcarPeakFn = BoxcarPeak (*)(const FfaBoxcarTrial&,
                                         std::span<const float>,
                                         std::size_t,
                                         float,
@@ -63,18 +55,18 @@ void validate_width_trials(std::span<const std::size_t> width_trials,
   }
 }
 
-std::vector<BoxcarTrial> make_boxcar_trials(
+std::vector<FfaBoxcarTrial> make_boxcar_trials(
     std::span<const std::size_t> width_trials,
     std::size_t bins) {
   const auto bins_f = static_cast<float>(bins);
-  std::vector<BoxcarTrial> trials;
+  std::vector<FfaBoxcarTrial> trials;
   trials.reserve(width_trials.size());
   for (std::size_t width_index = 0; width_index < width_trials.size();
        ++width_index) {
     const std::size_t width = width_trials[width_index];
     const auto width_f = static_cast<float>(width);
     const float height = std::sqrt((bins_f - width_f) / (bins_f * width_f));
-    trials.push_back(BoxcarTrial{
+    trials.push_back(FfaBoxcarTrial{
         .width = width,
         .width_index = width_index,
         .height = height,
@@ -88,7 +80,6 @@ std::vector<BoxcarTrial> make_boxcar_trials(
 void validate_detection_arguments(std::span<const float> transform,
                                   FfaTransformShape shape,
                                   const FfaSearchTask& task,
-                                  std::span<const std::size_t> width_trials,
                                   float stdnoise,
                                   const FfaDetectionOptions& options) {
   const std::size_t expected_size = checked_block_size(shape);
@@ -117,7 +108,6 @@ void validate_detection_arguments(std::span<const float> transform,
     throw std::invalid_argument(
         "FFA detection S/N threshold must be finite");
   }
-  validate_width_trials(width_trials, shape.bins);
 }
 
 double trial_period(const FfaSearchTask& task, std::size_t shift) {
@@ -129,16 +119,6 @@ double trial_period(const FfaSearchTask& task, std::size_t shift) {
   return task.effective_tsamp * bins * bins /
          (bins - static_cast<double>(shift) /
                      static_cast<double>(task.rows - 1));
-}
-
-void append_peak_with_guard(std::vector<FfaPeak>& peaks,
-                            const FfaPeak& peak,
-                            const FfaDetectionOptions& options) {
-  if (options.max_peaks != 0 && peaks.size() >= options.max_peaks) {
-    throw std::runtime_error(
-        "FFA detection peak count exceeded max_peaks safety guard");
-  }
-  peaks.push_back(peak);
 }
 
 float fill_circular_prefix(std::span<const float> profile,
@@ -156,7 +136,7 @@ float fill_circular_prefix(std::span<const float> profile,
   return circular_prefix[bins];
 }
 
-BoxcarPeak scan_boxcar_peak_portable(const BoxcarTrial& trial,
+BoxcarPeak scan_boxcar_peak_portable(const FfaBoxcarTrial& trial,
                                      std::span<const float> circular_prefix,
                                      std::size_t bins,
                                      float profile_sum,
@@ -189,7 +169,7 @@ BoxcarPeak scan_boxcar_peak_portable(const BoxcarTrial& trial,
 
 #if defined(GAFFA_HAS_X86_AVX2_DISPATCH)
 __attribute__((target("avx2"))) BoxcarPeak scan_boxcar_peak_avx2(
-    const BoxcarTrial& trial,
+    const FfaBoxcarTrial& trial,
     std::span<const float> circular_prefix,
     std::size_t bins,
     float profile_sum,
@@ -269,7 +249,7 @@ ScanBoxcarPeakFn select_scan_boxcar_peak_kernel() {
 }
 #endif
 
-FfaPeak make_peak(const BoxcarTrial& trial,
+FfaPeak make_peak(const FfaBoxcarTrial& trial,
                   const BoxcarPeak& boxcar,
                   double period,
                   double frequency,
@@ -291,6 +271,102 @@ FfaPeak make_peak(const BoxcarTrial& trial,
 
 }  // namespace
 
+void FfaPeakCollector::add(const FfaPeak& peak) {
+  if (peaks == nullptr) {
+    throw std::invalid_argument("FFA peak collector output must not be null");
+  }
+  if (max_peaks != 0 && peaks->size() >= max_peaks) {
+    throw std::runtime_error(
+        "FFA detection peak count exceeded max_peaks safety guard");
+  }
+  peaks->push_back(peak);
+}
+
+FfaDetectionPlan make_ffa_detection_plan(
+    std::span<const std::size_t> width_trials,
+    std::size_t bins) {
+  validate_width_trials(width_trials, bins);
+  FfaDetectionPlan plan{
+      .bins = bins,
+      .boxcar_trials = make_boxcar_trials(width_trials, bins),
+  };
+  plan.max_width = std::max_element(
+                       plan.boxcar_trials.begin(), plan.boxcar_trials.end(),
+                       [](const FfaBoxcarTrial& lhs,
+                          const FfaBoxcarTrial& rhs) {
+                         return lhs.width < rhs.width;
+                       })
+                       ->width;
+  return plan;
+}
+
+void detect_ffa_row_cpu(
+    std::span<const float> profile,
+    std::size_t shift,
+    const FfaSearchTask& task,
+    const FfaDetectionPlan& plan,
+    float stdnoise,
+    const FfaDetectionOptions& options,
+    std::span<float> circular_prefix,
+    FfaPeakCollector& collector) {
+  if (profile.size() != plan.bins) {
+    throw std::invalid_argument(
+        "FFA row detection profile size must match detection plan bins");
+  }
+  if (task.bins != plan.bins) {
+    throw std::invalid_argument(
+        "FFA row detection task bins must match detection plan bins");
+  }
+  if (shift >= task.rows_eval) {
+    throw std::invalid_argument(
+        "FFA row detection shift must be within rows_eval");
+  }
+  if (task.rows < task.rows_eval || task.rows == 0) {
+    throw std::invalid_argument(
+        "FFA row detection task rows must be >= rows_eval and > 0");
+  }
+  if (!(task.effective_tsamp > 0.0) || !std::isfinite(task.effective_tsamp)) {
+    throw std::invalid_argument(
+        "FFA row detection task effective_tsamp must be finite and > 0");
+  }
+  if (!(stdnoise > 0.0F) || !std::isfinite(stdnoise)) {
+    throw std::invalid_argument(
+        "FFA row detection stdnoise must be finite and > 0");
+  }
+  if (!std::isfinite(options.snr_threshold)) {
+    throw std::invalid_argument(
+        "FFA row detection S/N threshold must be finite");
+  }
+  if (plan.boxcar_trials.empty()) {
+    throw std::invalid_argument(
+        "FFA row detection plan must contain at least one boxcar trial");
+  }
+  if (circular_prefix.size() < plan.bins + plan.max_width + 1) {
+    throw std::invalid_argument("FFA row detection circular prefix is too small");
+  }
+
+  const float profile_sum =
+      fill_circular_prefix(profile, plan.max_width, circular_prefix);
+  const float inv_stdnoise = 1.0F / stdnoise;
+  const ScanBoxcarPeakFn scan_boxcar_peak = select_scan_boxcar_peak_kernel();
+  bool period_ready = false;
+  double period = 0.0;
+  double frequency = 0.0;
+  for (const FfaBoxcarTrial& trial : plan.boxcar_trials) {
+    const BoxcarPeak boxcar = scan_boxcar_peak(
+        trial, circular_prefix, plan.bins, profile_sum, inv_stdnoise);
+    if (boxcar.snr >= options.snr_threshold) {
+      if (!period_ready) {
+        period = trial_period(task, shift);
+        frequency = 1.0 / period;
+        period_ready = true;
+      }
+      collector.add(
+          make_peak(trial, boxcar, period, frequency, shift, plan.bins));
+    }
+  }
+}
+
 std::vector<FfaPeak> find_ffa_peaks_cpu(
     std::span<const float> transform,
     FfaTransformShape shape,
@@ -298,46 +374,25 @@ std::vector<FfaPeak> find_ffa_peaks_cpu(
     std::span<const std::size_t> width_trials,
     float stdnoise,
     const FfaDetectionOptions& options) {
-  validate_detection_arguments(transform, shape, task, width_trials, stdnoise,
-                               options);
+  validate_detection_arguments(transform, shape, task, stdnoise, options);
 
   std::vector<FfaPeak> peaks;
   if (options.max_peaks != 0) {
     peaks.reserve(options.max_peaks);
   }
-  const std::vector<BoxcarTrial> boxcar_trials =
-      make_boxcar_trials(width_trials, shape.bins);
-  const std::size_t max_width = std::max_element(
-      boxcar_trials.begin(), boxcar_trials.end(),
-      [](const BoxcarTrial& lhs, const BoxcarTrial& rhs) {
-        return lhs.width < rhs.width;
-      })->width;
-  std::vector<float> circular_prefix(shape.bins + max_width + 1, 0.0F);
-  const float inv_stdnoise = 1.0F / stdnoise;
-  const ScanBoxcarPeakFn scan_boxcar_peak = select_scan_boxcar_peak_kernel();
+  const FfaDetectionPlan detection_plan =
+      make_ffa_detection_plan(width_trials, shape.bins);
+  std::vector<float> circular_prefix(
+      shape.bins + detection_plan.max_width + 1, 0.0F);
+  FfaPeakCollector collector{
+      .peaks = &peaks,
+      .max_peaks = options.max_peaks,
+  };
 
   for (std::size_t shift = 0; shift < shape.rows; ++shift) {
     const auto row = transform.subspan(shift * shape.bins, shape.bins);
-    const float profile_sum =
-        fill_circular_prefix(row, max_width, circular_prefix);
-    bool period_ready = false;
-    double period = 0.0;
-    double frequency = 0.0;
-    for (const BoxcarTrial& trial : boxcar_trials) {
-      const BoxcarPeak boxcar = scan_boxcar_peak(
-          trial, circular_prefix, shape.bins, profile_sum, inv_stdnoise);
-      if (boxcar.snr >= options.snr_threshold) {
-        if (!period_ready) {
-          period = trial_period(task, shift);
-          frequency = 1.0 / period;
-          period_ready = true;
-        }
-        append_peak_with_guard(
-            peaks, make_peak(trial, boxcar, period, frequency, shift,
-                             shape.bins),
-            options);
-      }
-    }
+    detect_ffa_row_cpu(row, shift, task, detection_plan, stdnoise, options,
+                       circular_prefix, collector);
   }
 
   sort_ffa_peaks(peaks);

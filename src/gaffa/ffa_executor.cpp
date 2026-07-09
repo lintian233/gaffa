@@ -80,14 +80,14 @@ void validate_task(const FfaSearchTask& task, std::size_t input_nsamples) {
 
 void validate_inputs(std::span<const float> time_series,
                      const FfaSearchPlan& plan,
-                     const FfaBlockConsumer& consumer) {
+                     bool consumer_is_callable) {
   if (time_series.empty()) {
     throw std::invalid_argument("FFA executor time series must not be empty");
   }
   if (plan.tasks.empty()) {
     throw std::invalid_argument("FFA executor plan must contain at least one task");
   }
-  if (!consumer) {
+  if (!consumer_is_callable) {
     throw std::invalid_argument("FFA executor consumer must be callable");
   }
   for (const auto& task : plan.tasks) {
@@ -127,7 +127,7 @@ float task_stdnoise(std::size_t input_nsamples, const FfaSearchTask& task) {
 void for_each_ffa_block_cpu(std::span<const float> time_series,
                             const FfaSearchPlan& plan,
                             const FfaBlockConsumer& consumer) {
-  validate_inputs(time_series, plan, consumer);
+  validate_inputs(time_series, plan, static_cast<bool>(consumer));
 
   PreparedSampleCache prepared_cache;
   std::vector<float> scratch;
@@ -156,6 +156,43 @@ void for_each_ffa_block_cpu(std::span<const float> time_series,
         .transform = std::span<const float>(transform).first(exposed_size),
         .stdnoise = task_stdnoise(time_series.size(), task),
     });
+  }
+}
+
+void for_each_ffa_row_cpu(std::span<const float> time_series,
+                          const FfaSearchPlan& plan,
+                          const FfaRowConsumer& consumer) {
+  validate_inputs(time_series, plan, static_cast<bool>(consumer));
+
+  PreparedSampleCache prepared_cache;
+  std::vector<float> scratch;
+  std::vector<float> work;
+  std::vector<float> row_buffer;
+
+  for (const auto& task : plan.tasks) {
+    const std::span<const float> prepared =
+        prepare_task_samples(time_series, task, prepared_cache);
+
+    const std::size_t full_size = checked_multiply(task.rows, task.bins);
+    scratch.resize(full_size);
+    work.resize(full_size);
+    row_buffer.resize(task.bins);
+
+    const FfaTransformShape full_shape{
+        .rows = task.rows,
+        .bins = task.bins,
+    };
+    const float stdnoise = task_stdnoise(time_series.size(), task);
+    for_each_ffa_transform_row_cpu(
+        prepared.first(full_size), full_shape, task.rows_eval, scratch, work,
+        row_buffer, [&](const FfaTransformRowView& row) {
+          consumer(FfaRowView{
+              .task = &task,
+              .shift = row.shift,
+              .profile = row.profile,
+              .stdnoise = stdnoise,
+          });
+        });
   }
 }
 

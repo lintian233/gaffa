@@ -175,3 +175,54 @@ TEST(FfaExecutorCpu, ReusesPreparedDownsampleForAdjacentTasks) {
   EXPECT_EQ(observed[0], first_expected);
   EXPECT_EQ(observed[1], second_expected);
 }
+
+TEST(FfaExecutorCpu, RowExecutorMatchesMaterializedBlockRows) {
+  const std::vector<float> input{
+      1, 0,
+      2, 0,
+      3, 0,
+      4, 0,
+  };
+  const auto task = make_task(input.size(), 1.0, input.size(), 4, 2, 2);
+  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+
+  std::vector<std::vector<float>> rows;
+  std::vector<std::size_t> shifts;
+  gaffa::for_each_ffa_row_cpu(input, plan, [&](const gaffa::FfaRowView& row) {
+    EXPECT_EQ(row.task, &plan.tasks.front());
+    EXPECT_FLOAT_EQ(row.stdnoise, std::sqrt(4.0F));
+    shifts.push_back(row.shift);
+    rows.emplace_back(row.profile.begin(), row.profile.end());
+  });
+
+  const auto expected_full =
+      run_manual_transform(input, gaffa::FfaTransformShape{.rows = 4, .bins = 2});
+
+  ASSERT_EQ(rows.size(), 2);
+  EXPECT_EQ(shifts, (std::vector<std::size_t>{0, 1}));
+  EXPECT_EQ(rows[0], (std::vector<float>(expected_full.begin(),
+                                         expected_full.begin() + 2)));
+  EXPECT_EQ(rows[1], (std::vector<float>(expected_full.begin() + 2,
+                                         expected_full.begin() + 4)));
+}
+
+TEST(FfaExecutorCpu, RowExecutorMatchesDownsampledBlockRows) {
+  const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
+  const auto task = make_task(input.size(), 2.0, 4, 2, 2, 2);
+  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+
+  std::vector<std::vector<float>> rows;
+  gaffa::for_each_ffa_row_cpu(input, plan, [&](const gaffa::FfaRowView& row) {
+    rows.emplace_back(row.profile.begin(), row.profile.end());
+  });
+
+  const auto downsampled = gaffa::downsample_weighted_sum_cpu(input, 2.0);
+  const auto expected_full = run_manual_transform(
+      downsampled, gaffa::FfaTransformShape{.rows = 2, .bins = 2});
+
+  ASSERT_EQ(rows.size(), 2);
+  EXPECT_EQ(rows[0], (std::vector<float>(expected_full.begin(),
+                                         expected_full.begin() + 2)));
+  EXPECT_EQ(rows[1], (std::vector<float>(expected_full.begin() + 2,
+                                         expected_full.begin() + 4)));
+}

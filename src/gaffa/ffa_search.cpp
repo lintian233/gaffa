@@ -21,16 +21,6 @@ void validate_search_inputs(const FfaSearchPlan& plan,
   }
 }
 
-void collect_block_peaks(const FfaBlockView& block,
-                         std::span<const std::size_t> width_trials,
-                         const FfaDetectionOptions& detection_options,
-                         std::vector<FfaPeak>& peaks) {
-  auto block_peaks =
-      find_ffa_peaks_cpu(block.transform, block.shape, *block.task,
-                         width_trials, block.stdnoise, detection_options);
-  peaks.insert(peaks.end(), block_peaks.begin(), block_peaks.end());
-}
-
 }  // namespace
 
 FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
@@ -39,13 +29,29 @@ FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
   validate_search_inputs(plan, options);
 
   std::vector<FfaPeak> peaks;
+  FfaPeakCollector collector{
+      .peaks = &peaks,
+      .max_peaks = options.max_peaks,
+  };
   const FfaDetectionOptions detection_options{
       .snr_threshold = options.snr_threshold,
       .max_peaks = options.max_peaks,
   };
+  const FfaSearchTask* current_task = nullptr;
+  FfaDetectionPlan detection_plan;
+  std::vector<float> circular_prefix;
 
-  for_each_ffa_block_cpu(time_series, plan, [&](const FfaBlockView& block) {
-    collect_block_peaks(block, plan.width_trials, detection_options, peaks);
+  for_each_ffa_row_cpu(time_series, plan, [&](const FfaRowView& row) {
+    if (row.task != current_task) {
+      current_task = row.task;
+      detection_plan =
+          make_ffa_detection_plan(plan.width_trials, current_task->bins);
+      circular_prefix.assign(
+          current_task->bins + detection_plan.max_width + 1, 0.0F);
+    }
+    detect_ffa_row_cpu(row.profile, row.shift, *row.task, detection_plan,
+                       row.stdnoise, detection_options, circular_prefix,
+                       collector);
   });
 
   sort_ffa_peaks(peaks);

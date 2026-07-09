@@ -21,8 +21,8 @@ struct FfaSearchResult {
 };
 
 // Executes an already-built FFA search plan on a 1D float time series. This is
-// a thin composition layer: it streams blocks through the CPU executor, runs
-// per-block peak detection, and returns all significant peaks.
+// a thin composition layer: it streams final FFA rows through the CPU executor,
+// runs per-row peak detection, and returns all significant peaks.
 FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
                                const FfaSearchPlan& plan,
                                const FfaSearchOptions& options = {});
