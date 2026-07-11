@@ -1,0 +1,217 @@
+#pragma once
+
+#include "gaffa/cuda_memory.h"
+#include "gaffa/ffa.h"
+#include "gaffa/ffa_search.h"
+#include "gaffa/launch_cuda.h"
+#include "gaffa/time_series_cuda.h"
+
+#include <cstddef>
+#include <memory>
+#include <span>
+#include <vector>
+
+namespace gaffa {
+
+struct CudaFfaOptions {
+  int device_id = 0;
+
+  // Number of independent time series processed together. In DM search this is
+  // usually the number of DMs in one tile, but FFA itself only sees a series
+  // batch.
+  std::size_t series_tile_size = 16;
+
+  std::size_t threads_per_block = 256;
+
+  // 0 means auto. Non-zero limits temporary CUDA workspace allocated by the
+  // FFA executor.
+  std::size_t workspace_bytes_limit = 0;
+
+  cudaStream_t stream = nullptr;
+  bool synchronize_after_call = true;
+
+  [[nodiscard]] CudaLaunchOptions launch_options() const noexcept {
+    return CudaLaunchOptions{
+        .device_id = device_id,
+        .threads_per_block = threads_per_block,
+        .stream = stream,
+        .synchronize_after_call = synchronize_after_call,
+    };
+  }
+};
+
+struct CudaFfaWorkspaceShape {
+  std::size_t series_tile_size = 0;
+  std::size_t max_prepared_nsamples = 0;
+  std::size_t max_task_elements = 0;
+  std::size_t prepared_bytes = 0;
+  std::size_t ping_bytes = 0;
+  std::size_t pong_bytes = 0;
+  std::size_t total_bytes = 0;
+};
+
+struct CudaFfaPrepareKey {
+  std::size_t input_nsamples = 0;
+  double downsample_factor = 1.0;
+};
+
+struct CudaFfaTaskLayout {
+  FfaSearchTask task{};
+  FfaTransformShape shape{};
+  std::size_t transform_elements = 0;
+};
+
+// Tasks in one group consume the same prepared time-series batch. They may
+// differ in FFA transform shape, but must share the complete prepare key and
+// exact prepared length.
+struct CudaFfaPrepareGroup {
+  CudaFfaPrepareKey prepare_key{};
+  std::size_t prepared_nsamples = 0;
+  std::vector<CudaFfaTaskLayout> tasks;
+};
+
+// Immutable CUDA execution layout derived from a logical FFA search plan.
+// Workspace sizing must use this object rather than independently traversing
+// FfaSearchPlan, so the layout and its cached maxima cannot drift apart.
+class CudaFfaExecutionPlan {
+ public:
+  CudaFfaExecutionPlan(const CudaFfaExecutionPlan&) = default;
+  CudaFfaExecutionPlan& operator=(const CudaFfaExecutionPlan&) = default;
+  CudaFfaExecutionPlan(CudaFfaExecutionPlan&&) noexcept = default;
+  CudaFfaExecutionPlan& operator=(CudaFfaExecutionPlan&&) noexcept = default;
+
+  [[nodiscard]] std::span<const CudaFfaPrepareGroup> groups() const noexcept;
+  [[nodiscard]] std::size_t max_prepared_nsamples() const noexcept;
+  [[nodiscard]] std::size_t max_transform_elements() const noexcept;
+
+ private:
+  friend CudaFfaExecutionPlan make_ffa_cuda_execution_plan(
+      const FfaSearchPlan& plan);
+
+  CudaFfaExecutionPlan(std::vector<CudaFfaPrepareGroup> groups,
+                       std::size_t max_prepared_nsamples,
+                       std::size_t max_transform_elements);
+
+  std::vector<CudaFfaPrepareGroup> groups_;
+  std::size_t max_prepared_nsamples_ = 0;
+  std::size_t max_transform_elements_ = 0;
+};
+
+struct CudaFfaProgramImpl;
+struct CudaFfaInput;
+struct CudaFfaBuffer;
+
+// Owns GPU-resident transform metadata for an FFA search plan. It does not own
+// input time series, prepared buffers, transform scratch/output data, detection
+// state, or candidates.
+class CudaFfaProgram {
+ public:
+  explicit CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
+                          const CudaFfaOptions& options = {});
+  explicit CudaFfaProgram(const FfaSearchPlan& plan,
+                          const CudaFfaOptions& options = {});
+  ~CudaFfaProgram();
+
+  CudaFfaProgram(CudaFfaProgram&&) noexcept;
+  CudaFfaProgram& operator=(CudaFfaProgram&&) noexcept;
+
+  CudaFfaProgram(const CudaFfaProgram&) = delete;
+  CudaFfaProgram& operator=(const CudaFfaProgram&) = delete;
+
+  [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] const CudaFfaExecutionPlan& execution_plan() const;
+  [[nodiscard]] int device_id() const;
+  [[nodiscard]] std::size_t device_metadata_bytes() const;
+
+ private:
+  friend void ffa_transform_block_cuda(const CudaFfaProgram& program,
+                                       std::size_t group_index,
+                                       std::size_t task_index,
+                                       CudaFfaInput input,
+                                       CudaFfaBuffer scratch,
+                                       CudaFfaBuffer output,
+                                       const CudaFfaOptions& options);
+
+  std::unique_ptr<CudaFfaProgramImpl> impl_;
+};
+
+struct CudaFfaInput {
+  const float* data = nullptr;
+  std::size_t nseries = 0;
+  // Number of valid prepared samples in each series. The transform consumes
+  // only the first rows * bins samples for the current task.
+  std::size_t nsamples = 0;
+  // Distance between consecutive series starts, in float elements.
+  // Must be >= nsamples.
+  std::size_t stride = 0;
+  FfaTransformShape shape{};
+  int device_id = 0;
+
+  [[nodiscard]] std::size_t task_elements() const noexcept {
+    return shape.rows * shape.bins;
+  }
+};
+
+struct CudaFfaBuffer {
+  float* data = nullptr;
+  std::size_t nseries = 0;
+  // Distance between consecutive series starts, in float elements.
+  // Must be >= rows * bins.
+  std::size_t stride = 0;
+  FfaTransformShape shape{};
+  int device_id = 0;
+
+  [[nodiscard]] std::size_t task_elements() const noexcept {
+    return shape.rows * shape.bins;
+  }
+};
+
+CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
+    const CudaFfaExecutionPlan& plan,
+    const CudaFfaOptions& options = {});
+
+// Creates CUDA execution groups from a logical FFA search plan. Tasks in each
+// group can share exactly one prepared input batch in a future executor.
+CudaFfaExecutionPlan make_ffa_cuda_execution_plan(
+    const FfaSearchPlan& plan);
+
+// Prepares one device-resident float time-series batch for a single FFA task.
+// For downsample_factor == 1 this is a device copy/cast-free reshape into the
+// task's prepared length. For downsample_factor > 1 it matches
+// downsample_weighted_sum_cuda().
+void prepare_ffa_input_cuda(CudaTimeSeriesBatchView input,
+                            const FfaSearchTask& task,
+                            CudaSpan<float> output,
+                            const CudaFfaOptions& options = {});
+
+// Executes one materialized FFA transform block for a batch of independent
+// device-resident prepared time series. Input layout is
+// [series][prepared_sample] with input.stride between series. The transform uses
+// only the first rows * bins samples of each prepared series. Scratch and output
+// layouts are [series][row][bin] with their own strides. This materialized
+// primitive owns temporary transform op buffers, so it currently requires
+// synchronize_after_call=true. Fully async execution belongs to the Program
+// metadata path.
+void ffa_transform_block_cuda(CudaFfaInput input,
+                              CudaFfaBuffer scratch,
+                              CudaFfaBuffer output,
+                              const CudaFfaOptions& options = {});
+
+// Executes one FFA transform task using GPU-resident transform metadata owned
+// by program. If synchronize_after_call=false, the caller must keep program and
+// all buffers alive until options.stream has completed.
+void ffa_transform_block_cuda(const CudaFfaProgram& program,
+                              std::size_t group_index,
+                              std::size_t task_index,
+                              CudaFfaInput input,
+                              CudaFfaBuffer scratch,
+                              CudaFfaBuffer output,
+                              const CudaFfaOptions& options = {});
+
+FfaSearchResult search_ffa_cuda(
+    CudaTimeSeriesBatchView input,
+    const FfaSearchPlan& plan,
+    const FfaSearchOptions& search_options = {},
+    const CudaFfaOptions& cuda_options = {});
+
+}  // namespace gaffa
