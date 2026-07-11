@@ -13,9 +13,15 @@
 
 namespace gaffa {
 
-struct CudaFfaOptions {
+// Construction-time properties of GPU-resident FFA metadata. A program is
+// device-affine but does not own execution workspace or stream state.
+struct CudaFfaProgramOptions {
   int device_id = 0;
+};
 
+// Per-run scheduling and temporary-storage policy. These settings may vary
+// between runs of the same CudaFfaProgram.
+struct CudaFfaExecutionOptions {
   // Number of independent time series processed together. In DM search this is
   // usually the number of DMs in one tile, but FFA itself only sees a series
   // batch.
@@ -28,14 +34,14 @@ struct CudaFfaOptions {
   std::size_t workspace_bytes_limit = 0;
 
   cudaStream_t stream = nullptr;
-  bool synchronize_after_call = true;
 
-  [[nodiscard]] CudaLaunchOptions launch_options() const noexcept {
+  [[nodiscard]] CudaLaunchOptions async_launch_options(
+      int device_id) const noexcept {
     return CudaLaunchOptions{
         .device_id = device_id,
         .threads_per_block = threads_per_block,
         .stream = stream,
-        .synchronize_after_call = synchronize_after_call,
+        .synchronize_after_call = false,
     };
   }
 };
@@ -107,9 +113,9 @@ struct CudaFfaBuffer;
 class CudaFfaProgram {
  public:
   explicit CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
-                          const CudaFfaOptions& options = {});
+                          const CudaFfaProgramOptions& options = {});
   explicit CudaFfaProgram(const FfaSearchPlan& plan,
-                          const CudaFfaOptions& options = {});
+                          const CudaFfaProgramOptions& options = {});
   ~CudaFfaProgram();
 
   CudaFfaProgram(CudaFfaProgram&&) noexcept;
@@ -130,7 +136,7 @@ class CudaFfaProgram {
                                        CudaFfaInput input,
                                        CudaFfaBuffer scratch,
                                        CudaFfaBuffer output,
-                                       const CudaFfaOptions& options);
+                                       const CudaLaunchOptions& options);
 
   std::unique_ptr<CudaFfaProgramImpl> impl_;
 };
@@ -168,7 +174,7 @@ struct CudaFfaBuffer {
 
 CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
     const CudaFfaExecutionPlan& plan,
-    const CudaFfaOptions& options = {});
+    const CudaFfaExecutionOptions& options = {});
 
 // Creates CUDA execution groups from a logical FFA search plan. Tasks in each
 // group can share exactly one prepared input batch in a future executor.
@@ -182,36 +188,36 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(
 void prepare_ffa_input_cuda(CudaTimeSeriesBatchView input,
                             const FfaSearchTask& task,
                             CudaSpan<float> output,
-                            const CudaFfaOptions& options = {});
+                            const CudaLaunchOptions& options = {});
 
 // Executes one materialized FFA transform block for a batch of independent
 // device-resident prepared time series. Input layout is
 // [series][prepared_sample] with input.stride between series. The transform uses
 // only the first rows * bins samples of each prepared series. Scratch and output
 // layouts are [series][row][bin] with their own strides. This materialized
-// primitive owns temporary transform op buffers, so it currently requires
-// synchronize_after_call=true. Fully async execution belongs to the Program
-// metadata path.
+// primitive owns temporary transform op buffers and therefore requires
+// options.synchronize_after_call == true. Fully reusable asynchronous
+// execution belongs to the Program metadata path.
 void ffa_transform_block_cuda(CudaFfaInput input,
                               CudaFfaBuffer scratch,
                               CudaFfaBuffer output,
-                              const CudaFfaOptions& options = {});
+                              const CudaLaunchOptions& options = {});
 
 // Executes one FFA transform task using GPU-resident transform metadata owned
-// by program. If synchronize_after_call=false, the caller must keep program and
-// all buffers alive until options.stream has completed.
+// by program. It enqueues work on options.stream but never synchronizes; the
+// caller must keep program and all buffers alive until that stream completes.
 void ffa_transform_block_cuda(const CudaFfaProgram& program,
                               std::size_t group_index,
                               std::size_t task_index,
                               CudaFfaInput input,
                               CudaFfaBuffer scratch,
                               CudaFfaBuffer output,
-                              const CudaFfaOptions& options = {});
+                              const CudaLaunchOptions& options = {});
 
 FfaSearchResult search_ffa_cuda(
     CudaTimeSeriesBatchView input,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& search_options = {},
-    const CudaFfaOptions& cuda_options = {});
+    const CudaFfaExecutionOptions& cuda_options = {});
 
 }  // namespace gaffa

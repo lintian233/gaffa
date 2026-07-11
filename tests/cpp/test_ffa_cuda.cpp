@@ -88,7 +88,7 @@ std::vector<float> prepare_on_cuda(const std::vector<float>& input,
                                    std::size_t nseries,
                                    std::size_t nsamples,
                                    const gaffa::FfaSearchTask& task,
-                                   gaffa::CudaFfaOptions options = {}) {
+                                   gaffa::CudaLaunchOptions options = {}) {
   gaffa::CudaDeviceBuffer<float> device_input(input.size());
   cudaMemcpy(device_input.data(), input.data(), input.size() * sizeof(float),
              cudaMemcpyHostToDevice);
@@ -135,7 +135,7 @@ std::vector<float> expected_prepared(const std::vector<float>& input,
 std::vector<float> transform_on_cuda(const std::vector<float>& input,
                                      std::size_t nseries,
                                      gaffa::FfaTransformShape shape,
-                                     gaffa::CudaFfaOptions options = {}) {
+                                     gaffa::CudaLaunchOptions options = {}) {
   gaffa::CudaDeviceBuffer<float> device_input(input.size());
   cudaMemcpy(device_input.data(), input.data(), input.size() * sizeof(float),
              cudaMemcpyHostToDevice);
@@ -182,7 +182,7 @@ std::vector<float> transform_with_program_on_cuda(
     const std::vector<float>& input,
     std::size_t nseries,
     gaffa::FfaTransformShape shape,
-    gaffa::CudaFfaOptions options = {}) {
+    gaffa::CudaLaunchOptions options = {}) {
   gaffa::CudaDeviceBuffer<float> device_input(input.size());
   cudaMemcpy(device_input.data(), input.data(), input.size() * sizeof(float),
              cudaMemcpyHostToDevice);
@@ -199,21 +199,21 @@ std::vector<float> transform_with_program_on_cuda(
           .nsamples = series_elements,
           .stride = series_elements,
           .shape = shape,
-          .device_id = options.device_id,
+          .device_id = program.device_id(),
       },
       gaffa::CudaFfaBuffer{
           .data = device_scratch.data(),
           .nseries = nseries,
           .stride = series_elements,
           .shape = shape,
-          .device_id = options.device_id,
+          .device_id = program.device_id(),
       },
       gaffa::CudaFfaBuffer{
           .data = device_output.data(),
           .nseries = nseries,
           .stride = series_elements,
           .shape = shape,
-          .device_id = options.device_id,
+          .device_id = program.device_id(),
       },
       options);
 
@@ -402,11 +402,7 @@ TEST(FfaCuda, ProgramRejectsInvalidOptionsBeforeCudaAllocation) {
 
   EXPECT_THROW(
       (void)gaffa::CudaFfaProgram(
-          execution_plan, gaffa::CudaFfaOptions{.series_tile_size = 0}),
-      std::invalid_argument);
-  EXPECT_THROW(
-      (void)gaffa::CudaFfaProgram(
-          execution_plan, gaffa::CudaFfaOptions{.threads_per_block = 0}),
+          execution_plan, gaffa::CudaFfaProgramOptions{.device_id = -1}),
       std::invalid_argument);
 }
 
@@ -500,7 +496,7 @@ TEST(FfaCuda, ProgramTransformAcceptsExplicitStream) {
 
   const auto output = transform_with_program_on_cuda(
       program, 1, 0, input, nseries, shape,
-      gaffa::CudaFfaOptions{
+      gaffa::CudaLaunchOptions{
           .stream = stream,
       });
   const auto expected = expected_transform(input, nseries, shape);
@@ -559,7 +555,7 @@ TEST(FfaCuda, ProgramTransformSupportsAsyncReturn) {
           .shape = shape,
           .device_id = 0,
       },
-      gaffa::CudaFfaOptions{
+      gaffa::CudaLaunchOptions{
           .stream = stream,
           .synchronize_after_call = false,
       });
@@ -615,9 +611,10 @@ TEST(FfaCuda, ProgramTransformRejectsInvalidArguments) {
   EXPECT_THROW(gaffa::ffa_transform_block_cuda(program, 0, 2, input, scratch,
                                                output),
                std::out_of_range);
-  EXPECT_THROW(gaffa::ffa_transform_block_cuda(
-                   program, 0, 0, input, scratch, output,
-                   gaffa::CudaFfaOptions{.device_id = 1}),
+  auto wrong_device = input;
+  wrong_device.device_id = 1;
+  EXPECT_THROW(gaffa::ffa_transform_block_cuda(program, 0, 0, wrong_device,
+                                               scratch, output),
                std::invalid_argument);
 
   auto wrong_shape = input;
@@ -635,7 +632,7 @@ TEST(FfaCuda, ProgramTransformRejectsInvalidArguments) {
 }
 
 TEST(FfaCuda, EstimatesWorkspaceFromPlan) {
-  const gaffa::CudaFfaOptions options{
+  const gaffa::CudaFfaExecutionOptions options{
       .series_tile_size = 4,
   };
   const auto plan = gaffa::make_ffa_cuda_execution_plan(valid_plan());
@@ -653,7 +650,7 @@ TEST(FfaCuda, EstimatesWorkspaceFromPlan) {
 }
 
 TEST(FfaCuda, EstimatesWorkspaceFromExecutionPlan) {
-  const gaffa::CudaFfaOptions options{
+  const gaffa::CudaFfaExecutionOptions options{
       .series_tile_size = 4,
   };
   const auto execution_plan =
@@ -679,11 +676,11 @@ TEST(FfaCuda, RejectsInvalidWorkspaceInputs) {
   const auto plan = gaffa::make_ffa_cuda_execution_plan(valid_plan());
   EXPECT_THROW(
       (void)gaffa::estimate_ffa_cuda_workspace(
-          plan, gaffa::CudaFfaOptions{.series_tile_size = 0}),
+          plan, gaffa::CudaFfaExecutionOptions{.series_tile_size = 0}),
       std::invalid_argument);
   EXPECT_THROW(
       (void)gaffa::estimate_ffa_cuda_workspace(
-          plan, gaffa::CudaFfaOptions{.threads_per_block = 0}),
+          plan, gaffa::CudaFfaExecutionOptions{.threads_per_block = 0}),
       std::invalid_argument);
 }
 
@@ -691,7 +688,7 @@ TEST(FfaCuda, EnforcesWorkspaceByteLimit) {
   EXPECT_THROW(
       (void)gaffa::estimate_ffa_cuda_workspace(
           gaffa::make_ffa_cuda_execution_plan(valid_plan()),
-          gaffa::CudaFfaOptions{.workspace_bytes_limit = 1}),
+          gaffa::CudaFfaExecutionOptions{.workspace_bytes_limit = 1}),
       std::runtime_error);
 }
 
@@ -718,11 +715,6 @@ TEST(FfaCuda, RejectsInvalidSearchInputsBeforeCudaAllocation) {
   auto bad_tsamp = input;
   bad_tsamp.tsamp = 0.0;
   EXPECT_THROW((void)gaffa::search_ffa_cuda(bad_tsamp, plan),
-               std::invalid_argument);
-
-  auto device_mismatch = input;
-  device_mismatch.device_id = 1;
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(device_mismatch, plan),
                std::invalid_argument);
 
   EXPECT_THROW((void)gaffa::search_ffa_cuda(
@@ -800,7 +792,7 @@ TEST(FfaCuda, PrepareAcceptsExplicitStream) {
   const auto task = make_task(6, 2.0, 3, 1, 1, 3);
   const auto output = prepare_on_cuda(
       input, 2, 6, task,
-      gaffa::CudaFfaOptions{
+      gaffa::CudaLaunchOptions{
           .stream = stream,
       });
 
@@ -922,7 +914,7 @@ TEST(FfaCuda, TransformAcceptsExplicitStream) {
 
   const auto output = transform_on_cuda(
       input, nseries, shape,
-      gaffa::CudaFfaOptions{
+      gaffa::CudaLaunchOptions{
           .stream = stream,
       });
   const auto expected = expected_transform(input, nseries, shape);
@@ -1124,6 +1116,6 @@ TEST(FfaCuda, TransformRejectsInvalidArguments) {
 
   EXPECT_THROW(gaffa::ffa_transform_block_cuda(
                    input, scratch, output,
-                   gaffa::CudaFfaOptions{.synchronize_after_call = false}),
+                   gaffa::CudaLaunchOptions{.synchronize_after_call = false}),
                std::invalid_argument);
 }

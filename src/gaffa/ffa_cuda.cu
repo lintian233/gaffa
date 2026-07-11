@@ -247,15 +247,28 @@ void check_cuda(cudaError_t status, const char* operation) {
   }
 }
 
-void validate_cuda_options(const CudaFfaOptions& options) {
+void validate_program_options(const CudaFfaProgramOptions& options) {
   if (options.device_id < 0) {
-    throw std::invalid_argument("CUDA FFA device_id must be >= 0");
+    throw std::invalid_argument("CUDA FFA program device_id must be >= 0");
   }
+}
+
+void validate_execution_options(const CudaFfaExecutionOptions& options) {
   if (options.series_tile_size == 0) {
     throw std::invalid_argument("CUDA FFA series_tile_size must be > 0");
   }
   if (options.threads_per_block == 0) {
     throw std::invalid_argument("CUDA FFA threads_per_block must be > 0");
+  }
+}
+
+void validate_launch_options(const CudaLaunchOptions& options) {
+  if (options.device_id < 0) {
+    throw std::invalid_argument("CUDA FFA launch device_id must be >= 0");
+  }
+  if (options.threads_per_block == 0) {
+    throw std::invalid_argument(
+        "CUDA FFA launch threads_per_block must be > 0");
   }
 }
 
@@ -448,7 +461,7 @@ void validate_plan_for_workspace(const FfaSearchPlan& plan) {
 void validate_search_input(CudaTimeSeriesBatchView input,
                            const FfaSearchPlan& plan,
                            const FfaSearchOptions& search_options,
-                           const CudaFfaOptions& cuda_options) {
+                           const CudaFfaExecutionOptions& cuda_options) {
   if (input.data == nullptr) {
     throw std::invalid_argument("CUDA FFA input data must not be null");
   }
@@ -461,14 +474,10 @@ void validate_search_input(CudaTimeSeriesBatchView input,
   if (!(input.tsamp > 0.0) || !std::isfinite(input.tsamp)) {
     throw std::invalid_argument("CUDA FFA input tsamp must be finite and > 0");
   }
-  if (input.device_id != cuda_options.device_id) {
-    throw std::invalid_argument(
-        "CUDA FFA input device_id must match cuda_options.device_id");
-  }
   if (!std::isfinite(search_options.snr_threshold)) {
     throw std::invalid_argument("CUDA FFA S/N threshold must be finite");
   }
-  validate_cuda_options(cuda_options);
+  validate_execution_options(cuda_options);
   validate_plan_for_workspace(plan);
   for (const auto& task : plan.tasks) {
     if (task.input_nsamples != input.nsamples) {
@@ -481,7 +490,7 @@ void validate_search_input(CudaTimeSeriesBatchView input,
 void validate_prepare_arguments(CudaTimeSeriesBatchView input,
                                 const FfaSearchTask& task,
                                 CudaSpan<float> output,
-                                const CudaFfaOptions& options) {
+                                const CudaLaunchOptions& options) {
   if (input.data == nullptr) {
     throw std::invalid_argument("CUDA FFA prepare input data must not be null");
   }
@@ -495,11 +504,11 @@ void validate_prepare_arguments(CudaTimeSeriesBatchView input,
     throw std::invalid_argument(
         "CUDA FFA prepare input tsamp must be finite and > 0");
   }
-  validate_cuda_options(options);
+  validate_launch_options(options);
   if (input.device_id != options.device_id ||
       output.device_id != options.device_id) {
     throw std::invalid_argument(
-        "CUDA FFA prepare device ids must match cuda_options.device_id");
+        "CUDA FFA prepare device ids must match launch device_id");
   }
   if (output.data == nullptr) {
     throw std::invalid_argument("CUDA FFA prepare output data must not be null");
@@ -527,8 +536,7 @@ std::size_t validate_transform_arguments(
     CudaFfaInput input,
     CudaFfaBuffer scratch,
     CudaFfaBuffer output,
-    const CudaFfaOptions& options,
-    bool require_synchronous_return) {
+    const CudaLaunchOptions& options) {
   if (input.data == nullptr) {
     throw std::invalid_argument("CUDA FFA transform input data must not be null");
   }
@@ -549,16 +557,12 @@ std::size_t validate_transform_arguments(
   if (input.shape.bins <= 1) {
     throw std::invalid_argument("CUDA FFA transform bins must be > 1");
   }
-  validate_cuda_options(options);
-  if (require_synchronous_return && !options.synchronize_after_call) {
-    throw std::invalid_argument(
-        "CUDA FFA materialized transform requires synchronize_after_call=true");
-  }
+  validate_launch_options(options);
   if (input.device_id != options.device_id ||
       scratch.device_id != options.device_id ||
       output.device_id != options.device_id) {
     throw std::invalid_argument(
-        "CUDA FFA transform device ids must match cuda_options.device_id");
+        "CUDA FFA transform device ids must match launch device_id");
   }
   if (scratch.nseries != input.nseries || output.nseries != input.nseries) {
     throw std::invalid_argument(
@@ -625,7 +629,7 @@ void launch_copy_level(const FfaCudaTransformLevel& level,
                        CudaFfaInput input,
                        CudaFfaBuffer scratch,
                        CudaFfaBuffer output,
-                       const CudaFfaOptions& options) {
+                       const CudaLaunchOptions& options) {
   if (level.copy_ops.empty()) {
     return;
   }
@@ -650,7 +654,7 @@ void launch_merge_level(const FfaCudaTransformLevel& level,
                         CudaFfaInput input,
                         CudaFfaBuffer scratch,
                         CudaFfaBuffer output,
-                        const CudaFfaOptions& options) {
+                        const CudaLaunchOptions& options) {
   if (level.merge_ops.empty()) {
     return;
   }
@@ -708,7 +712,7 @@ void launch_transform_levels(
     CudaFfaInput input,
     CudaFfaBuffer scratch,
     CudaFfaBuffer output,
-    const CudaFfaOptions& options) {
+    const CudaLaunchOptions& options) {
   if (levels.size() != device_levels.size()) {
     throw std::invalid_argument(
         "CUDA FFA transform level metadata mismatch");
@@ -815,7 +819,7 @@ void launch_program_copy_level(const FfaCudaProgramLevel& level,
                                CudaFfaInput input,
                                CudaFfaBuffer scratch,
                                CudaFfaBuffer output,
-                               const CudaFfaOptions& options) {
+                               const CudaLaunchOptions& options) {
   if (level.copy_count == 0) {
     return;
   }
@@ -842,7 +846,7 @@ void launch_program_merge_level(const FfaCudaProgramLevel& level,
                                 CudaFfaInput input,
                                 CudaFfaBuffer scratch,
                                 CudaFfaBuffer output,
-                                const CudaFfaOptions& options) {
+                                const CudaLaunchOptions& options) {
   if (level.merge_count == 0) {
     return;
   }
@@ -870,7 +874,7 @@ void launch_program_transform(const FfaCudaProgramTask& task,
                               CudaFfaInput input,
                               CudaFfaBuffer scratch,
                               CudaFfaBuffer output,
-                              const CudaFfaOptions& options) {
+                              const CudaLaunchOptions& options) {
   if (task.level_begin > layout.levels.size() ||
       task.level_count > layout.levels.size() - task.level_begin) {
     throw std::logic_error("CUDA FFA program level layout is invalid");
@@ -887,14 +891,73 @@ void launch_program_transform(const FfaCudaProgramTask& task,
 }
 
 struct CudaFfaWorkspace {
-  explicit CudaFfaWorkspace(const CudaFfaWorkspaceShape& shape)
-      : prepared(shape.prepared_bytes / sizeof(float)),
-        ping(shape.ping_bytes / sizeof(float)),
-        pong(shape.pong_bytes / sizeof(float)) {}
+  CudaFfaWorkspace(const CudaFfaExecutionPlan& plan,
+                   const CudaFfaExecutionOptions& options,
+                   int device_id)
+      : shape(estimate_ffa_cuda_workspace(plan, options)) {
+    check_cuda(cudaSetDevice(device_id), "cudaSetDevice");
+    prepared = CudaDeviceBuffer<float>(shape.prepared_bytes / sizeof(float));
+    scratch = CudaDeviceBuffer<float>(shape.ping_bytes / sizeof(float));
+    output = CudaDeviceBuffer<float>(shape.pong_bytes / sizeof(float));
+  }
 
+  CudaSpan<float> prepared_span(std::size_t nseries,
+                                std::size_t prepared_nsamples,
+                                int device_id) {
+    const std::size_t count = checked_multiply(
+        nseries, prepared_nsamples, "CUDA FFA prepared tile size overflow");
+    if (nseries == 0 || nseries > shape.series_tile_size ||
+        prepared_nsamples > shape.max_prepared_nsamples ||
+        count > prepared.size()) {
+      throw std::invalid_argument("CUDA FFA prepared tile exceeds workspace");
+    }
+    return CudaSpan<float>{
+        .data = prepared.data(),
+        .count = count,
+        .device_id = device_id,
+    };
+  }
+
+  CudaFfaInput prepared_input(std::size_t nseries,
+                              const CudaFfaPrepareGroup& group,
+                              const CudaFfaTaskLayout& task,
+                              int device_id) {
+    (void)prepared_span(nseries, group.prepared_nsamples, device_id);
+    return CudaFfaInput{
+        .data = prepared.data(),
+        .nseries = nseries,
+        .nsamples = group.prepared_nsamples,
+        .stride = group.prepared_nsamples,
+        .shape = task.shape,
+        .device_id = device_id,
+    };
+  }
+
+  CudaFfaBuffer transform_buffer(CudaDeviceBuffer<float>& buffer,
+                                 std::size_t nseries,
+                                 const CudaFfaTaskLayout& task,
+                                 int device_id) {
+    const std::size_t count = checked_multiply(
+        nseries, task.transform_elements,
+        "CUDA FFA transform tile size overflow");
+    if (nseries == 0 || nseries > shape.series_tile_size ||
+        task.transform_elements > shape.max_task_elements ||
+        count > buffer.size()) {
+      throw std::invalid_argument("CUDA FFA transform tile exceeds workspace");
+    }
+    return CudaFfaBuffer{
+        .data = buffer.data(),
+        .nseries = nseries,
+        .stride = task.transform_elements,
+        .shape = task.shape,
+        .device_id = device_id,
+    };
+  }
+
+  CudaFfaWorkspaceShape shape;
   CudaDeviceBuffer<float> prepared;
-  CudaDeviceBuffer<float> ping;
-  CudaDeviceBuffer<float> pong;
+  CudaDeviceBuffer<float> scratch;
+  CudaDeviceBuffer<float> output;
 };
 
 }  // namespace
@@ -931,9 +994,9 @@ std::size_t CudaFfaExecutionPlan::max_transform_elements() const noexcept {
 }
 
 CudaFfaProgram::CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
-                               const CudaFfaOptions& options)
+                               const CudaFfaProgramOptions& options)
     : impl_(std::make_unique<CudaFfaProgramImpl>(std::move(execution_plan))) {
-  validate_cuda_options(options);
+  validate_program_options(options);
   check_cuda(cudaSetDevice(options.device_id), "cudaSetDevice");
   impl_->device_id = options.device_id;
   FfaCudaProgramBuildState build_state;
@@ -952,7 +1015,7 @@ CudaFfaProgram::CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
 }
 
 CudaFfaProgram::CudaFfaProgram(const FfaSearchPlan& plan,
-                               const CudaFfaOptions& options)
+                               const CudaFfaProgramOptions& options)
     : CudaFfaProgram(make_ffa_cuda_execution_plan(plan), options) {
 }
 
@@ -1047,8 +1110,8 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
 
 CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
     const CudaFfaExecutionPlan& plan,
-    const CudaFfaOptions& options) {
-  validate_cuda_options(options);
+    const CudaFfaExecutionOptions& options) {
+  validate_execution_options(options);
   if (plan.groups().empty()) {
     throw std::invalid_argument(
         "CUDA FFA execution plan must contain at least one group");
@@ -1096,7 +1159,7 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
 void prepare_ffa_input_cuda(CudaTimeSeriesBatchView input,
                             const FfaSearchTask& task,
                             CudaSpan<float> output,
-                            const CudaFfaOptions& options) {
+                            const CudaLaunchOptions& options) {
   validate_prepare_arguments(input, task, output, options);
   check_cuda(cudaSetDevice(options.device_id), "cudaSetDevice");
 
@@ -1118,7 +1181,7 @@ void prepare_ffa_input_cuda(CudaTimeSeriesBatchView input,
     }
   } else {
     downsample_weighted_sum_cuda(input, task.downsample_factor, output,
-                                 options.launch_options());
+                                 options);
     return;
   }
 }
@@ -1126,8 +1189,12 @@ void prepare_ffa_input_cuda(CudaTimeSeriesBatchView input,
 void ffa_transform_block_cuda(CudaFfaInput input,
                               CudaFfaBuffer scratch,
                               CudaFfaBuffer output,
-                              const CudaFfaOptions& options) {
-  (void)validate_transform_arguments(input, scratch, output, options, true);
+                              const CudaLaunchOptions& options) {
+  (void)validate_transform_arguments(input, scratch, output, options);
+  if (!options.synchronize_after_call) {
+    throw std::invalid_argument(
+        "CUDA FFA materialized transform requires synchronize_after_call=true");
+  }
   check_cuda(cudaSetDevice(options.device_id), "cudaSetDevice");
 
   const std::vector<FfaCudaTransformLevel> levels =
@@ -1144,14 +1211,14 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
                               CudaFfaInput input,
                               CudaFfaBuffer scratch,
                               CudaFfaBuffer output,
-                              const CudaFfaOptions& options) {
+                              const CudaLaunchOptions& options) {
   if (program.empty()) {
     throw std::invalid_argument("CUDA FFA program must not be empty");
   }
-  validate_cuda_options(options);
+  validate_launch_options(options);
   if (program.device_id() != options.device_id) {
     throw std::invalid_argument(
-        "CUDA FFA program device_id must match cuda_options.device_id");
+        "CUDA FFA program device_id must match launch device_id");
   }
   if (group_index >= program.impl_->layout.groups.size()) {
     throw std::out_of_range("CUDA FFA program group_index is out of range");
@@ -1164,7 +1231,7 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
 
   const auto& program_task = group.tasks[task_index];
   const auto& task_layout = plan_group.tasks[task_index];
-  (void)validate_transform_arguments(input, scratch, output, options, false);
+  (void)validate_transform_arguments(input, scratch, output, options);
   validate_transform_matches_task(input, scratch, output, task_layout);
   if (program_task.level_count == 0) {
     throw std::logic_error("CUDA FFA program task has no transform levels");
@@ -1176,18 +1243,101 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
                            options);
 }
 
+namespace {
+
+// Owns only temporary storage for one execution-plan instance. A tile is a
+// dense [series][sample] device batch, normally a DM tile. Transforms are
+// intentionally not materialized beyond one task: later GPU detection will
+// consume workspace.output on the same stream before that buffer is reused.
+class [[maybe_unused]] CudaFfaExecutor {
+ public:
+  CudaFfaExecutor(const CudaFfaProgram& program,
+                  CudaFfaExecutionOptions options)
+      : program_(program), options_(std::move(options)),
+        workspace_(program.execution_plan(), options_, program.device_id()) {
+    if (program_.empty()) {
+      throw std::invalid_argument("CUDA FFA executor program must not be empty");
+    }
+    validate_execution_options(options_);
+    check_cuda(cudaSetDevice(program_.device_id()), "cudaSetDevice");
+  }
+
+  [[maybe_unused]] void run_tile(CudaTimeSeriesBatchView input) {
+    validate_tile(input);
+    const CudaLaunchOptions launch =
+        options_.async_launch_options(program_.device_id());
+    const auto groups = program_.execution_plan().groups();
+    for (std::size_t group_index = 0; group_index < groups.size();
+         ++group_index) {
+      const auto& group = groups[group_index];
+      const auto prepared = workspace_.prepared_span(
+          input.nseries, group.prepared_nsamples, program_.device_id());
+      prepare_ffa_input_cuda(input, group.tasks.front().task, prepared, launch);
+
+      for (std::size_t task_index = 0; task_index < group.tasks.size();
+           ++task_index) {
+        const auto& task = group.tasks[task_index];
+        const CudaFfaInput prepared_input = workspace_.prepared_input(
+            input.nseries, group, task, program_.device_id());
+        CudaFfaBuffer scratch = workspace_.transform_buffer(
+            workspace_.scratch, input.nseries, task, program_.device_id());
+        CudaFfaBuffer output = workspace_.transform_buffer(
+            workspace_.output, input.nseries, task, program_.device_id());
+
+        // One stream orders prepare -> transform and every successive task.
+        // Future detection must enqueue its consumer kernel here, before the
+        // next task overwrites output.
+        ffa_transform_block_cuda(program_, group_index, task_index,
+                                 prepared_input, scratch, output, launch);
+      }
+    }
+    check_cuda(cudaStreamSynchronize(options_.stream),
+               "CUDA FFA executor synchronize");
+  }
+
+ private:
+  void validate_tile(CudaTimeSeriesBatchView input) const {
+    if (input.data == nullptr) {
+      throw std::invalid_argument("CUDA FFA executor input data must not be null");
+    }
+    if (input.nseries == 0 || input.nseries > options_.series_tile_size) {
+      throw std::invalid_argument(
+          "CUDA FFA executor input nseries must be within series_tile_size");
+    }
+    if (input.device_id != program_.device_id()) {
+      throw std::invalid_argument(
+          "CUDA FFA executor input device_id must match program device_id");
+    }
+    if (!(input.tsamp > 0.0) || !std::isfinite(input.tsamp)) {
+      throw std::invalid_argument(
+          "CUDA FFA executor input tsamp must be finite and > 0");
+    }
+    for (const auto& group : program_.execution_plan().groups()) {
+      if (group.prepare_key.input_nsamples != input.nsamples) {
+        throw std::invalid_argument(
+            "CUDA FFA executor tile nsamples must match execution plan");
+      }
+    }
+  }
+
+  const CudaFfaProgram& program_;
+  CudaFfaExecutionOptions options_;
+  CudaFfaWorkspace workspace_;
+};
+
+}  // namespace
+
 FfaSearchResult search_ffa_cuda(CudaTimeSeriesBatchView input,
                                 const FfaSearchPlan& plan,
                                 const FfaSearchOptions& search_options,
-                                const CudaFfaOptions& cuda_options) {
+                                const CudaFfaExecutionOptions& cuda_options) {
   validate_search_input(input, plan, search_options, cuda_options);
   const CudaFfaExecutionPlan execution_plan =
       make_ffa_cuda_execution_plan(plan);
-  const CudaFfaWorkspaceShape workspace_shape =
-      estimate_ffa_cuda_workspace(execution_plan, cuda_options);
 
-  check_cuda(cudaSetDevice(cuda_options.device_id), "cudaSetDevice");
-  const CudaFfaWorkspace workspace(workspace_shape);
+  check_cuda(cudaSetDevice(input.device_id), "cudaSetDevice");
+  const CudaFfaWorkspace workspace(execution_plan, cuda_options,
+                                   input.device_id);
   (void)workspace;
 
   throw std::runtime_error("CUDA FFA search is not implemented yet");
