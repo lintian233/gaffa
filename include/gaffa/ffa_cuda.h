@@ -39,7 +39,7 @@ struct CudaFfaExecutionOptions {
   // Maximum device memory reserved for threshold-passing peaks before one
   // prepare group is transferred to the host. Overflow is reported instead of
   // silently dropping candidates.
-  std::size_t peak_buffer_bytes = 64 * 1024 * 1024;
+  std::size_t peak_buffer_bytes = 1024ULL * 1024ULL * 1024ULL;
 
   cudaStream_t stream = nullptr;
 
