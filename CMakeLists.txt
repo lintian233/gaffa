@@ -41,7 +41,7 @@ file(GLOB_RECURSE GAFFA_PYTHON_BINDING_SOURCES CONFIGURE_DEPENDS
 )
 
 add_library(gaffa_core_objects OBJECT ${GAFFA_CORE_SOURCES})
-target_link_libraries(gaffa_core_objects PUBLIC CUDA::cudart)
+target_link_libraries(gaffa_core_objects PUBLIC CUDA::cudart CUDA::cuda_driver)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(gaffa_core_objects PUBLIC OpenMP::OpenMP_CXX)
 endif()
@@ -57,7 +57,7 @@ pybind11_add_module(_core NO_EXTRAS
   ${GAFFA_PYTHON_BINDING_SOURCES}
   $<TARGET_OBJECTS:gaffa_core_objects>
 )
-target_link_libraries(_core PRIVATE CUDA::cudart)
+target_link_libraries(_core PRIVATE CUDA::cudart CUDA::cuda_driver)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
 endif()
@@ -79,7 +79,7 @@ if(BUILD_TESTING)
     ${GAFFA_CPP_TEST_SOURCES}
     $<TARGET_OBJECTS:gaffa_core_objects>
   )
-  target_link_libraries(gaffa_cpp_tests PRIVATE GTest::gtest_main CUDA::cudart)
+  target_link_libraries(gaffa_cpp_tests PRIVATE GTest::gtest_main CUDA::cudart CUDA::cuda_driver)
   if(OpenMP_CXX_FOUND)
     target_link_libraries(gaffa_cpp_tests PRIVATE OpenMP::OpenMP_CXX)
   endif()
@@ -110,7 +110,7 @@ foreach(benchmark_source IN LISTS GAFFA_BENCHMARK_SOURCES)
     src/gaffa/io/filterbank_legacy.cpp
     $<TARGET_OBJECTS:gaffa_core_objects>
   )
-  target_link_libraries(${benchmark_target} PRIVATE CUDA::cudart)
+  target_link_libraries(${benchmark_target} PRIVATE CUDA::cudart CUDA::cuda_driver)
   if(OpenMP_CXX_FOUND)
     target_link_libraries(${benchmark_target} PRIVATE OpenMP::OpenMP_CXX)
   endif()

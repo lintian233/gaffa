@@ -47,6 +47,16 @@ __global__ void downsample_weighted_sum_float_kernel(
   output[series * output_nsamples + output_index] = sum;
 }
 
+__global__ void convert_uint32_to_float_kernel(const std::uint32_t* input,
+                                                std::size_t count,
+                                                float* output) {
+  const std::size_t index =
+      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+  if (index < count) {
+    output[index] = static_cast<float>(input[index]);
+  }
+}
+
 std::size_t checked_multiply(std::size_t lhs,
                              std::size_t rhs,
                              const char* message) {
@@ -117,6 +127,33 @@ void validate_downsample_arguments(CudaTimeSeriesBatchView input,
   }
 }
 
+void validate_convert_arguments(CudaSpan<const std::uint32_t> input,
+                                std::size_t nseries,
+                                std::size_t nsamples,
+                                CudaSpan<float> output,
+                                const CudaLaunchOptions& options) {
+  validate_launch_options(options);
+  if (input.data == nullptr || output.data == nullptr) {
+    throw std::invalid_argument(
+        "CUDA time-series conversion input and output data must not be null");
+  }
+  if (nseries == 0 || nsamples == 0) {
+    throw std::invalid_argument(
+        "CUDA time-series conversion nseries and nsamples must be > 0");
+  }
+  if (input.device_id != options.device_id ||
+      output.device_id != options.device_id) {
+    throw std::invalid_argument(
+        "CUDA time-series conversion device ids must match launch device_id");
+  }
+  const std::size_t count = checked_multiply(
+      nseries, nsamples, "CUDA time-series conversion element count overflow");
+  if (input.count != count || output.count != count) {
+    throw std::invalid_argument(
+        "CUDA time-series conversion spans must match nseries * nsamples");
+  }
+}
+
 }  // namespace
 
 void downsample_weighted_sum_cuda(CudaTimeSeriesBatchView input,
@@ -140,6 +177,27 @@ void downsample_weighted_sum_cuda(CudaTimeSeriesBatchView input,
   if (options.synchronize_after_call) {
     check_cuda(cudaStreamSynchronize(options.stream),
                "downsample_weighted_sum_cuda synchronize");
+  }
+}
+
+void convert_time_series_batch_to_float_cuda(
+    CudaSpan<const std::uint32_t> input,
+    std::size_t nseries,
+    std::size_t nsamples,
+    CudaSpan<float> output,
+    const CudaLaunchOptions& options) {
+  validate_convert_arguments(input, nseries, nsamples, output, options);
+  check_cuda(cudaSetDevice(options.device_id), "cudaSetDevice");
+  const std::size_t count = nseries * nsamples;
+  const auto threads = static_cast<unsigned int>(options.threads_per_block);
+  const std::size_t blocks = (count + threads - 1) / threads;
+  convert_uint32_to_float_kernel<<<
+      checked_grid_dim(blocks, "CUDA time-series conversion grid overflow"),
+      threads, 0, options.stream>>>(input.data, count, output.data);
+  check_cuda(cudaGetLastError(), "CUDA time-series conversion kernel launch");
+  if (options.synchronize_after_call) {
+    check_cuda(cudaStreamSynchronize(options.stream),
+               "CUDA time-series conversion synchronize");
   }
 }
 

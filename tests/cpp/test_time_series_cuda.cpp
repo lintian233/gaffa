@@ -74,6 +74,26 @@ std::vector<float> expected_downsampled(const std::vector<float>& input,
   return expected;
 }
 
+std::vector<float> convert_on_cuda(const std::vector<std::uint32_t>& input,
+                                   std::size_t nseries,
+                                   std::size_t nsamples) {
+  gaffa::CudaDeviceBuffer<std::uint32_t> device_input(input.size());
+  gaffa::CudaDeviceBuffer<float> device_output(input.size());
+  EXPECT_EQ(cudaMemcpy(device_input.data(), input.data(),
+                       input.size() * sizeof(std::uint32_t),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  gaffa::convert_time_series_batch_to_float_cuda(
+      static_cast<const gaffa::CudaDeviceBuffer<std::uint32_t>&>(device_input)
+          .as_span(0),
+      nseries, nsamples, device_output.as_span(0));
+  std::vector<float> output(input.size());
+  EXPECT_EQ(cudaMemcpy(output.data(), device_output.data(),
+                       output.size() * sizeof(float), cudaMemcpyDeviceToHost),
+            cudaSuccess);
+  return output;
+}
+
 }  // namespace
 
 TEST(TimeSeriesCuda, WeightedDownsampleMatchesCpuIntegerFactor) {
@@ -125,9 +145,23 @@ TEST(TimeSeriesCuda, WeightedDownsampleAcceptsExplicitStream) {
   EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
 }
 
+TEST(TimeSeriesCuda, ConvertsUint32BatchToFloat) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint32_t> input{0, 1, 17, 65535, 1000000, 42};
+  const auto output = convert_on_cuda(input, 2, 3);
+  ASSERT_EQ(output.size(), input.size());
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    EXPECT_FLOAT_EQ(output[index], static_cast<float>(input[index]));
+  }
+}
+
 TEST(TimeSeriesCuda, WeightedDownsampleRejectsInvalidArguments) {
   float fake_data = 0.0F;
   float fake_output = 0.0F;
+  std::uint32_t fake_uint = 0;
   const auto output = fake_cuda_span(&fake_output, 2);
   const auto input = gaffa::CudaTimeSeriesBatchView{
       .data = &fake_data,
@@ -155,5 +189,14 @@ TEST(TimeSeriesCuda, WeightedDownsampleRejectsInvalidArguments) {
 
   EXPECT_THROW(gaffa::downsample_weighted_sum_cuda(
                    input, 2.0, fake_cuda_span(&fake_output, 1)),
+               std::invalid_argument);
+
+  const auto uint_input = gaffa::CudaSpan<const std::uint32_t>{
+      .data = &fake_uint,
+      .count = 2,
+      .device_id = 0,
+  };
+  EXPECT_THROW(gaffa::convert_time_series_batch_to_float_cuda(
+                   uint_input, 1, 2, fake_cuda_span(&fake_output, 1)),
                std::invalid_argument);
 }
