@@ -74,10 +74,7 @@ struct CudaFfaWorkspaceShape {
   std::size_t prepared_bytes = 0;
   std::size_t scratch_bytes = 0;
   std::size_t output_bytes = 0;
-  std::size_t detection_raw_bytes = 0;
   std::size_t detection_compact_bytes = 0;
-  std::size_t detection_flags_bytes = 0;
-  std::size_t detection_select_temp_bytes = 0;
   std::size_t total_bytes = 0;
 };
 

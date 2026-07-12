@@ -694,14 +694,10 @@ TEST(FfaCuda, EstimatesWorkspaceFromPlan) {
   EXPECT_EQ(shape.prepared_bytes, 4 * 2048 * sizeof(float));
   EXPECT_EQ(shape.scratch_bytes, 4 * 1024 * sizeof(float));
   EXPECT_EQ(shape.output_bytes, 4 * 1024 * sizeof(float));
-  EXPECT_EQ(shape.detection_raw_bytes, 0);
   EXPECT_EQ(shape.detection_compact_bytes, 4 * 48 * 24);
-  EXPECT_EQ(shape.detection_flags_bytes, 0);
-  EXPECT_EQ(shape.detection_select_temp_bytes, 0);
   EXPECT_EQ(shape.total_bytes,
             shape.prepared_bytes + shape.scratch_bytes + shape.output_bytes +
-                shape.detection_raw_bytes + shape.detection_compact_bytes +
-                shape.detection_flags_bytes + shape.detection_select_temp_bytes);
+                shape.detection_compact_bytes);
 }
 
 TEST(FfaCuda, EstimatesWorkspaceFromExecutionPlan) {
