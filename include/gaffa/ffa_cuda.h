@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gaffa/cuda_memory.h"
+#include "gaffa/ffa_detection.h"
 #include "gaffa/ffa.h"
 #include "gaffa/ffa_search.h"
 #include "gaffa/launch_cuda.h"
@@ -13,14 +14,16 @@
 
 namespace gaffa {
 
-// Construction-time properties of GPU-resident FFA metadata. A program is
-// device-affine but does not own execution workspace or stream state.
+namespace detail {
+class CudaFfaTileRunner;
+}
+
+// Construction-time properties of a device-affine CUDA FFA program.
 struct CudaFfaProgramOptions {
   int device_id = 0;
 };
 
-// Per-run scheduling and temporary-storage policy. These settings may vary
-// between runs of the same CudaFfaProgram.
+// Scheduling and temporary-storage policy fixed for one CudaFfaProgram.
 struct CudaFfaExecutionOptions {
   // Number of independent time series processed together. In DM search this is
   // usually the number of DMs in one tile, but FFA itself only sees a series
@@ -46,13 +49,30 @@ struct CudaFfaExecutionOptions {
   }
 };
 
+// A significant FFA peak with the identity of its source series in a CUDA
+// tile. The index is tile-local; the caller may map it to DM or another
+// domain-specific coordinate.
+struct FfaBatchPeak {
+  std::size_t series_index = 0;
+  FfaPeak peak{};
+};
+
+struct FfaBatchSearchResult {
+  std::vector<FfaBatchPeak> peaks;
+};
+
 struct CudaFfaWorkspaceShape {
   std::size_t series_tile_size = 0;
   std::size_t max_prepared_nsamples = 0;
   std::size_t max_task_elements = 0;
+  std::size_t max_detection_slots_per_series = 0;
   std::size_t prepared_bytes = 0;
-  std::size_t ping_bytes = 0;
-  std::size_t pong_bytes = 0;
+  std::size_t scratch_bytes = 0;
+  std::size_t output_bytes = 0;
+  std::size_t detection_raw_bytes = 0;
+  std::size_t detection_compact_bytes = 0;
+  std::size_t detection_flags_bytes = 0;
+  std::size_t detection_select_temp_bytes = 0;
   std::size_t total_bytes = 0;
 };
 
@@ -64,7 +84,9 @@ struct CudaFfaPrepareKey {
 struct CudaFfaTaskLayout {
   FfaSearchTask task{};
   FfaTransformShape shape{};
+  FfaDetectionPlan detection_plan{};
   std::size_t transform_elements = 0;
+  std::size_t detection_slots_per_series = 0;
 };
 
 // Tasks in one group consume the same prepared time-series batch. They may
@@ -89,6 +111,7 @@ class CudaFfaExecutionPlan {
   [[nodiscard]] std::span<const CudaFfaPrepareGroup> groups() const noexcept;
   [[nodiscard]] std::size_t max_prepared_nsamples() const noexcept;
   [[nodiscard]] std::size_t max_transform_elements() const noexcept;
+  [[nodiscard]] std::size_t max_detection_slots_per_series() const noexcept;
 
  private:
   friend CudaFfaExecutionPlan make_ffa_cuda_execution_plan(
@@ -96,26 +119,30 @@ class CudaFfaExecutionPlan {
 
   CudaFfaExecutionPlan(std::vector<CudaFfaPrepareGroup> groups,
                        std::size_t max_prepared_nsamples,
-                       std::size_t max_transform_elements);
+                       std::size_t max_transform_elements,
+                       std::size_t max_detection_slots_per_series);
 
   std::vector<CudaFfaPrepareGroup> groups_;
   std::size_t max_prepared_nsamples_ = 0;
   std::size_t max_transform_elements_ = 0;
+  std::size_t max_detection_slots_per_series_ = 0;
 };
 
 struct CudaFfaProgramImpl;
 struct CudaFfaInput;
 struct CudaFfaBuffer;
 
-// Owns GPU-resident transform metadata for an FFA search plan. It does not own
-// input time series, prepared buffers, transform scratch/output data, detection
-// state, or candidates.
+// Owns GPU-resident metadata and reusable workspace for one FFA plan on one
+// device. It is move-only, not thread-safe, and supports one active
+// run_ffa_batch_cuda() call at a time.
 class CudaFfaProgram {
  public:
   explicit CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
-                          const CudaFfaProgramOptions& options = {});
+                          const CudaFfaProgramOptions& program_options = {},
+                          const CudaFfaExecutionOptions& execution_options = {});
   explicit CudaFfaProgram(const FfaSearchPlan& plan,
-                          const CudaFfaProgramOptions& options = {});
+                          const CudaFfaProgramOptions& program_options = {},
+                          const CudaFfaExecutionOptions& execution_options = {});
   ~CudaFfaProgram();
 
   CudaFfaProgram(CudaFfaProgram&&) noexcept;
@@ -127,9 +154,16 @@ class CudaFfaProgram {
   [[nodiscard]] bool empty() const noexcept;
   [[nodiscard]] const CudaFfaExecutionPlan& execution_plan() const;
   [[nodiscard]] int device_id() const;
+  [[nodiscard]] std::size_t tile_capacity() const;
+  [[nodiscard]] const CudaFfaWorkspaceShape& workspace_shape() const;
   [[nodiscard]] std::size_t device_metadata_bytes() const;
 
  private:
+  friend class detail::CudaFfaTileRunner;
+  friend FfaBatchSearchResult run_ffa_batch_cuda(
+      CudaFfaProgram& program,
+      CudaTimeSeriesBatchView batch,
+      const FfaSearchOptions& options);
   friend void ffa_transform_block_cuda(const CudaFfaProgram& program,
                                        std::size_t group_index,
                                        std::size_t task_index,
@@ -214,10 +248,28 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
                               CudaFfaBuffer output,
                               const CudaLaunchOptions& options = {});
 
+// Executes one already-preprocessed dense [series][sample] tile. The tile must
+// contain no more than program.tile_capacity() series. Returned series_index
+// values are local to this tile; no DM-specific semantics are assumed.
+FfaBatchSearchResult run_ffa_batch_cuda(
+    CudaFfaProgram& program,
+    CudaTimeSeriesBatchView batch,
+    const FfaSearchOptions& options = {});
+
+// Single-series CUDA counterpart to search_ffa_cpu(). This is a thin wrapper
+// around run_ffa_batch_cuda() with one series and reuses program workspace.
 FfaSearchResult search_ffa_cuda(
-    CudaTimeSeriesBatchView input,
+    CudaFfaProgram& program,
+    CudaSpan<const float> time_series,
+    const FfaSearchOptions& options = {});
+
+// One-shot convenience wrapper. Repeated tile execution should construct one
+// CudaFfaProgram and call run_ffa_batch_cuda() instead.
+FfaSearchResult search_ffa_cuda(
+    CudaSpan<const float> time_series,
     const FfaSearchPlan& plan,
-    const FfaSearchOptions& search_options = {},
-    const CudaFfaExecutionOptions& cuda_options = {});
+    const FfaSearchOptions& options = {},
+    const CudaFfaProgramOptions& program_options = {},
+    const CudaFfaExecutionOptions& execution_options = {});
 
 }  // namespace gaffa

@@ -96,10 +96,6 @@ void validate_downsample_arguments(CudaTimeSeriesBatchView input,
     throw std::invalid_argument(
         "CUDA weighted downsample input nsamples must be > 0");
   }
-  if (!(input.tsamp > 0.0) || !std::isfinite(input.tsamp)) {
-    throw std::invalid_argument(
-        "CUDA weighted downsample input tsamp must be finite and > 0");
-  }
   validate_launch_options(options);
   if (input.device_id != options.device_id ||
       output.device_id != options.device_id) {

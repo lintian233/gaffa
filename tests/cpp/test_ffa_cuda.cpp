@@ -60,16 +60,6 @@ gaffa::FfaSearchPlan grouped_plan() {
   };
 }
 
-gaffa::CudaTimeSeriesBatchView valid_input(const float* data) {
-  return gaffa::CudaTimeSeriesBatchView{
-      .data = data,
-      .nseries = 1,
-      .nsamples = 2048,
-      .tsamp = 1.0,
-      .device_id = 0,
-  };
-}
-
 bool has_cuda_device() {
   return gaffa::cuda_device_count() != 0;
 }
@@ -100,7 +90,6 @@ std::vector<float> prepare_on_cuda(const std::vector<float>& input,
           .data = device_input.data(),
           .nseries = nseries,
           .nsamples = nsamples,
-          .tsamp = 1.0,
           .device_id = options.device_id,
       },
       task, device_output.as_span(options.device_id), options);
@@ -642,11 +631,18 @@ TEST(FfaCuda, EstimatesWorkspaceFromPlan) {
   EXPECT_EQ(shape.series_tile_size, 4);
   EXPECT_EQ(shape.max_prepared_nsamples, 2048);
   EXPECT_EQ(shape.max_task_elements, 1024);
+  EXPECT_EQ(shape.max_detection_slots_per_series, 48);
   EXPECT_EQ(shape.prepared_bytes, 4 * 2048 * sizeof(float));
-  EXPECT_EQ(shape.ping_bytes, 4 * 1024 * sizeof(float));
-  EXPECT_EQ(shape.pong_bytes, 4 * 1024 * sizeof(float));
+  EXPECT_EQ(shape.scratch_bytes, 4 * 1024 * sizeof(float));
+  EXPECT_EQ(shape.output_bytes, 4 * 1024 * sizeof(float));
+  EXPECT_EQ(shape.detection_raw_bytes, 4 * 48 * 20);
+  EXPECT_EQ(shape.detection_compact_bytes, 4 * 48 * 20);
+  EXPECT_EQ(shape.detection_flags_bytes, 4 * 48);
+  EXPECT_GT(shape.detection_select_temp_bytes, 0);
   EXPECT_EQ(shape.total_bytes,
-            shape.prepared_bytes + shape.ping_bytes + shape.pong_bytes);
+            shape.prepared_bytes + shape.scratch_bytes + shape.output_bytes +
+                shape.detection_raw_bytes + shape.detection_compact_bytes +
+                shape.detection_flags_bytes + shape.detection_select_temp_bytes);
 }
 
 TEST(FfaCuda, EstimatesWorkspaceFromExecutionPlan) {
@@ -664,11 +660,13 @@ TEST(FfaCuda, EstimatesWorkspaceFromExecutionPlan) {
             execution_plan.max_prepared_nsamples());
   EXPECT_EQ(shape.max_task_elements,
             execution_plan.max_transform_elements());
+  EXPECT_EQ(shape.max_detection_slots_per_series,
+            execution_plan.max_detection_slots_per_series());
   EXPECT_EQ(shape.prepared_bytes,
             4 * execution_plan.max_prepared_nsamples() * sizeof(float));
-  EXPECT_EQ(shape.ping_bytes,
+  EXPECT_EQ(shape.scratch_bytes,
             4 * execution_plan.max_transform_elements() * sizeof(float));
-  EXPECT_EQ(shape.pong_bytes,
+  EXPECT_EQ(shape.output_bytes,
             4 * execution_plan.max_transform_elements() * sizeof(float));
 }
 
@@ -692,47 +690,167 @@ TEST(FfaCuda, EnforcesWorkspaceByteLimit) {
       std::runtime_error);
 }
 
-TEST(FfaCuda, RejectsInvalidSearchInputsBeforeCudaAllocation) {
+TEST(FfaCuda, SingleSearchRejectsInvalidInputsBeforeCudaAllocation) {
   float fake_data = 0.0F;
   const auto plan = valid_plan();
-  const auto input = valid_input(&fake_data);
-
-  auto null_input = input;
-  null_input.data = nullptr;
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(null_input, plan),
-               std::invalid_argument);
-
-  auto empty_series = input;
-  empty_series.nseries = 0;
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(empty_series, plan),
-               std::invalid_argument);
-
-  auto empty_samples = input;
-  empty_samples.nsamples = 0;
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(empty_samples, plan),
-               std::invalid_argument);
-
-  auto bad_tsamp = input;
-  bad_tsamp.tsamp = 0.0;
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(bad_tsamp, plan),
-               std::invalid_argument);
-
   EXPECT_THROW((void)gaffa::search_ffa_cuda(
-                   input, plan,
-                   gaffa::FfaSearchOptions{.snr_threshold = INFINITY}),
+                   gaffa::CudaSpan<const float>{
+                       .data = nullptr,
+                       .count = 2048,
+                       .device_id = 0,
+                   },
+                   plan),
+               std::invalid_argument);
+  EXPECT_THROW((void)gaffa::search_ffa_cuda(
+                   gaffa::CudaSpan<const float>{
+                       .data = &fake_data,
+                       .count = 0,
+                       .device_id = 0,
+                   },
+                   plan),
+               std::invalid_argument);
+  EXPECT_THROW((void)gaffa::search_ffa_cuda(
+                   gaffa::CudaSpan<const float>{
+                       .data = &fake_data,
+                       .count = 2048,
+                       .device_id = 1,
+                   },
+                   plan, {}, gaffa::CudaFfaProgramOptions{.device_id = 0}),
                std::invalid_argument);
 }
 
-TEST(FfaCuda, LegalSearchPathAllocatesWorkspaceThenReportsNotImplemented) {
+TEST(FfaCuda, BatchSearchMatchesCpuAndReusesProgram) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";
   }
 
-  float fake_data = 0.0F;
+  constexpr std::size_t nseries = 2;
+  const auto plan = valid_plan();
+  std::vector<float> host_input(nseries * 2048);
+  for (std::size_t index = 0; index < host_input.size(); ++index) {
+    host_input[index] = static_cast<float>((index * 17 + 11) % 41) - 20.0F;
+  }
+  gaffa::CudaDeviceBuffer<float> device_input(host_input.size());
+  ASSERT_EQ(cudaMemcpy(device_input.data(), host_input.data(),
+                       host_input.size() * sizeof(float),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
 
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(valid_input(&fake_data),
-                                            valid_plan()),
-               std::runtime_error);
+  const gaffa::FfaSearchOptions search_options{
+      .snr_threshold = -1000000.0F,
+  };
+  gaffa::CudaFfaProgram program(
+      plan, {}, gaffa::CudaFfaExecutionOptions{.series_tile_size = nseries});
+  const auto batch = gaffa::CudaTimeSeriesBatchView{
+      .data = device_input.data(),
+      .nseries = nseries,
+      .nsamples = 2048,
+      .device_id = 0,
+  };
+  const auto cuda_result =
+      gaffa::run_ffa_batch_cuda(program, batch, search_options);
+  const auto repeated_result =
+      gaffa::run_ffa_batch_cuda(program, batch, search_options);
+  EXPECT_EQ(repeated_result.peaks.size(), cuda_result.peaks.size());
+
+  std::vector<gaffa::FfaBatchPeak> expected;
+  for (std::size_t series = 0; series < nseries; ++series) {
+    const auto cpu_result = gaffa::search_ffa_cpu(
+        std::span<const float>(host_input).subspan(series * 2048, 2048),
+        plan, search_options);
+    for (const auto& peak : cpu_result.peaks) {
+      expected.push_back(gaffa::FfaBatchPeak{
+          .series_index = series,
+          .peak = peak,
+      });
+    }
+  }
+  const auto by_location = [](const gaffa::FfaBatchPeak& lhs,
+                              const gaffa::FfaBatchPeak& rhs) {
+    if (lhs.series_index != rhs.series_index) {
+      return lhs.series_index < rhs.series_index;
+    }
+    if (lhs.peak.shift != rhs.peak.shift) {
+      return lhs.peak.shift < rhs.peak.shift;
+    }
+    if (lhs.peak.width_index != rhs.peak.width_index) {
+      return lhs.peak.width_index < rhs.peak.width_index;
+    }
+    return lhs.peak.phase < rhs.peak.phase;
+  };
+  auto actual = cuda_result.peaks;
+  std::sort(expected.begin(), expected.end(), by_location);
+  std::sort(actual.begin(), actual.end(), by_location);
+
+  ASSERT_EQ(actual.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_EQ(actual[index].series_index, expected[index].series_index);
+    EXPECT_EQ(actual[index].peak.shift, expected[index].peak.shift);
+    EXPECT_EQ(actual[index].peak.phase, expected[index].peak.phase);
+    EXPECT_EQ(actual[index].peak.width_index,
+              expected[index].peak.width_index);
+    EXPECT_FLOAT_EQ(actual[index].peak.snr, expected[index].peak.snr);
+    EXPECT_DOUBLE_EQ(actual[index].peak.period, expected[index].peak.period);
+    EXPECT_DOUBLE_EQ(actual[index].peak.frequency,
+                     expected[index].peak.frequency);
+  }
+}
+
+TEST(FfaCuda, SingleSearchMatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto plan = valid_plan();
+  std::vector<float> host_input(2048);
+  for (std::size_t index = 0; index < host_input.size(); ++index) {
+    host_input[index] = static_cast<float>((index * 7 + 3) % 23) - 11.0F;
+  }
+  gaffa::CudaDeviceBuffer<float> device_input(host_input.size());
+  ASSERT_EQ(cudaMemcpy(device_input.data(), host_input.data(),
+                       host_input.size() * sizeof(float),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
+  gaffa::CudaFfaProgram program(plan);
+  const auto device_input_view =
+      static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
+          .as_span(0);
+  const auto cuda_result = gaffa::search_ffa_cuda(
+      program, device_input_view, options);
+  const auto one_shot_result = gaffa::search_ffa_cuda(
+      device_input_view, plan, options);
+  const auto cpu_result = gaffa::search_ffa_cpu(host_input, plan, options);
+  ASSERT_EQ(cuda_result.peaks.size(), cpu_result.peaks.size());
+  ASSERT_EQ(one_shot_result.peaks.size(), cpu_result.peaks.size());
+  for (std::size_t index = 0; index < cpu_result.peaks.size(); ++index) {
+    EXPECT_EQ(cuda_result.peaks[index].shift, cpu_result.peaks[index].shift);
+    EXPECT_EQ(cuda_result.peaks[index].phase, cpu_result.peaks[index].phase);
+    EXPECT_EQ(cuda_result.peaks[index].width_index,
+              cpu_result.peaks[index].width_index);
+    EXPECT_FLOAT_EQ(cuda_result.peaks[index].snr, cpu_result.peaks[index].snr);
+  }
+}
+
+TEST(FfaCuda, BatchSearchRejectsTileLargerThanProgramCapacity) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto plan = valid_plan();
+  gaffa::CudaFfaProgram program(
+      plan, {}, gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
+  gaffa::CudaDeviceBuffer<float> device_input(2 * 2048);
+  EXPECT_THROW(
+      (void)gaffa::run_ffa_batch_cuda(
+          program,
+          gaffa::CudaTimeSeriesBatchView{
+              .data = device_input.data(),
+              .nseries = 2,
+              .nsamples = 2048,
+              .device_id = 0,
+          }),
+      std::invalid_argument);
 }
 
 TEST(FfaCuda, PrepareMatchesCpuWithoutDownsample) {
@@ -808,7 +926,6 @@ TEST(FfaCuda, PrepareRejectsInvalidArguments) {
       .data = &fake_data,
       .nseries = 1,
       .nsamples = 4,
-      .tsamp = 1.0,
       .device_id = 0,
   };
   const auto task = make_task(4, 1.0, 4, 1, 1, 4);

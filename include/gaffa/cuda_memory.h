@@ -38,15 +38,21 @@ class CudaDeviceMemory {
 
   ~CudaDeviceMemory();
 
+  // Releases this allocation on its owning CUDA device. Unlike destruction,
+  // this explicit operation reports CUDA failures to the caller.
+  void reset();
+
   void* data() noexcept;
   const void* data() const noexcept;
   std::size_t bytes() const noexcept;
+  int device_id() const noexcept;
 
  private:
-  void release() noexcept;
+  void release_noexcept() noexcept;
 
   void* data_ = nullptr;
   std::size_t bytes_ = 0;
+  int device_id_ = -1;
 };
 
 template <typename T>

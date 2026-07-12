@@ -3,6 +3,8 @@
 
 #include "gaffa/ffa_detection.h"
 
+#include "gaffa/time_series.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -249,27 +251,37 @@ ScanBoxcarPeakFn select_scan_boxcar_peak_kernel() {
 }
 #endif
 
-FfaPeak make_peak(const FfaBoxcarTrial& trial,
-                  const BoxcarPeak& boxcar,
-                  double period,
-                  double frequency,
-                  std::size_t shift,
-                  std::size_t bins) {
+}  // namespace
+
+float ffa_task_stdnoise(const FfaSearchTask& task) {
+  double variance = 1.0;
+  if (task.downsample_factor != 1.0) {
+    variance = downsampled_variance(task.input_nsamples,
+                                    task.downsample_factor);
+  }
+  return static_cast<float>(
+      std::sqrt(static_cast<double>(task.rows) * variance));
+}
+
+FfaPeak make_ffa_peak(const FfaSearchTask& task,
+                      const FfaBoxcarTrial& trial,
+                      std::size_t shift,
+                      std::size_t phase,
+                      float snr) {
+  const double period = trial_period(task, shift);
   return FfaPeak{
       .period = period,
-      .frequency = frequency,
+      .frequency = 1.0 / period,
       .width = trial.width,
       .duty_cycle = trial.duty_cycle,
       .width_index = trial.width_index,
       .period_index = shift,
-      .phase = boxcar.phase,
+      .phase = phase,
       .shift = shift,
-      .bins = bins,
-      .snr = boxcar.snr,
+      .bins = task.bins,
+      .snr = snr,
   };
 }
-
-}  // namespace
 
 void FfaPeakCollector::add(const FfaPeak& peak) {
   if (peaks == nullptr) {
@@ -349,20 +361,12 @@ void detect_ffa_row_cpu(
       fill_circular_prefix(profile, plan.max_width, circular_prefix);
   const float inv_stdnoise = 1.0F / stdnoise;
   const ScanBoxcarPeakFn scan_boxcar_peak = select_scan_boxcar_peak_kernel();
-  bool period_ready = false;
-  double period = 0.0;
-  double frequency = 0.0;
   for (const FfaBoxcarTrial& trial : plan.boxcar_trials) {
     const BoxcarPeak boxcar = scan_boxcar_peak(
         trial, circular_prefix, plan.bins, profile_sum, inv_stdnoise);
     if (boxcar.snr >= options.snr_threshold) {
-      if (!period_ready) {
-        period = trial_period(task, shift);
-        frequency = 1.0 / period;
-        period_ready = true;
-      }
-      collector.add(
-          make_peak(trial, boxcar, period, frequency, shift, plan.bins));
+      collector.add(make_ffa_peak(task, trial, shift, boxcar.phase,
+                                  boxcar.snr));
     }
   }
 }

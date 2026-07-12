@@ -42,6 +42,18 @@ FfaDetectionPlan make_ffa_detection_plan(
     std::span<const std::size_t> width_trials,
     std::size_t bins);
 
+// Noise normalization used by both CPU and CUDA FFA detection. The input time
+// series is assumed to have unit sample variance after preprocessing.
+float ffa_task_stdnoise(const FfaSearchTask& task);
+
+// Builds the complete public peak record from task-local detection indices.
+// CPU detection and CUDA host expansion share this conversion.
+FfaPeak make_ffa_peak(const FfaSearchTask& task,
+                      const FfaBoxcarTrial& trial,
+                      std::size_t shift,
+                      std::size_t phase,
+                      float snr);
+
 void detect_ffa_row_cpu(
     std::span<const float> profile,
     std::size_t shift,

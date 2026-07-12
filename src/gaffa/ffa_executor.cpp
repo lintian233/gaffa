@@ -1,5 +1,6 @@
 #include "gaffa/ffa_executor.h"
 
+#include "gaffa/ffa_detection.h"
 #include "gaffa/time_series.h"
 
 #include <cmath>
@@ -113,15 +114,6 @@ std::span<const float> prepare_task_samples(std::span<const float> time_series,
   return cache.downsampled;
 }
 
-float task_stdnoise(std::size_t input_nsamples, const FfaSearchTask& task) {
-  double variance = 1.0;
-  if (!is_no_downsample(task.downsample_factor)) {
-    variance = downsampled_variance(input_nsamples, task.downsample_factor);
-  }
-  return static_cast<float>(
-      std::sqrt(static_cast<double>(task.rows) * variance));
-}
-
 }  // namespace
 
 void for_each_ffa_block_cpu(std::span<const float> time_series,
@@ -154,7 +146,7 @@ void for_each_ffa_block_cpu(std::span<const float> time_series,
         .task = &task,
         .shape = FfaTransformShape{.rows = task.rows_eval, .bins = task.bins},
         .transform = std::span<const float>(transform).first(exposed_size),
-        .stdnoise = task_stdnoise(time_series.size(), task),
+        .stdnoise = ffa_task_stdnoise(task),
     });
   }
 }
@@ -182,7 +174,7 @@ void for_each_ffa_row_cpu(std::span<const float> time_series,
         .rows = task.rows,
         .bins = task.bins,
     };
-    const float stdnoise = task_stdnoise(time_series.size(), task);
+    const float stdnoise = ffa_task_stdnoise(task);
     for_each_ffa_transform_row_cpu(
         prepared.first(full_size), full_shape, task.rows_eval, scratch, work,
         row_buffer, [&](const FfaTransformRowView& row) {

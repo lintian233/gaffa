@@ -11,7 +11,6 @@ struct CudaTimeSeriesBatchView {
   const float* data = nullptr;
   std::size_t nseries = 0;
   std::size_t nsamples = 0;
-  double tsamp = 0.0;
   int device_id = 0;
 
   [[nodiscard]] std::size_t size() const noexcept {

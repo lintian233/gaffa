@@ -47,7 +47,6 @@ std::vector<float> downsample_on_cuda(const std::vector<float>& input,
           .data = device_input.data(),
           .nseries = nseries,
           .nsamples = nsamples,
-          .tsamp = 1.0,
           .device_id = 0,
       },
       factor, device_output.as_span(0), options);
@@ -134,7 +133,6 @@ TEST(TimeSeriesCuda, WeightedDownsampleRejectsInvalidArguments) {
       .data = &fake_data,
       .nseries = 1,
       .nsamples = 4,
-      .tsamp = 1.0,
       .device_id = 0,
   };
 
