@@ -256,7 +256,7 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
       .output_bytes = checked_float_bytes(
           task_count, "CUDA FFA output workspace byte size overflow"),
       .detection_compact_bytes =
-          std::min(full_peak_bytes, options.peak_buffer_bytes),
+          std::min(full_peak_bytes, options.initial_peak_buffer_bytes),
   };
   shape.total_bytes = checked_add(
       checked_add(
@@ -392,41 +392,16 @@ class CudaFfaTileRunner {
     const auto groups = program_.execution_plan().groups();
     for (std::size_t group_index = 0; group_index < groups.size();
          ++group_index) {
-      const auto& group = groups[group_index];
-      reset_group_peak_buffer();
-      const auto prepared = workspace_.prepared_span(
-          input.nseries, group.prepared_nsamples, program_.device_id());
-      prepare_ffa_input_cuda(input, group.tasks.front().task, prepared, launch);
-
-      for (std::size_t task_index = 0; task_index < group.tasks.size();
-           ++task_index) {
-        const auto& task = group.tasks[task_index];
-        const CudaFfaInput prepared_input = workspace_.prepared_input(
-            input.nseries, group, task, program_.device_id());
-        CudaFfaBuffer scratch = workspace_.transform_buffer(
-            workspace_.scratch, input.nseries, task, program_.device_id());
-        CudaFfaBuffer output = workspace_.transform_buffer(
-            workspace_.output, input.nseries, task, program_.device_id());
-        const auto& program_task =
-            program_.impl_->layout.groups[group_index].tasks[task_index];
-
-        // One stream orders prepare -> transform and every successive task.
-        // A terminal merge can feed detection directly, avoiding one full
-        // materialized transform write/read pair.
-        const bool fuse_terminal =
-            can_fuse_terminal_merge(program_task, program_.impl_->layout);
-        if (fuse_terminal) {
-          launch_program_transform_before_terminal(
-              program_task, program_.impl_->layout, program_.impl_->ops,
-              prepared_input, scratch, output, launch);
-        } else {
-          ffa_transform_block_cuda(program_, group_index, task_index,
-                                   prepared_input, scratch, output, launch);
+      for (;;) {
+        const CudaFfaGroupPeakSummary summary =
+            execute_prepare_group(group_index, input, launch);
+        if (!summary.overflow) {
+          collect_group_peaks(group_index, input.nseries, summary.count,
+                              peak_counts, result);
+          break;
         }
-        enqueue_task_detection(group_index, task_index, input.nseries,
-                               prepared_input, scratch, output, fuse_terminal);
+        grow_peak_buffer(group_index, summary.count);
       }
-      collect_group_peaks(group_index, input.nseries, peak_counts, result);
     }
     std::sort(result.peaks.begin(), result.peaks.end(),
               [](const FfaBatchPeak& lhs, const FfaBatchPeak& rhs) {
@@ -439,15 +414,120 @@ class CudaFfaTileRunner {
   }
 
  private:
+  struct CudaFfaGroupPeakSummary {
+    std::size_t count = 0;
+    bool overflow = false;
+  };
+
   void reset_group_peak_buffer() {
     check_cuda(cudaMemsetAsync(workspace_.detection_peak_count.data(), 0,
-                               sizeof(unsigned int),
+                               sizeof(unsigned long long),
                                program_.impl_->execution_options.stream),
                "CUDA FFA peak count reset");
     check_cuda(cudaMemsetAsync(workspace_.detection_peak_overflow.data(), 0,
                                sizeof(unsigned int),
                                program_.impl_->execution_options.stream),
                "CUDA FFA peak overflow reset");
+  }
+
+  CudaFfaGroupPeakSummary execute_prepare_group(
+      std::size_t group_index,
+      CudaTimeSeriesBatchView input,
+      const CudaLaunchOptions& launch) {
+    const auto& group = program_.execution_plan().groups()[group_index];
+    reset_group_peak_buffer();
+    const auto prepared = workspace_.prepared_span(
+        input.nseries, group.prepared_nsamples, program_.device_id());
+    prepare_ffa_input_cuda(input, group.tasks.front().task, prepared, launch);
+
+    for (std::size_t task_index = 0; task_index < group.tasks.size();
+         ++task_index) {
+      const auto& task = group.tasks[task_index];
+      const CudaFfaInput prepared_input = workspace_.prepared_input(
+          input.nseries, group, task, program_.device_id());
+      CudaFfaBuffer scratch = workspace_.transform_buffer(
+          workspace_.scratch, input.nseries, task, program_.device_id());
+      CudaFfaBuffer output = workspace_.transform_buffer(
+          workspace_.output, input.nseries, task, program_.device_id());
+      const auto& program_task =
+          program_.impl_->layout.groups[group_index].tasks[task_index];
+
+      // One stream orders prepare -> transform and every successive task.
+      // A terminal merge can feed detection directly, avoiding one full
+      // materialized transform write/read pair.
+      const bool fuse_terminal =
+          can_fuse_terminal_merge(program_task, program_.impl_->layout);
+      if (fuse_terminal) {
+        launch_program_transform_before_terminal(
+            program_task, program_.impl_->layout, program_.impl_->ops,
+            prepared_input, scratch, output, launch);
+      } else {
+        ffa_transform_block_cuda(program_, group_index, task_index,
+                                 prepared_input, scratch, output, launch);
+      }
+      enqueue_task_detection(group_index, task_index, input.nseries,
+                             prepared_input, scratch, output, fuse_terminal);
+    }
+
+    check_cuda(cudaStreamSynchronize(program_.impl_->execution_options.stream),
+               "CUDA FFA group synchronize");
+    unsigned long long count = 0;
+    unsigned int overflow = 0;
+    check_cuda(cudaMemcpy(&count, workspace_.detection_peak_count.data(),
+                          sizeof(count), cudaMemcpyDeviceToHost),
+               "CUDA FFA peak count D2H");
+    check_cuda(cudaMemcpy(&overflow, workspace_.detection_peak_overflow.data(),
+                          sizeof(overflow), cudaMemcpyDeviceToHost),
+               "CUDA FFA peak overflow D2H");
+    if (count > std::numeric_limits<std::size_t>::max()) {
+      throw std::overflow_error("CUDA FFA peak count exceeds host size_t");
+    }
+    return CudaFfaGroupPeakSummary{
+        .count = static_cast<std::size_t>(count),
+        .overflow = overflow != 0 || count > workspace_.peak_capacity_records(),
+    };
+  }
+
+  void grow_peak_buffer(std::size_t group_index, std::size_t required_records) {
+    const auto& options = program_.impl_->execution_options;
+    const std::size_t plan_records = checked_multiply(
+        workspace_.shape.series_tile_size,
+        workspace_.shape.max_detection_slots_per_series,
+        "CUDA FFA peak record count overflow");
+    const std::size_t max_records = std::min(
+        plan_records, options.max_peak_buffer_bytes / sizeof(FfaCudaPeak));
+    const std::size_t current_records = workspace_.peak_capacity_records();
+    if (required_records > max_records) {
+      throw std::runtime_error(
+          "CUDA FFA compact peak buffer exceeded max_peak_buffer_bytes: "
+          "group_index=" + std::to_string(group_index) +
+          " observed_peak_records=" + std::to_string(required_records) +
+          " required_bytes=" +
+          std::to_string(checked_multiply(required_records,
+                                          sizeof(FfaCudaPeak),
+                                          "CUDA FFA peak byte size overflow")) +
+          " max_peak_buffer_bytes=" +
+          std::to_string(options.max_peak_buffer_bytes));
+    }
+    const std::size_t doubled_records = checked_multiply(
+        current_records, 2, "CUDA FFA peak buffer capacity overflow");
+    const std::size_t next_records =
+        std::min(max_records, std::max(doubled_records, required_records));
+    if (next_records <= current_records) {
+      throw std::logic_error("CUDA FFA peak buffer growth made no progress");
+    }
+    const std::size_t next_bytes = checked_multiply(
+        next_records, sizeof(FfaCudaPeak),
+        "CUDA FFA peak buffer byte size overflow");
+    if (options.workspace_bytes_limit != 0 &&
+        checked_add(workspace_.shape.total_bytes -
+                        workspace_.shape.detection_compact_bytes,
+                    next_bytes, "CUDA FFA workspace byte size overflow") >
+            options.workspace_bytes_limit) {
+      throw std::runtime_error(
+          "CUDA FFA compact peak buffer growth exceeds workspace_bytes_limit");
+    }
+    workspace_.resize_peak_buffer(next_records);
   }
 
   void enqueue_task_detection(std::size_t group_index,
@@ -522,25 +602,9 @@ class CudaFfaTileRunner {
 
   void collect_group_peaks(std::size_t group_index,
                            std::size_t nseries,
+                           std::size_t selected_count,
                            std::vector<std::size_t>& peak_counts,
                            FfaBatchSearchResult& result) {
-    check_cuda(cudaStreamSynchronize(program_.impl_->execution_options.stream),
-               "CUDA FFA group synchronize");
-
-    unsigned int selected_count = 0;
-    unsigned int overflow = 0;
-    check_cuda(cudaMemcpy(&selected_count, workspace_.detection_peak_count.data(),
-                          sizeof(selected_count), cudaMemcpyDeviceToHost),
-               "CUDA FFA peak count D2H");
-    check_cuda(cudaMemcpy(&overflow, workspace_.detection_peak_overflow.data(),
-                          sizeof(overflow), cudaMemcpyDeviceToHost),
-               "CUDA FFA peak overflow D2H");
-    if (overflow != 0 || selected_count > workspace_.detection_compact.size()) {
-      throw std::runtime_error(
-          "CUDA FFA compact peak buffer overflow; increase "
-          "CudaFfaExecutionOptions::peak_buffer_bytes or search with a "
-          "higher SNR threshold");
-    }
     std::vector<FfaCudaPeak> compact_peaks(
         selected_count);
     if (!compact_peaks.empty()) {

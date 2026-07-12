@@ -377,7 +377,7 @@ struct CudaFfaWorkspace {
     output = CudaDeviceBuffer<float>(shape.output_bytes / sizeof(float));
     detection_compact = CudaDeviceBuffer<FfaCudaPeak>(
         shape.detection_compact_bytes / sizeof(FfaCudaPeak));
-    detection_peak_count = CudaDeviceBuffer<unsigned int>(1);
+    detection_peak_count = CudaDeviceBuffer<unsigned long long>(1);
     detection_peak_overflow = CudaDeviceBuffer<unsigned int>(1);
   }
 
@@ -434,12 +434,30 @@ struct CudaFfaWorkspace {
     };
   }
 
+  [[nodiscard]] std::size_t peak_capacity_records() const noexcept {
+    return detection_compact.size();
+  }
+
+  void resize_peak_buffer(std::size_t capacity_records) {
+    if (capacity_records == 0) {
+      throw std::invalid_argument(
+          "CUDA FFA peak buffer capacity must be > 0");
+    }
+    CudaDeviceBuffer<FfaCudaPeak> replacement(capacity_records);
+    const std::size_t previous_bytes = shape.detection_compact_bytes;
+    detection_compact = std::move(replacement);
+    shape.detection_compact_bytes = detection_compact.bytes();
+    shape.total_bytes = checked_add(
+        shape.total_bytes - previous_bytes, shape.detection_compact_bytes,
+        "CUDA FFA workspace byte size overflow");
+  }
+
   CudaFfaWorkspaceShape shape;
   CudaDeviceBuffer<float> prepared;
   CudaDeviceBuffer<float> scratch;
   CudaDeviceBuffer<float> output;
   CudaDeviceBuffer<FfaCudaPeak> detection_compact;
-  CudaDeviceBuffer<unsigned int> detection_peak_count;
+  CudaDeviceBuffer<unsigned long long> detection_peak_count;
   CudaDeviceBuffer<unsigned int> detection_peak_overflow;
 };
 

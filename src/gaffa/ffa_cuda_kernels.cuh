@@ -88,9 +88,9 @@ struct FfaCudaBoxcarTrial {
 __device__ void append_ffa_peak(FfaCudaPeak peak,
                                 FfaCudaPeak* peaks,
                                 std::size_t capacity,
-                                unsigned int* count,
+                                unsigned long long* count,
                                 unsigned int* overflow) {
-  const unsigned int index = atomicAdd(count, 1U);
+  const unsigned long long index = atomicAdd(count, 1ULL);
   if (index < capacity) {
     peaks[index] = peak;
     return;
@@ -511,7 +511,7 @@ __global__ void detect_ffa_rows_kernel(
     std::uint32_t task_index,
     FfaCudaPeak* peaks,
     std::size_t peak_capacity,
-    unsigned int* peak_count,
+    unsigned long long* peak_count,
     unsigned int* peak_overflow) {
   const std::size_t shift = blockIdx.x;
   const std::size_t series = blockIdx.y;
@@ -597,7 +597,7 @@ __device__ __forceinline__ void detect_terminal_boxcar_trial(
     std::size_t shift,
     FfaCudaPeak* peaks,
     std::size_t peak_capacity,
-    unsigned int* peak_count,
+    unsigned long long* peak_count,
     unsigned int* peak_overflow) {
   constexpr unsigned int kWarpWidth = 32;
   const unsigned int lane = threadIdx.x % kWarpWidth;
@@ -659,7 +659,7 @@ __global__ void detect_ffa_terminal_merge_kernel(
     std::uint32_t task_index,
     FfaCudaPeak* peaks,
     std::size_t peak_capacity,
-    unsigned int* peak_count,
+    unsigned long long* peak_count,
     unsigned int* peak_overflow) {
   const std::size_t shift = blockIdx.x;
   const std::size_t series = blockIdx.y;

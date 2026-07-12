@@ -36,10 +36,14 @@ struct CudaFfaExecutionOptions {
   // FFA executor.
   std::size_t workspace_bytes_limit = 0;
 
-  // Maximum device memory reserved for threshold-passing peaks before one
-  // prepare group is transferred to the host. Overflow is reported instead of
-  // silently dropping candidates.
-  std::size_t peak_buffer_bytes = 1024ULL * 1024ULL * 1024ULL;
+  // Compact peak storage reserved for normal runs. The executor grows this
+  // buffer and retries a prepare group only when it overflows.
+  std::size_t initial_peak_buffer_bytes = 64ULL * 1024ULL * 1024ULL;
+
+  // Hard per-group limit for adaptive compact peak storage. Reallocation can
+  // transiently hold both the old and replacement buffers.
+  std::size_t max_peak_buffer_bytes =
+      1024ULL * 1024ULL * 1024ULL;
 
   cudaStream_t stream = nullptr;
 

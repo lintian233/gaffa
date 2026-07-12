@@ -89,8 +89,12 @@ void validate_execution_options(const CudaFfaExecutionOptions& options) {
   if (options.threads_per_block == 0) {
     throw std::invalid_argument("CUDA FFA threads_per_block must be > 0");
   }
-  if (options.peak_buffer_bytes == 0) {
-    throw std::invalid_argument("CUDA FFA peak_buffer_bytes must be > 0");
+  if (options.initial_peak_buffer_bytes < sizeof(FfaCudaPeak) ||
+      options.max_peak_buffer_bytes < sizeof(FfaCudaPeak) ||
+      options.initial_peak_buffer_bytes > options.max_peak_buffer_bytes) {
+    throw std::invalid_argument(
+        "CUDA FFA peak buffer bytes must satisfy "
+        "sizeof(FfaCudaPeak) <= initial <= max");
   }
 }
 
