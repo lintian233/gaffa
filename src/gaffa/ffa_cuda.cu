@@ -46,7 +46,32 @@ struct FfaCudaMergeOp {
   std::size_t output_rows = 0;
 };
 
+// One descriptor per bounded subtree, never one descriptor per output row.
+// The schedule is pre-expanded on the host; the device kernel is iterative.
+struct FfaCudaSubtreeOp {
+  FfaCudaBufferRole input_role = FfaCudaBufferRole::Input;
+  FfaCudaBufferRole output_role = FfaCudaBufferRole::Output;
+  std::size_t input_begin_row = 0;
+  std::size_t output_begin_row = 0;
+  std::size_t rows = 0;
+  std::size_t schedule_index = 0;
+};
+
+struct FfaCudaSubtreeLevel {
+  std::size_t copy_offset = 0;
+  std::size_t copy_count = 0;
+  std::size_t merge_offset = 0;
+  std::size_t merge_count = 0;
+};
+
+struct FfaCudaSubtreeSchedule {
+  std::size_t rows = 0;
+  std::size_t level_offset = 0;
+  std::size_t level_count = 0;
+};
+
 struct FfaCudaTransformLevel {
+  std::vector<FfaCudaSubtreeOp> subtree_ops;
   std::vector<FfaCudaCopyOp> copy_ops;
   std::vector<FfaCudaMergeOp> merge_ops;
 };
@@ -57,12 +82,13 @@ struct FfaCudaDeviceTransformLevel {
   std::size_t max_copy_elements = 0;
   CudaDeviceBuffer<FfaCudaMergeOp> merge_ops;
   std::size_t merge_op_count = 0;
-  std::size_t max_merge_elements = 0;
+  std::size_t max_merge_rows = 0;
 };
 
 // Device-only representation: every omitted FfaPeak field is immutable task
 // metadata or can be reconstructed from these indices on the host.
 struct FfaCudaPeak {
+  std::uint32_t task_index = 0;
   std::uint32_t series_index = 0;
   std::uint32_t shift = 0;
   std::uint32_t phase = 0;
@@ -70,7 +96,7 @@ struct FfaCudaPeak {
   float snr = 0.0F;
 };
 
-static_assert(sizeof(FfaCudaPeak) == 20);
+static_assert(sizeof(FfaCudaPeak) == 24);
 
 struct FfaCudaBoxcarTrial {
   std::uint32_t width = 0;
@@ -78,6 +104,19 @@ struct FfaCudaBoxcarTrial {
   float height = 0.0F;
   float baseline = 0.0F;
 };
+
+__device__ void append_ffa_peak(FfaCudaPeak peak,
+                                FfaCudaPeak* peaks,
+                                std::size_t capacity,
+                                unsigned int* count,
+                                unsigned int* overflow) {
+  const unsigned int index = atomicAdd(count, 1U);
+  if (index < capacity) {
+    peaks[index] = peak;
+    return;
+  }
+  atomicExch(overflow, 1U);
+}
 
 __device__ const float* select_const_buffer(FfaCudaBufferRole role,
                                             const float* input,
@@ -168,42 +207,60 @@ __global__ void ffa_copy_level_kernel(const float* input,
       source_base[(op.input_begin_row + row) * bins + bin];
 }
 
-__global__ void ffa_merge_level_kernel(const float* input,
-                                       float* scratch,
-                                       float* output,
-                                       std::size_t input_stride,
-                                       std::size_t scratch_stride,
-                                       std::size_t output_stride,
-                                       std::size_t bins,
-                                       const FfaCudaMergeOp* ops,
-                                       std::size_t op_count,
-                                       std::size_t max_op_elements) {
-  const std::size_t element =
-      blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x;
+constexpr unsigned int kFfaMergeThreads = 256;
+constexpr unsigned int kFfaMergeWarpWidth = 32;
+constexpr unsigned int kFfaMergeWarpsPerBlock =
+    kFfaMergeThreads / kFfaMergeWarpWidth;
+static_assert(kFfaMergeThreads % kFfaMergeWarpWidth == 0);
+
+__global__ void ffa_merge_profiles_kernel(const float* input,
+                                          float* scratch,
+                                          float* output,
+                                          std::size_t input_stride,
+                                          std::size_t scratch_stride,
+                                          std::size_t output_stride,
+                                          std::size_t bins,
+                                          const FfaCudaMergeOp* ops,
+                                          std::size_t op_count,
+                                          std::size_t max_output_rows) {
   const std::size_t op_index = blockIdx.y;
   const std::size_t series = blockIdx.z;
-  if (op_index >= op_count || element >= max_op_elements) {
+  if (op_index >= op_count) {
     return;
   }
 
-  const FfaCudaMergeOp op = ops[op_index];
-  const std::size_t op_elements = op.output_rows * bins;
-  if (element >= op_elements) {
+  __shared__ FfaCudaMergeOp shared_op;
+  if (threadIdx.x == 0) {
+    shared_op = ops[op_index];
+  }
+  __syncthreads();
+  const FfaCudaMergeOp op = shared_op;
+  const unsigned int lane = threadIdx.x % kFfaMergeWarpWidth;
+  const unsigned int warp = threadIdx.x / kFfaMergeWarpWidth;
+  const std::size_t shift =
+      blockIdx.x * static_cast<std::size_t>(kFfaMergeWarpsPerBlock) + warp;
+  if (shift >= op.output_rows || shift >= max_output_rows) {
     return;
   }
 
-  const std::size_t shift = element / bins;
-  const std::size_t bin = element % bins;
-  const float head_scale = static_cast<float>(op.head_rows - 1) /
-                           static_cast<float>(op.output_rows - 1);
-  const float tail_scale = static_cast<float>(op.tail_rows - 1) /
-                           static_cast<float>(op.output_rows - 1);
-  const auto head_shift = static_cast<std::size_t>(
-      head_scale * static_cast<float>(shift) + 0.5F);
-  const auto tail_shift = static_cast<std::size_t>(
-      tail_scale * static_cast<float>(shift) + 0.5F);
-  const std::size_t compensation = shift - (head_shift + tail_shift);
-  const std::size_t rolled = (head_shift + compensation) % bins;
+  std::size_t head_shift = 0;
+  std::size_t tail_shift = 0;
+  std::size_t rolled = 0;
+  if (lane == 0) {
+    const float head_scale = static_cast<float>(op.head_rows - 1) /
+                             static_cast<float>(op.output_rows - 1);
+    const float tail_scale = static_cast<float>(op.tail_rows - 1) /
+                             static_cast<float>(op.output_rows - 1);
+    head_shift = static_cast<std::size_t>(
+        head_scale * static_cast<float>(shift) + 0.5F);
+    tail_shift = static_cast<std::size_t>(
+        tail_scale * static_cast<float>(shift) + 0.5F);
+    const std::size_t compensation = shift - (head_shift + tail_shift);
+    rolled = (head_shift + compensation) % bins;
+  }
+  head_shift = __shfl_sync(0xffffffffU, head_shift, 0);
+  tail_shift = __shfl_sync(0xffffffffU, tail_shift, 0);
+  rolled = __shfl_sync(0xffffffffU, rolled, 0);
 
   const std::size_t head_stride =
       op.head_role == FfaCudaBufferRole::Input
@@ -228,13 +285,238 @@ __global__ void ffa_merge_level_kernel(const float* input,
       select_mutable_buffer(op.output_role, scratch, output) +
       series * destination_stride;
 
-  output_base[(op.output_begin_row + shift) * bins + bin] =
-      head_base[(op.head_begin_row + head_shift) * bins + bin] +
-      tail_base[(op.tail_begin_row + tail_shift) * bins +
-                ((bin + rolled) % bins)];
+  for (std::size_t bin = lane; bin < bins; bin += kFfaMergeWarpWidth) {
+    const std::size_t tail_bin =
+        bin + rolled < bins ? bin + rolled : bin + rolled - bins;
+    output_base[(op.output_begin_row + shift) * bins + bin] =
+        head_base[(op.head_begin_row + head_shift) * bins + bin] +
+        tail_base[(op.tail_begin_row + tail_shift) * bins + tail_bin];
+  }
+}
+
+__device__ const float* select_shared_const_buffer(FfaCudaBufferRole role,
+                                                    const float* input,
+                                                    const float* scratch,
+                                                    const float* output) {
+  switch (role) {
+    case FfaCudaBufferRole::Input:
+      return input;
+    case FfaCudaBufferRole::Scratch:
+      return scratch;
+    case FfaCudaBufferRole::Output:
+      return output;
+  }
+  return nullptr;
+}
+
+__device__ float* select_shared_mutable_buffer(FfaCudaBufferRole role,
+                                                float* scratch,
+                                                float* output) {
+  switch (role) {
+    case FfaCudaBufferRole::Scratch:
+      return scratch;
+    case FfaCudaBufferRole::Output:
+      return output;
+    case FfaCudaBufferRole::Input:
+      return nullptr;
+  }
+  return nullptr;
+}
+
+__device__ void execute_shared_copy(const FfaCudaCopyOp& op,
+                                    const float* input,
+                                    float* scratch,
+                                    float* output,
+                                    std::size_t bins) {
+  const float* source =
+      select_shared_const_buffer(op.input_role, input, scratch, output);
+  float* destination =
+      select_shared_mutable_buffer(op.output_role, scratch, output);
+  const std::size_t count = op.rows * bins;
+  for (std::size_t index = threadIdx.x; index < count;
+       index += blockDim.x) {
+    const std::size_t row = index / bins;
+    const std::size_t bin = index % bins;
+    destination[(op.output_begin_row + row) * bins + bin] =
+        source[(op.input_begin_row + row) * bins + bin];
+  }
+  __syncthreads();
+}
+
+__device__ void execute_shared_merge(const FfaCudaMergeOp& op,
+                                     const float* input,
+                                     float* scratch,
+                                     float* output,
+                                     std::size_t bins) {
+  const float* head =
+      select_shared_const_buffer(op.head_role, input, scratch, output);
+  const float* tail =
+      select_shared_const_buffer(op.tail_role, input, scratch, output);
+  float* destination =
+      select_shared_mutable_buffer(op.output_role, scratch, output);
+  const float head_scale = static_cast<float>(op.head_rows - 1) /
+                           static_cast<float>(op.output_rows - 1);
+  const float tail_scale = static_cast<float>(op.tail_rows - 1) /
+                           static_cast<float>(op.output_rows - 1);
+  for (std::size_t shift = 0; shift < op.output_rows; ++shift) {
+    const auto head_shift = static_cast<std::size_t>(
+        head_scale * static_cast<float>(shift) + 0.5F);
+    const auto tail_shift = static_cast<std::size_t>(
+        tail_scale * static_cast<float>(shift) + 0.5F);
+    const std::size_t compensation = shift - (head_shift + tail_shift);
+    const std::size_t roll = (head_shift + compensation) % bins;
+    for (std::size_t bin = threadIdx.x; bin < bins; bin += blockDim.x) {
+      const std::size_t tail_bin =
+          bin + roll < bins ? bin + roll : bin + roll - bins;
+      destination[(op.output_begin_row + shift) * bins + bin] =
+          head[(op.head_begin_row + head_shift) * bins + bin] +
+          tail[(op.tail_begin_row + tail_shift) * bins + tail_bin];
+    }
+  }
+  __syncthreads();
+}
+
+__global__ void ffa_subtree_transform_kernel(
+    const float* input,
+    float* scratch,
+    float* output,
+    std::size_t input_stride,
+    std::size_t scratch_stride,
+    std::size_t output_stride,
+    std::size_t bins,
+    const FfaCudaSubtreeOp* ops,
+    std::size_t op_count,
+    const FfaCudaSubtreeSchedule* schedules,
+    const FfaCudaSubtreeLevel* levels,
+    const FfaCudaCopyOp* copy_ops,
+    const FfaCudaMergeOp* merge_ops,
+    std::size_t subtree_rows_capacity) {
+  const std::size_t op_index = blockIdx.x;
+  const std::size_t series = blockIdx.y;
+  if (op_index >= op_count) {
+    return;
+  }
+
+  const FfaCudaSubtreeOp op = ops[op_index];
+  const FfaCudaSubtreeSchedule schedule = schedules[op.schedule_index];
+  if (op.rows == 0 || op.rows > subtree_rows_capacity ||
+      schedule.rows != op.rows) {
+    return;
+  }
+  const std::size_t input_stride_for_role =
+      op.input_role == FfaCudaBufferRole::Input
+          ? input_stride
+          : (op.input_role == FfaCudaBufferRole::Scratch ? scratch_stride
+                                                         : output_stride);
+  const std::size_t output_stride_for_role =
+      op.output_role == FfaCudaBufferRole::Scratch ? scratch_stride
+                                                    : output_stride;
+  const float* source =
+      select_const_buffer(op.input_role, input, scratch, output) +
+      series * input_stride_for_role + op.input_begin_row * bins;
+  float* destination =
+      select_mutable_buffer(op.output_role, scratch, output) +
+      series * output_stride_for_role + op.output_begin_row * bins;
+
+  extern __shared__ float shared[];
+  const std::size_t subtree_elements = subtree_rows_capacity * bins;
+  float* shared_input = shared;
+  float* shared_scratch = shared_input + subtree_elements;
+  float* shared_output = shared_scratch + subtree_elements;
+  const std::size_t op_elements = op.rows * bins;
+  for (std::size_t index = threadIdx.x; index < op_elements;
+       index += blockDim.x) {
+    shared_input[index] = source[index];
+  }
+  __syncthreads();
+
+  for (std::size_t level_index = 0; level_index < schedule.level_count;
+       ++level_index) {
+    const FfaCudaSubtreeLevel level =
+        levels[schedule.level_offset + level_index];
+    for (std::size_t copy_index = 0; copy_index < level.copy_count;
+         ++copy_index) {
+      execute_shared_copy(copy_ops[level.copy_offset + copy_index],
+                          shared_input, shared_scratch, shared_output, bins);
+    }
+    for (std::size_t merge_index = 0; merge_index < level.merge_count;
+         ++merge_index) {
+      execute_shared_merge(merge_ops[level.merge_offset + merge_index],
+                           shared_input, shared_scratch, shared_output, bins);
+    }
+  }
+
+  for (std::size_t index = threadIdx.x; index < op_elements;
+       index += blockDim.x) {
+    destination[index] = shared_output[index];
+  }
 }
 
 constexpr unsigned int kFfaDetectionThreads = 256;
+using FfaDetectionBlockScan = cub::BlockScan<float, kFfaDetectionThreads>;
+
+__device__ void build_circular_prefix_parallel(
+    const float* profile,
+    float* prefix,
+    std::size_t bins,
+    std::size_t max_width,
+    FfaDetectionBlockScan::TempStorage& scan_storage,
+    float& scan_carry,
+    float& tile_carry) {
+  if (threadIdx.x == 0) {
+    prefix[0] = 0.0F;
+    scan_carry = 0.0F;
+  }
+  __syncthreads();
+
+  for (std::size_t base = 0; base < bins;
+       base += kFfaDetectionThreads) {
+    const std::size_t index = base + threadIdx.x;
+    const float value = index < bins ? profile[index] : 0.0F;
+    float inclusive = 0.0F;
+    FfaDetectionBlockScan(scan_storage).InclusiveSum(value, inclusive);
+    if (threadIdx.x == kFfaDetectionThreads - 1) {
+      tile_carry = inclusive;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      const float tile_total = tile_carry;
+      tile_carry = scan_carry;
+      scan_carry += tile_total;
+    }
+    __syncthreads();
+    if (index < bins) {
+      prefix[index + 1] = tile_carry + inclusive;
+    }
+    __syncthreads();
+  }
+
+  if (threadIdx.x == 0) {
+    scan_carry = prefix[bins];
+  }
+  __syncthreads();
+  for (std::size_t base = 0; base < max_width;
+       base += kFfaDetectionThreads) {
+    const std::size_t index = base + threadIdx.x;
+    const float value = index < max_width ? profile[index] : 0.0F;
+    float inclusive = 0.0F;
+    FfaDetectionBlockScan(scan_storage).InclusiveSum(value, inclusive);
+    if (threadIdx.x == kFfaDetectionThreads - 1) {
+      tile_carry = inclusive;
+    }
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      const float tile_total = tile_carry;
+      tile_carry = scan_carry;
+      scan_carry += tile_total;
+    }
+    __syncthreads();
+    if (index < max_width) {
+      prefix[bins + index + 1] = tile_carry + inclusive;
+    }
+    __syncthreads();
+  }
+}
 
 __global__ void detect_ffa_rows_kernel(
     const float* transform,
@@ -246,8 +528,11 @@ __global__ void detect_ffa_rows_kernel(
     std::size_t max_width,
     float stdnoise,
     float snr_threshold,
-    FfaCudaPeak* raw_peaks,
-    std::uint8_t* flags) {
+    std::uint32_t task_index,
+    FfaCudaPeak* peaks,
+    std::size_t peak_capacity,
+    unsigned int* peak_count,
+    unsigned int* peak_overflow) {
   const std::size_t shift = blockIdx.x;
   const std::size_t series = blockIdx.y;
   if (shift >= rows_eval) {
@@ -255,8 +540,6 @@ __global__ void detect_ffa_rows_kernel(
   }
 
   extern __shared__ float prefix[];
-  __shared__ float reduction_values[kFfaDetectionThreads];
-  __shared__ std::uint32_t reduction_phases[kFfaDetectionThreads];
 
   const float* profile = transform + series * transform_stride + shift * bins;
   if (threadIdx.x == 0) {
@@ -271,54 +554,221 @@ __global__ void detect_ffa_rows_kernel(
   __syncthreads();
 
   const float profile_sum = prefix[bins];
-  const std::size_t base_slot = (series * rows_eval + shift) * trial_count;
-  for (std::size_t trial_index = 0; trial_index < trial_count; ++trial_index) {
+  constexpr unsigned int kWarpWidth = 32;
+  constexpr unsigned int kWarpsPerBlock =
+      kFfaDetectionThreads / kWarpWidth;
+  static_assert(kFfaDetectionThreads % kWarpWidth == 0);
+
+  // Each warp owns one width trial. A lane scans every 32nd phase, so this
+  // covers any bins value; bins does not need to be warp- or block-aligned.
+  const unsigned int lane = threadIdx.x % kWarpWidth;
+  const unsigned int warp = threadIdx.x / kWarpWidth;
+  for (std::size_t trial_base = 0; trial_base < trial_count;
+       trial_base += kWarpsPerBlock) {
+    const std::size_t trial_index = trial_base + warp;
+    if (trial_index >= trial_count) {
+      continue;
+    }
     const FfaCudaBoxcarTrial trial = trials[trial_index];
     float best_sum = -INFINITY;
     std::uint32_t best_phase = 0;
-    for (std::size_t phase = threadIdx.x; phase < bins;
-         phase += blockDim.x) {
+    for (std::size_t phase = lane; phase < bins; phase += kWarpWidth) {
       const float sum = prefix[phase + trial.width] - prefix[phase];
       if (sum > best_sum || (sum == best_sum && phase < best_phase)) {
         best_sum = sum;
         best_phase = static_cast<std::uint32_t>(phase);
       }
     }
-    reduction_values[threadIdx.x] = best_sum;
-    reduction_phases[threadIdx.x] = best_phase;
-    __syncthreads();
-
-    for (unsigned int stride = blockDim.x / 2; stride > 0; stride /= 2) {
-      if (threadIdx.x < stride) {
-        const float other_sum = reduction_values[threadIdx.x + stride];
-        const std::uint32_t other_phase =
-            reduction_phases[threadIdx.x + stride];
-        if (other_sum > reduction_values[threadIdx.x] ||
-            (other_sum == reduction_values[threadIdx.x] &&
-             other_phase < reduction_phases[threadIdx.x])) {
-          reduction_values[threadIdx.x] = other_sum;
-          reduction_phases[threadIdx.x] = other_phase;
-        }
+    for (unsigned int offset = kWarpWidth / 2; offset > 0; offset /= 2) {
+      const float other_sum = __shfl_down_sync(0xffffffffU, best_sum, offset);
+      const std::uint32_t other_phase =
+          __shfl_down_sync(0xffffffffU, best_phase, offset);
+      if (other_sum > best_sum ||
+          (other_sum == best_sum && other_phase < best_phase)) {
+        best_sum = other_sum;
+        best_phase = other_phase;
       }
-      __syncthreads();
     }
 
-    if (threadIdx.x == 0) {
+    if (lane == 0) {
       const float snr =
-          ((trial.height + trial.baseline) * reduction_values[0] -
+          ((trial.height + trial.baseline) * best_sum -
            trial.baseline * profile_sum) /
           stdnoise;
-      const std::size_t slot = base_slot + trial_index;
-      raw_peaks[slot] = FfaCudaPeak{
+      if (snr < snr_threshold) {
+        continue;
+      }
+      append_ffa_peak(FfaCudaPeak{
+          .task_index = task_index,
           .series_index = static_cast<std::uint32_t>(series),
           .shift = static_cast<std::uint32_t>(shift),
-          .phase = reduction_phases[0],
+          .phase = best_phase,
           .width_index = trial.width_index,
           .snr = snr,
-      };
-      flags[slot] = snr >= snr_threshold ? 1U : 0U;
+      }, peaks, peak_capacity, peak_count, peak_overflow);
     }
-    __syncthreads();
+  }
+}
+
+__device__ __forceinline__ void detect_terminal_boxcar_trial(
+    const float* prefix,
+    std::size_t bins,
+    FfaCudaBoxcarTrial trial,
+    float profile_sum,
+    float stdnoise,
+    float snr_threshold,
+    std::uint32_t task_index,
+    std::size_t series,
+    std::size_t shift,
+    FfaCudaPeak* peaks,
+    std::size_t peak_capacity,
+    unsigned int* peak_count,
+    unsigned int* peak_overflow) {
+  constexpr unsigned int kWarpWidth = 32;
+  const unsigned int lane = threadIdx.x % kWarpWidth;
+  float best_sum = -INFINITY;
+  std::uint32_t best_phase = 0;
+  for (std::size_t phase = lane; phase < bins; phase += kWarpWidth) {
+    const float sum = prefix[phase + trial.width] - prefix[phase];
+    if (sum > best_sum || (sum == best_sum && phase < best_phase)) {
+      best_sum = sum;
+      best_phase = static_cast<std::uint32_t>(phase);
+    }
+  }
+  for (unsigned int offset = kWarpWidth / 2; offset > 0; offset /= 2) {
+    const float other_sum = __shfl_down_sync(0xffffffffU, best_sum, offset);
+    const std::uint32_t other_phase =
+        __shfl_down_sync(0xffffffffU, best_phase, offset);
+    if (other_sum > best_sum ||
+        (other_sum == best_sum && other_phase < best_phase)) {
+      best_sum = other_sum;
+      best_phase = other_phase;
+    }
+  }
+  if (lane == 0) {
+    const float snr =
+        ((trial.height + trial.baseline) * best_sum -
+         trial.baseline * profile_sum) /
+        stdnoise;
+    if (snr >= snr_threshold) {
+      append_ffa_peak(FfaCudaPeak{
+          .task_index = task_index,
+          .series_index = static_cast<std::uint32_t>(series),
+          .shift = static_cast<std::uint32_t>(shift),
+          .phase = best_phase,
+          .width_index = trial.width_index,
+          .snr = snr,
+      }, peaks, peak_capacity, peak_count, peak_overflow);
+    }
+  }
+}
+
+// Production-only terminal consumer. It replaces the final materialized
+// merge plus the immediately following detection pass when the final FFA
+// level is one merge operation.
+template <int FixedTrialCount>
+__global__ void detect_ffa_terminal_merge_kernel(
+    const float* input,
+    const float* scratch,
+    const float* output,
+    std::size_t input_stride,
+    std::size_t scratch_stride,
+    std::size_t output_stride,
+    std::size_t rows_eval,
+    std::size_t bins,
+    const FfaCudaMergeOp* terminal_op,
+    const FfaCudaBoxcarTrial* trials,
+    std::size_t trial_count,
+    std::size_t max_width,
+    float stdnoise,
+    float snr_threshold,
+    std::uint32_t task_index,
+    FfaCudaPeak* peaks,
+    std::size_t peak_capacity,
+    unsigned int* peak_count,
+    unsigned int* peak_overflow) {
+  const std::size_t shift = blockIdx.x;
+  const std::size_t series = blockIdx.y;
+  if (shift >= rows_eval) {
+    return;
+  }
+
+  __shared__ FfaCudaMergeOp op;
+  __shared__ std::size_t head_shift;
+  __shared__ std::size_t tail_shift;
+  __shared__ std::size_t rolled;
+  __shared__ FfaDetectionBlockScan::TempStorage scan_storage;
+  __shared__ float scan_carry;
+  __shared__ float tile_carry;
+  if (threadIdx.x == 0) {
+    op = *terminal_op;
+  }
+  __syncthreads();
+
+  extern __shared__ float shared[];
+  float* profile = shared;
+  float* prefix = profile + bins;
+  const float* head_base =
+      select_const_buffer(op.head_role, input, scratch, output) +
+      series * (op.head_role == FfaCudaBufferRole::Input
+                    ? input_stride
+                    : (op.head_role == FfaCudaBufferRole::Scratch
+                           ? scratch_stride
+                           : output_stride));
+  const float* tail_base =
+      select_const_buffer(op.tail_role, input, scratch, output) +
+      series * (op.tail_role == FfaCudaBufferRole::Input
+                    ? input_stride
+                    : (op.tail_role == FfaCudaBufferRole::Scratch
+                           ? scratch_stride
+                           : output_stride));
+  if (threadIdx.x == 0) {
+    const float head_scale = static_cast<float>(op.head_rows - 1) /
+                             static_cast<float>(op.output_rows - 1);
+    const float tail_scale = static_cast<float>(op.tail_rows - 1) /
+                             static_cast<float>(op.output_rows - 1);
+    head_shift = static_cast<std::size_t>(
+        head_scale * static_cast<float>(shift) + 0.5F);
+    tail_shift = static_cast<std::size_t>(
+        tail_scale * static_cast<float>(shift) + 0.5F);
+    const std::size_t compensation = shift - (head_shift + tail_shift);
+    rolled = (head_shift + compensation) % bins;
+  }
+  __syncthreads();
+  for (std::size_t bin = threadIdx.x; bin < bins; bin += blockDim.x) {
+    const std::size_t tail_bin =
+        bin + rolled < bins ? bin + rolled : bin + rolled - bins;
+    profile[bin] =
+        head_base[(op.head_begin_row + head_shift) * bins + bin] +
+        tail_base[(op.tail_begin_row + tail_shift) * bins + tail_bin];
+  }
+  __syncthreads();
+
+  build_circular_prefix_parallel(profile, prefix, bins, max_width,
+                                 scan_storage, scan_carry, tile_carry);
+
+  const float profile_sum = prefix[bins];
+  constexpr unsigned int kWarpsPerBlock = kFfaDetectionThreads / 32;
+  const unsigned int warp = threadIdx.x / 32;
+  if constexpr (FixedTrialCount > 0) {
+    static_assert(FixedTrialCount <= kWarpsPerBlock);
+    if (warp < FixedTrialCount) {
+      detect_terminal_boxcar_trial(
+          prefix, bins, trials[warp], profile_sum, stdnoise, snr_threshold,
+          task_index, series, shift, peaks, peak_capacity, peak_count,
+          peak_overflow);
+    }
+  } else {
+    for (std::size_t trial_base = 0; trial_base < trial_count;
+         trial_base += kWarpsPerBlock) {
+      const std::size_t trial_index = trial_base + warp;
+      if (trial_index < trial_count) {
+        detect_terminal_boxcar_trial(
+            prefix, bins, trials[trial_index], profile_sum, stdnoise,
+            snr_threshold, task_index, series, shift, peaks, peak_capacity,
+            peak_count, peak_overflow);
+      }
+    }
   }
 }
 
@@ -348,11 +798,55 @@ std::size_t checked_float_bytes(std::size_t count, const char* message) {
   return checked_multiply(count, sizeof(float), message);
 }
 
+constexpr std::size_t kPreferredSharedSubtreeRows = 16;
+
 void check_cuda(cudaError_t status, const char* operation) {
   if (status != cudaSuccess) {
     throw std::runtime_error(std::string(operation) + ": " +
                              cudaGetErrorString(status));
   }
+}
+
+std::size_t subtree_shared_bytes(std::size_t rows, std::size_t bins) {
+  return checked_float_bytes(
+      checked_multiply(
+          checked_multiply(rows, bins,
+                           "CUDA FFA subtree shared element count overflow"),
+          3, "CUDA FFA subtree shared element count overflow"),
+      "CUDA FFA subtree shared byte size overflow");
+}
+
+std::size_t select_shared_subtree_rows(std::size_t bins, int device_id) {
+  int optin_shared_bytes = 0;
+  check_cuda(cudaDeviceGetAttribute(&optin_shared_bytes,
+                                    cudaDevAttrMaxSharedMemoryPerBlockOptin,
+                                    device_id),
+             "cudaDeviceGetAttribute max opt-in shared memory");
+  if (optin_shared_bytes <= 0) {
+    return 0;
+  }
+
+  const std::size_t rows_by_capacity =
+      static_cast<std::size_t>(optin_shared_bytes) /
+      (3 * bins * sizeof(float));
+  if (rows_by_capacity < 2) {
+    return 0;
+  }
+  return std::min(kPreferredSharedSubtreeRows, rows_by_capacity);
+}
+
+void configure_subtree_dynamic_shared_memory(std::size_t shared_bytes) {
+  if (shared_bytes == 0) {
+    return;
+  }
+  if (shared_bytes > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    throw std::overflow_error("CUDA FFA subtree shared memory size overflow");
+  }
+  check_cuda(cudaFuncSetAttribute(
+                 ffa_subtree_transform_kernel,
+                 cudaFuncAttributeMaxDynamicSharedMemorySize,
+                 static_cast<int>(shared_bytes)),
+             "cudaFuncSetAttribute CUDA FFA subtree shared memory");
 }
 
 void validate_program_options(const CudaFfaProgramOptions& options) {
@@ -367,6 +861,9 @@ void validate_execution_options(const CudaFfaExecutionOptions& options) {
   }
   if (options.threads_per_block == 0) {
     throw std::invalid_argument("CUDA FFA threads_per_block must be > 0");
+  }
+  if (options.peak_buffer_bytes == 0) {
+    throw std::invalid_argument("CUDA FFA peak_buffer_bytes must be > 0");
   }
 }
 
@@ -394,6 +891,8 @@ bool is_no_downsample(double factor) {
 
 void append_level(FfaCudaTransformLevel& output,
                   const FfaCudaTransformLevel& input) {
+  output.subtree_ops.insert(output.subtree_ops.end(), input.subtree_ops.begin(),
+                            input.subtree_ops.end());
   output.copy_ops.insert(output.copy_ops.end(), input.copy_ops.begin(),
                          input.copy_ops.end());
   output.merge_ops.insert(output.merge_ops.end(), input.merge_ops.begin(),
@@ -405,7 +904,19 @@ std::vector<FfaCudaTransformLevel> build_transform_levels(
     FfaCudaBufferRole scratch_role,
     FfaCudaBufferRole output_role,
     std::size_t row_begin,
-    std::size_t rows) {
+    std::size_t rows,
+    std::size_t subtree_rows) {
+  if (subtree_rows != 0 && rows <= subtree_rows) {
+    FfaCudaTransformLevel level;
+    level.subtree_ops.push_back(FfaCudaSubtreeOp{
+        .input_role = input_role,
+        .output_role = output_role,
+        .input_begin_row = row_begin,
+        .output_begin_row = row_begin,
+        .rows = rows,
+    });
+    return {level};
+  }
   if (rows == 1) {
     FfaCudaTransformLevel level;
     level.copy_ops.push_back(FfaCudaCopyOp{
@@ -437,9 +948,11 @@ std::vector<FfaCudaTransformLevel> build_transform_levels(
   const std::size_t head_rows = rows / 2;
   const std::size_t tail_rows = rows - head_rows;
   auto head_levels = build_transform_levels(
-      input_role, output_role, scratch_role, row_begin, head_rows);
+      input_role, output_role, scratch_role, row_begin, head_rows,
+      subtree_rows);
   auto tail_levels = build_transform_levels(
-      input_role, output_role, scratch_role, row_begin + head_rows, tail_rows);
+      input_role, output_role, scratch_role, row_begin + head_rows, tail_rows,
+      subtree_rows);
 
   std::vector<FfaCudaTransformLevel> levels(
       std::max(head_levels.size(), tail_levels.size()));
@@ -467,10 +980,12 @@ std::vector<FfaCudaTransformLevel> build_transform_levels(
 }
 
 std::vector<FfaCudaTransformLevel> build_transform_levels(
-    FfaTransformShape shape) {
+    FfaTransformShape shape,
+    std::size_t subtree_rows = 0) {
   return build_transform_levels(FfaCudaBufferRole::Input,
                                 FfaCudaBufferRole::Scratch,
-                                FfaCudaBufferRole::Output, 0, shape.rows);
+                                FfaCudaBufferRole::Output, 0, shape.rows,
+                                subtree_rows);
 }
 
 std::size_t max_copy_elements(const FfaCudaTransformLevel& level,
@@ -484,16 +999,20 @@ std::size_t max_copy_elements(const FfaCudaTransformLevel& level,
   return max_elements;
 }
 
-std::size_t max_merge_elements(const FfaCudaTransformLevel& level,
-                               std::size_t bins) {
-  std::size_t max_elements = 0;
-  for (const auto& op : level.merge_ops) {
-    max_elements = std::max(
-        max_elements,
-        checked_multiply(op.output_rows, bins,
-                         "CUDA FFA merge op size overflow"));
+std::size_t max_subtree_rows(const FfaCudaTransformLevel& level) {
+  std::size_t max_rows = 0;
+  for (const auto& op : level.subtree_ops) {
+    max_rows = std::max(max_rows, op.rows);
   }
-  return max_elements;
+  return max_rows;
+}
+
+std::size_t max_merge_rows(const FfaCudaTransformLevel& level) {
+  std::size_t max_rows = 0;
+  for (const auto& op : level.merge_ops) {
+    max_rows = std::max(max_rows, op.output_rows);
+  }
+  return max_rows;
 }
 
 void validate_task_prepared_nsamples(const FfaSearchTask& task,
@@ -740,18 +1259,18 @@ void launch_merge_level(const FfaCudaTransformLevel& level,
     return;
   }
 
-  const auto threads = static_cast<unsigned int>(options.threads_per_block);
   const std::size_t x_blocks =
-      (device_level.max_merge_elements + threads - 1) / threads;
-  const dim3 block(threads);
+      (device_level.max_merge_rows + kFfaMergeWarpsPerBlock - 1) /
+      kFfaMergeWarpsPerBlock;
+  const dim3 block(kFfaMergeThreads);
   const dim3 grid(
       checked_grid_dim(x_blocks, "CUDA FFA merge grid x overflow"),
       checked_grid_dim(level.merge_ops.size(), "CUDA FFA merge grid y overflow"),
       checked_grid_dim(input.nseries, "CUDA FFA merge grid z overflow"));
-  ffa_merge_level_kernel<<<grid, block, 0, options.stream>>>(
+  ffa_merge_profiles_kernel<<<grid, block, 0, options.stream>>>(
       input.data, scratch.data, output.data, input.stride, scratch.stride,
       output.stride, input.shape.bins, device_level.merge_ops.data(),
-      device_level.merge_op_count, device_level.max_merge_elements);
+      device_level.merge_op_count, device_level.max_merge_rows);
   check_cuda(cudaGetLastError(), "ffa_transform_block_cuda merge kernel launch");
 }
 
@@ -767,7 +1286,7 @@ std::vector<FfaCudaDeviceTransformLevel> materialize_device_levels(
         .max_copy_elements = max_copy_elements(level, shape.bins),
         .merge_ops = CudaDeviceBuffer<FfaCudaMergeOp>(level.merge_ops.size()),
         .merge_op_count = level.merge_ops.size(),
-        .max_merge_elements = max_merge_elements(level, shape.bins),
+        .max_merge_rows = max_merge_rows(level),
     };
     if (!level.copy_ops.empty()) {
       check_cuda(cudaMemcpy(device_level.copy_ops.data(), level.copy_ops.data(),
@@ -811,12 +1330,15 @@ void launch_transform_levels(
 }
 
 struct FfaCudaProgramLevel {
+  std::size_t subtree_offset = 0;
+  std::size_t subtree_count = 0;
+  std::size_t max_subtree_rows = 0;
   std::size_t copy_offset = 0;
   std::size_t copy_count = 0;
   std::size_t max_copy_elements = 0;
   std::size_t merge_offset = 0;
   std::size_t merge_count = 0;
-  std::size_t max_merge_elements = 0;
+  std::size_t max_merge_rows = 0;
 };
 
 struct FfaCudaProgramTask {
@@ -839,36 +1361,96 @@ struct FfaCudaProgramLayout {
 // and intentionally do not remain resident in CudaFfaProgramImpl.
 struct FfaCudaProgramBuildState {
   FfaCudaProgramLayout layout;
+  std::vector<FfaCudaSubtreeOp> subtree_ops;
+  std::vector<FfaCudaSubtreeSchedule> subtree_schedules;
+  std::vector<FfaCudaSubtreeLevel> subtree_levels;
+  std::vector<FfaCudaCopyOp> subtree_copy_ops;
+  std::vector<FfaCudaMergeOp> subtree_merge_ops;
   std::vector<FfaCudaCopyOp> copy_ops;
   std::vector<FfaCudaMergeOp> merge_ops;
   std::vector<FfaCudaBoxcarTrial> detection_trials;
+  std::size_t max_subtree_shared_bytes = 0;
 };
 
 struct FfaCudaProgramOps {
+  CudaDeviceBuffer<FfaCudaSubtreeOp> subtree_ops;
+  CudaDeviceBuffer<FfaCudaSubtreeSchedule> subtree_schedules;
+  CudaDeviceBuffer<FfaCudaSubtreeLevel> subtree_levels;
+  CudaDeviceBuffer<FfaCudaCopyOp> subtree_copy_ops;
+  CudaDeviceBuffer<FfaCudaMergeOp> subtree_merge_ops;
   CudaDeviceBuffer<FfaCudaCopyOp> copy_ops;
   CudaDeviceBuffer<FfaCudaMergeOp> merge_ops;
   CudaDeviceBuffer<FfaCudaBoxcarTrial> detection_trials;
 };
 
+std::size_t find_or_append_subtree_schedule(
+    std::size_t rows,
+    FfaCudaProgramBuildState& build_state) {
+  for (std::size_t index = 0; index < build_state.subtree_schedules.size();
+       ++index) {
+    if (build_state.subtree_schedules[index].rows == rows) {
+      return index;
+    }
+  }
+
+  const auto schedule_levels = build_transform_levels(
+      FfaCudaBufferRole::Input, FfaCudaBufferRole::Scratch,
+      FfaCudaBufferRole::Output, 0, rows, 0);
+  const FfaCudaSubtreeSchedule schedule{
+      .rows = rows,
+      .level_offset = build_state.subtree_levels.size(),
+      .level_count = schedule_levels.size(),
+  };
+  for (const auto& level : schedule_levels) {
+    build_state.subtree_levels.push_back(FfaCudaSubtreeLevel{
+        .copy_offset = build_state.subtree_copy_ops.size(),
+        .copy_count = level.copy_ops.size(),
+        .merge_offset = build_state.subtree_merge_ops.size(),
+        .merge_count = level.merge_ops.size(),
+    });
+    build_state.subtree_copy_ops.insert(build_state.subtree_copy_ops.end(),
+                                        level.copy_ops.begin(),
+                                        level.copy_ops.end());
+    build_state.subtree_merge_ops.insert(build_state.subtree_merge_ops.end(),
+                                         level.merge_ops.begin(),
+                                         level.merge_ops.end());
+  }
+  build_state.subtree_schedules.push_back(schedule);
+  return build_state.subtree_schedules.size() - 1;
+}
+
 void append_program_task_layout(const CudaFfaTaskLayout& task_layout,
                                 FfaCudaProgramBuildState& build_state,
-                                FfaCudaProgramGroup& group) {
+                                FfaCudaProgramGroup& group,
+                                int device_id) {
   FfaCudaProgramTask task{
       .level_begin = build_state.layout.levels.size(),
       .detection_trial_offset = build_state.detection_trials.size(),
   };
   const FfaTransformShape shape = task_layout.shape;
   const std::vector<FfaCudaTransformLevel> levels =
-      build_transform_levels(shape);
+      build_transform_levels(shape,
+                             select_shared_subtree_rows(shape.bins, device_id));
   for (const auto& level : levels) {
     const FfaCudaProgramLevel program_level{
+        .subtree_offset = build_state.subtree_ops.size(),
+        .subtree_count = level.subtree_ops.size(),
+        .max_subtree_rows = max_subtree_rows(level),
         .copy_offset = build_state.copy_ops.size(),
         .copy_count = level.copy_ops.size(),
         .max_copy_elements = max_copy_elements(level, shape.bins),
         .merge_offset = build_state.merge_ops.size(),
         .merge_count = level.merge_ops.size(),
-        .max_merge_elements = max_merge_elements(level, shape.bins),
+        .max_merge_rows = max_merge_rows(level),
     };
+    for (auto subtree : level.subtree_ops) {
+      subtree.schedule_index =
+          find_or_append_subtree_schedule(subtree.rows, build_state);
+      build_state.max_subtree_shared_bytes = std::max(
+          build_state.max_subtree_shared_bytes,
+          subtree_shared_bytes(subtree.rows, shape.bins));
+      build_state.subtree_ops.push_back(subtree);
+    }
     build_state.copy_ops.insert(build_state.copy_ops.end(),
                                 level.copy_ops.begin(), level.copy_ops.end());
     build_state.merge_ops.insert(build_state.merge_ops.end(),
@@ -896,12 +1478,62 @@ void append_program_task_layout(const CudaFfaTaskLayout& task_layout,
 FfaCudaProgramOps materialize_program_ops(
     const FfaCudaProgramBuildState& build_state) {
   FfaCudaProgramOps ops{
+      .subtree_ops = CudaDeviceBuffer<FfaCudaSubtreeOp>(
+          build_state.subtree_ops.size()),
+      .subtree_schedules = CudaDeviceBuffer<FfaCudaSubtreeSchedule>(
+          build_state.subtree_schedules.size()),
+      .subtree_levels = CudaDeviceBuffer<FfaCudaSubtreeLevel>(
+          build_state.subtree_levels.size()),
+      .subtree_copy_ops = CudaDeviceBuffer<FfaCudaCopyOp>(
+          build_state.subtree_copy_ops.size()),
+      .subtree_merge_ops = CudaDeviceBuffer<FfaCudaMergeOp>(
+          build_state.subtree_merge_ops.size()),
       .copy_ops = CudaDeviceBuffer<FfaCudaCopyOp>(build_state.copy_ops.size()),
       .merge_ops =
           CudaDeviceBuffer<FfaCudaMergeOp>(build_state.merge_ops.size()),
       .detection_trials = CudaDeviceBuffer<FfaCudaBoxcarTrial>(
           build_state.detection_trials.size()),
   };
+  if (!build_state.subtree_ops.empty()) {
+    check_cuda(cudaMemcpy(ops.subtree_ops.data(),
+                          build_state.subtree_ops.data(),
+                          build_state.subtree_ops.size() *
+                              sizeof(FfaCudaSubtreeOp),
+                          cudaMemcpyHostToDevice),
+               "CUDA FFA program subtree ops H2D");
+  }
+  if (!build_state.subtree_schedules.empty()) {
+    check_cuda(cudaMemcpy(ops.subtree_schedules.data(),
+                          build_state.subtree_schedules.data(),
+                          build_state.subtree_schedules.size() *
+                              sizeof(FfaCudaSubtreeSchedule),
+                          cudaMemcpyHostToDevice),
+               "CUDA FFA program subtree schedules H2D");
+  }
+  if (!build_state.subtree_levels.empty()) {
+    check_cuda(cudaMemcpy(ops.subtree_levels.data(),
+                          build_state.subtree_levels.data(),
+                          build_state.subtree_levels.size() *
+                              sizeof(FfaCudaSubtreeLevel),
+                          cudaMemcpyHostToDevice),
+               "CUDA FFA program subtree levels H2D");
+  }
+  if (!build_state.subtree_copy_ops.empty()) {
+    check_cuda(cudaMemcpy(ops.subtree_copy_ops.data(),
+                          build_state.subtree_copy_ops.data(),
+                          build_state.subtree_copy_ops.size() *
+                              sizeof(FfaCudaCopyOp),
+                          cudaMemcpyHostToDevice),
+               "CUDA FFA program subtree copy ops H2D");
+  }
+  if (!build_state.subtree_merge_ops.empty()) {
+    check_cuda(cudaMemcpy(ops.subtree_merge_ops.data(),
+                          build_state.subtree_merge_ops.data(),
+                          build_state.subtree_merge_ops.size() *
+                              sizeof(FfaCudaMergeOp),
+                          cudaMemcpyHostToDevice),
+               "CUDA FFA program subtree merge ops H2D");
+  }
   if (!build_state.copy_ops.empty()) {
     check_cuda(cudaMemcpy(ops.copy_ops.data(), build_state.copy_ops.data(),
                           build_state.copy_ops.size() * sizeof(FfaCudaCopyOp),
@@ -923,6 +1555,37 @@ FfaCudaProgramOps materialize_program_ops(
                "CUDA FFA program detection trials H2D");
   }
   return ops;
+}
+
+void launch_program_subtree_level(const FfaCudaProgramLevel& level,
+                                  const FfaCudaProgramOps& ops,
+                                  CudaFfaInput input,
+                                  CudaFfaBuffer scratch,
+                                  CudaFfaBuffer output,
+                                  const CudaLaunchOptions& options) {
+  if (level.subtree_count == 0) {
+    return;
+  }
+  const std::size_t shared_elements = checked_multiply(
+      checked_multiply(level.max_subtree_rows, input.shape.bins,
+                       "CUDA FFA subtree shared element count overflow"),
+      3, "CUDA FFA subtree shared element count overflow");
+  const std::size_t shared_bytes = checked_float_bytes(
+      shared_elements, "CUDA FFA subtree shared byte size overflow");
+  const dim3 block(static_cast<unsigned int>(options.threads_per_block));
+  const dim3 grid(
+      checked_grid_dim(level.subtree_count,
+                       "CUDA FFA program subtree grid x overflow"),
+      checked_grid_dim(input.nseries,
+                       "CUDA FFA program subtree grid y overflow"));
+  ffa_subtree_transform_kernel<<<grid, block, shared_bytes, options.stream>>>(
+      input.data, scratch.data, output.data, input.stride, scratch.stride,
+      output.stride, input.shape.bins,
+      ops.subtree_ops.data() + level.subtree_offset, level.subtree_count,
+      ops.subtree_schedules.data(), ops.subtree_levels.data(),
+      ops.subtree_copy_ops.data(), ops.subtree_merge_ops.data(),
+      level.max_subtree_rows);
+  check_cuda(cudaGetLastError(), "CUDA FFA program subtree kernel launch");
 }
 
 void launch_program_copy_level(const FfaCudaProgramLevel& level,
@@ -961,21 +1624,21 @@ void launch_program_merge_level(const FfaCudaProgramLevel& level,
   if (level.merge_count == 0) {
     return;
   }
-  const auto threads = static_cast<unsigned int>(options.threads_per_block);
   const std::size_t x_blocks =
-      (level.max_merge_elements + threads - 1) / threads;
-  const dim3 block(threads);
+      (level.max_merge_rows + kFfaMergeWarpsPerBlock - 1) /
+      kFfaMergeWarpsPerBlock;
+  const dim3 block(kFfaMergeThreads);
   const dim3 grid(
       checked_grid_dim(x_blocks, "CUDA FFA program merge grid x overflow"),
       checked_grid_dim(level.merge_count,
                        "CUDA FFA program merge grid y overflow"),
       checked_grid_dim(input.nseries,
                        "CUDA FFA program merge grid z overflow"));
-  ffa_merge_level_kernel<<<grid, block, 0, options.stream>>>(
+  ffa_merge_profiles_kernel<<<grid, block, 0, options.stream>>>(
       input.data, scratch.data, output.data, input.stride, scratch.stride,
       output.stride, input.shape.bins,
       ops.merge_ops.data() + level.merge_offset, level.merge_count,
-      level.max_merge_elements);
+      level.max_merge_rows);
   check_cuda(cudaGetLastError(), "CUDA FFA program merge kernel launch");
 }
 
@@ -992,12 +1655,44 @@ void launch_program_transform(const FfaCudaProgramTask& task,
   }
   for (std::size_t index = 0; index < task.level_count; ++index) {
     const auto& level = layout.levels[task.level_begin + index];
+    launch_program_subtree_level(level, ops, input, scratch, output, options);
     launch_program_copy_level(level, ops, input, scratch, output, options);
     launch_program_merge_level(level, ops, input, scratch, output, options);
   }
   if (options.synchronize_after_call) {
     check_cuda(cudaStreamSynchronize(options.stream),
                "CUDA FFA program transform synchronize");
+  }
+}
+
+bool can_fuse_terminal_merge(const FfaCudaProgramTask& task,
+                             const FfaCudaProgramLayout& layout) {
+  if (task.level_count == 0 || task.level_begin >= layout.levels.size() ||
+      task.level_count > layout.levels.size() - task.level_begin) {
+    return false;
+  }
+  const FfaCudaProgramLevel& terminal =
+      layout.levels[task.level_begin + task.level_count - 1];
+  return terminal.subtree_count == 0 && terminal.copy_count == 0 &&
+         terminal.merge_count == 1;
+}
+
+void launch_program_transform_before_terminal(
+    const FfaCudaProgramTask& task,
+    const FfaCudaProgramLayout& layout,
+    const FfaCudaProgramOps& ops,
+    CudaFfaInput input,
+    CudaFfaBuffer scratch,
+    CudaFfaBuffer output,
+    const CudaLaunchOptions& options) {
+  if (!can_fuse_terminal_merge(task, layout)) {
+    throw std::logic_error("CUDA FFA task has no fusable terminal merge");
+  }
+  for (std::size_t index = 0; index + 1 < task.level_count; ++index) {
+    const auto& level = layout.levels[task.level_begin + index];
+    launch_program_subtree_level(level, ops, input, scratch, output, options);
+    launch_program_copy_level(level, ops, input, scratch, output, options);
+    launch_program_merge_level(level, ops, input, scratch, output, options);
   }
 }
 
@@ -1010,14 +1705,10 @@ struct CudaFfaWorkspace {
     prepared = CudaDeviceBuffer<float>(shape.prepared_bytes / sizeof(float));
     scratch = CudaDeviceBuffer<float>(shape.scratch_bytes / sizeof(float));
     output = CudaDeviceBuffer<float>(shape.output_bytes / sizeof(float));
-    detection_raw = CudaDeviceBuffer<FfaCudaPeak>(
-        shape.detection_raw_bytes / sizeof(FfaCudaPeak));
     detection_compact = CudaDeviceBuffer<FfaCudaPeak>(
         shape.detection_compact_bytes / sizeof(FfaCudaPeak));
-    detection_flags = CudaDeviceBuffer<std::uint8_t>(
-        shape.detection_flags_bytes / sizeof(std::uint8_t));
-    detection_selected_count = CudaDeviceBuffer<int>(1);
-    detection_select_temp = CudaDeviceMemory(shape.detection_select_temp_bytes);
+    detection_peak_count = CudaDeviceBuffer<unsigned int>(1);
+    detection_peak_overflow = CudaDeviceBuffer<unsigned int>(1);
   }
 
   CudaSpan<float> prepared_span(std::size_t nseries,
@@ -1077,11 +1768,9 @@ struct CudaFfaWorkspace {
   CudaDeviceBuffer<float> prepared;
   CudaDeviceBuffer<float> scratch;
   CudaDeviceBuffer<float> output;
-  CudaDeviceBuffer<FfaCudaPeak> detection_raw;
   CudaDeviceBuffer<FfaCudaPeak> detection_compact;
-  CudaDeviceBuffer<std::uint8_t> detection_flags;
-  CudaDeviceBuffer<int> detection_selected_count;
-  CudaDeviceMemory detection_select_temp;
+  CudaDeviceBuffer<unsigned int> detection_peak_count;
+  CudaDeviceBuffer<unsigned int> detection_peak_overflow;
 };
 
 }  // namespace
@@ -1145,10 +1834,13 @@ CudaFfaProgram::CudaFfaProgram(
     FfaCudaProgramGroup program_group;
     program_group.tasks.reserve(group.tasks.size());
     for (const auto& task : group.tasks) {
-      append_program_task_layout(task, build_state, program_group);
+      append_program_task_layout(task, build_state, program_group,
+                                 impl_->device_id);
     }
     build_state.layout.groups.push_back(std::move(program_group));
   }
+  configure_subtree_dynamic_shared_memory(
+      build_state.max_subtree_shared_bytes);
   impl_->ops = materialize_program_ops(build_state);
   impl_->layout = std::move(build_state.layout);
   impl_->workspace = std::make_unique<CudaFfaWorkspace>(
@@ -1206,9 +1898,22 @@ std::size_t CudaFfaProgram::device_metadata_bytes() const {
     throw std::logic_error("CUDA FFA program must not be empty");
   }
   return checked_add(
-      checked_add(impl_->ops.copy_ops.bytes(), impl_->ops.merge_ops.bytes(),
-                  "CUDA FFA program metadata byte size overflow"),
-      impl_->ops.detection_trials.bytes(),
+      checked_add(
+          checked_add(impl_->ops.subtree_ops.bytes(),
+                      impl_->ops.subtree_schedules.bytes(),
+                      "CUDA FFA program metadata byte size overflow"),
+          checked_add(
+              checked_add(impl_->ops.subtree_levels.bytes(),
+                          impl_->ops.subtree_copy_ops.bytes(),
+                          "CUDA FFA program metadata byte size overflow"),
+              impl_->ops.subtree_merge_ops.bytes(),
+              "CUDA FFA program metadata byte size overflow"),
+          "CUDA FFA program metadata byte size overflow"),
+      checked_add(
+          checked_add(impl_->ops.copy_ops.bytes(), impl_->ops.merge_ops.bytes(),
+                      "CUDA FFA program metadata byte size overflow"),
+          impl_->ops.detection_trials.bytes(),
+          "CUDA FFA program metadata byte size overflow"),
       "CUDA FFA program metadata byte size overflow");
 }
 
@@ -1310,18 +2015,9 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
   const std::size_t detection_count = checked_multiply(
       options.series_tile_size, plan.max_detection_slots_per_series(),
       "CUDA FFA detection workspace element count overflow");
-  if (detection_count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-    throw std::invalid_argument(
-        "CUDA FFA detection slot count exceeds CUB select limit");
-  }
-  std::size_t detection_select_temp_bytes = 0;
-  check_cuda(cub::DeviceSelect::Flagged(
-                 nullptr, detection_select_temp_bytes,
-                 static_cast<const FfaCudaPeak*>(nullptr),
-                 static_cast<const std::uint8_t*>(nullptr),
-                 static_cast<FfaCudaPeak*>(nullptr), static_cast<int*>(nullptr),
-                 static_cast<int>(detection_count), nullptr),
-             "CUDA FFA detection select workspace query");
+  const std::size_t full_peak_bytes = checked_multiply(
+      detection_count, sizeof(FfaCudaPeak),
+      "CUDA FFA detection peak workspace byte size overflow");
 
   CudaFfaWorkspaceShape shape{
       .series_tile_size = options.series_tile_size,
@@ -1335,16 +2031,11 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
           task_count, "CUDA FFA scratch workspace byte size overflow"),
       .output_bytes = checked_float_bytes(
           task_count, "CUDA FFA output workspace byte size overflow"),
-      .detection_raw_bytes = checked_multiply(
-          detection_count, sizeof(FfaCudaPeak),
-          "CUDA FFA detection raw workspace byte size overflow"),
-      .detection_compact_bytes = checked_multiply(
-          detection_count, sizeof(FfaCudaPeak),
-          "CUDA FFA detection compact workspace byte size overflow"),
-      .detection_flags_bytes = checked_multiply(
-          detection_count, sizeof(std::uint8_t),
-          "CUDA FFA detection flags workspace byte size overflow"),
-      .detection_select_temp_bytes = detection_select_temp_bytes,
+      .detection_raw_bytes = 0,
+      .detection_compact_bytes =
+          std::min(full_peak_bytes, options.peak_buffer_bytes),
+      .detection_flags_bytes = 0,
+      .detection_select_temp_bytes = 0,
   };
   shape.total_bytes = checked_add(
       checked_add(
@@ -1487,6 +2178,7 @@ class CudaFfaTileRunner {
     for (std::size_t group_index = 0; group_index < groups.size();
          ++group_index) {
       const auto& group = groups[group_index];
+      reset_group_peak_buffer();
       const auto prepared = workspace_.prepared_span(
           input.nseries, group.prepared_nsamples, program_.device_id());
       prepare_ffa_input_cuda(input, group.tasks.front().task, prepared, launch);
@@ -1500,13 +2192,26 @@ class CudaFfaTileRunner {
             workspace_.scratch, input.nseries, task, program_.device_id());
         CudaFfaBuffer output = workspace_.transform_buffer(
             workspace_.output, input.nseries, task, program_.device_id());
+        const auto& program_task =
+            program_.impl_->layout.groups[group_index].tasks[task_index];
 
         // One stream orders prepare -> transform and every successive task.
-        ffa_transform_block_cuda(program_, group_index, task_index,
-                                 prepared_input, scratch, output, launch);
-        collect_task_peaks(group_index, task_index, input.nseries, output,
-                           peak_counts, result);
+        // A terminal merge can feed detection directly, avoiding one full
+        // materialized transform write/read pair.
+        const bool fuse_terminal =
+            can_fuse_terminal_merge(program_task, program_.impl_->layout);
+        if (fuse_terminal) {
+          launch_program_transform_before_terminal(
+              program_task, program_.impl_->layout, program_.impl_->ops,
+              prepared_input, scratch, output, launch);
+        } else {
+          ffa_transform_block_cuda(program_, group_index, task_index,
+                                   prepared_input, scratch, output, launch);
+        }
+        enqueue_task_detection(group_index, task_index, input.nseries,
+                               prepared_input, scratch, output, fuse_terminal);
       }
+      collect_group_peaks(group_index, input.nseries, peak_counts, result);
     }
     std::sort(result.peaks.begin(), result.peaks.end(),
               [](const FfaBatchPeak& lhs, const FfaBatchPeak& rhs) {
@@ -1519,67 +2224,141 @@ class CudaFfaTileRunner {
   }
 
  private:
-  void collect_task_peaks(std::size_t group_index,
-                          std::size_t task_index,
-                          std::size_t nseries,
-                          CudaFfaBuffer transform,
-                          std::vector<std::size_t>& peak_counts,
-                          FfaBatchSearchResult& result) {
+  void reset_group_peak_buffer() {
+    check_cuda(cudaMemsetAsync(workspace_.detection_peak_count.data(), 0,
+                               sizeof(unsigned int),
+                               program_.impl_->execution_options.stream),
+               "CUDA FFA peak count reset");
+    check_cuda(cudaMemsetAsync(workspace_.detection_peak_overflow.data(), 0,
+                               sizeof(unsigned int),
+                               program_.impl_->execution_options.stream),
+               "CUDA FFA peak overflow reset");
+  }
+
+  void enqueue_task_detection(std::size_t group_index,
+                              std::size_t task_index,
+                              std::size_t nseries,
+                              CudaFfaInput input,
+                              CudaFfaBuffer scratch,
+                              CudaFfaBuffer transform,
+                              bool fuse_terminal) {
     const auto& program_group = program_.impl_->layout.groups[group_index];
     const auto& program_task = program_group.tasks[task_index];
     const auto& task =
         program_.impl_->execution_plan.groups()[group_index].tasks[task_index];
-    const std::size_t slots = checked_multiply(
-        nseries, task.detection_slots_per_series,
-        "CUDA FFA detection task slot count overflow");
-    if (slots > workspace_.detection_raw.size() ||
-        slots > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-      throw std::invalid_argument("CUDA FFA detection task exceeds workspace");
+    if (task_index > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::overflow_error("CUDA FFA task index overflow");
     }
     if (program_task.detection_trial_count !=
         task.detection_plan.boxcar_trials.size()) {
       throw std::logic_error("CUDA FFA detection metadata mismatch");
     }
+    const std::size_t profile_and_prefix_elements =
+        fuse_terminal
+            ? checked_add(
+                  task.shape.bins,
+                  checked_add(task.shape.bins,
+                              task.detection_plan.max_width + 1,
+                              "CUDA FFA terminal detection shared size overflow"),
+                  "CUDA FFA terminal detection shared size overflow")
+            : task.shape.bins + task.detection_plan.max_width + 1;
     const std::size_t shared_bytes = checked_float_bytes(
-        task.shape.bins + task.detection_plan.max_width + 1,
+        profile_and_prefix_elements,
         "CUDA FFA detection shared-memory size overflow");
     const dim3 grid(
         checked_grid_dim(task.task.rows_eval,
                          "CUDA FFA detection grid x overflow"),
         checked_grid_dim(nseries, "CUDA FFA detection grid y overflow"));
-    detect_ffa_rows_kernel<<<grid, kFfaDetectionThreads, shared_bytes,
-                             program_.impl_->execution_options.stream>>>(
-        transform.data, transform.stride, task.task.rows_eval, task.shape.bins,
-        program_.impl_->ops.detection_trials.data() +
-            program_task.detection_trial_offset,
-        program_task.detection_trial_count, task.detection_plan.max_width,
-        ffa_task_stdnoise(task.task), search_options_.snr_threshold,
-        workspace_.detection_raw.data(), workspace_.detection_flags.data());
+    if (fuse_terminal) {
+      const FfaCudaProgramLevel& terminal = program_.impl_->layout.levels[
+          program_task.level_begin + program_task.level_count - 1];
+      const auto launch_terminal = [&]<int TrialCount>() {
+        detect_ffa_terminal_merge_kernel<TrialCount><<<
+            grid, kFfaDetectionThreads, shared_bytes,
+            program_.impl_->execution_options.stream>>>(
+            input.data, scratch.data, transform.data, input.stride,
+            scratch.stride, transform.stride, task.task.rows_eval,
+            task.shape.bins,
+            program_.impl_->ops.merge_ops.data() + terminal.merge_offset,
+            program_.impl_->ops.detection_trials.data() +
+                program_task.detection_trial_offset,
+            program_task.detection_trial_count, task.detection_plan.max_width,
+            ffa_task_stdnoise(task.task), search_options_.snr_threshold,
+            static_cast<std::uint32_t>(task_index),
+            workspace_.detection_compact.data(),
+            workspace_.detection_compact.size(),
+            workspace_.detection_peak_count.data(),
+            workspace_.detection_peak_overflow.data());
+      };
+      switch (program_task.detection_trial_count) {
+        case 1:
+          launch_terminal.template operator()<1>();
+          break;
+        case 2:
+          launch_terminal.template operator()<2>();
+          break;
+        case 3:
+          launch_terminal.template operator()<3>();
+          break;
+        case 4:
+          launch_terminal.template operator()<4>();
+          break;
+        case 5:
+          launch_terminal.template operator()<5>();
+          break;
+        case 6:
+          launch_terminal.template operator()<6>();
+          break;
+        case 7:
+          launch_terminal.template operator()<7>();
+          break;
+        case 8:
+          launch_terminal.template operator()<8>();
+          break;
+        default:
+          launch_terminal.template operator()<0>();
+          break;
+      }
+    } else {
+      detect_ffa_rows_kernel<<<grid, kFfaDetectionThreads, shared_bytes,
+                               program_.impl_->execution_options.stream>>>(
+          transform.data, transform.stride, task.task.rows_eval, task.shape.bins,
+          program_.impl_->ops.detection_trials.data() +
+              program_task.detection_trial_offset,
+          program_task.detection_trial_count, task.detection_plan.max_width,
+          ffa_task_stdnoise(task.task), search_options_.snr_threshold,
+          static_cast<std::uint32_t>(task_index),
+          workspace_.detection_compact.data(),
+          workspace_.detection_compact.size(),
+          workspace_.detection_peak_count.data(),
+          workspace_.detection_peak_overflow.data());
+    }
     check_cuda(cudaGetLastError(), "CUDA FFA detection kernel launch");
+  }
 
-    std::size_t temp_bytes = workspace_.shape.detection_select_temp_bytes;
-    check_cuda(cub::DeviceSelect::Flagged(
-                   workspace_.detection_select_temp.data(), temp_bytes,
-                   workspace_.detection_raw.data(),
-                   workspace_.detection_flags.data(),
-                   workspace_.detection_compact.data(),
-                   workspace_.detection_selected_count.data(),
-                   static_cast<int>(slots),
-                   program_.impl_->execution_options.stream),
-               "CUDA FFA detection compact");
+  void collect_group_peaks(std::size_t group_index,
+                           std::size_t nseries,
+                           std::vector<std::size_t>& peak_counts,
+                           FfaBatchSearchResult& result) {
     check_cuda(cudaStreamSynchronize(program_.impl_->execution_options.stream),
-               "CUDA FFA detection synchronize");
+               "CUDA FFA group synchronize");
 
-    int selected_count = 0;
-    check_cuda(cudaMemcpy(&selected_count,
-                          workspace_.detection_selected_count.data(),
+    unsigned int selected_count = 0;
+    unsigned int overflow = 0;
+    check_cuda(cudaMemcpy(&selected_count, workspace_.detection_peak_count.data(),
                           sizeof(selected_count), cudaMemcpyDeviceToHost),
-               "CUDA FFA detection selected count D2H");
-    if (selected_count < 0) {
-      throw std::logic_error("CUDA FFA detection selected count is negative");
+               "CUDA FFA peak count D2H");
+    check_cuda(cudaMemcpy(&overflow, workspace_.detection_peak_overflow.data(),
+                          sizeof(overflow), cudaMemcpyDeviceToHost),
+               "CUDA FFA peak overflow D2H");
+    if (overflow != 0 || selected_count > workspace_.detection_compact.size()) {
+      throw std::runtime_error(
+          "CUDA FFA compact peak buffer overflow; increase "
+          "CudaFfaExecutionOptions::peak_buffer_bytes or search with a "
+          "higher SNR threshold");
     }
     std::vector<FfaCudaPeak> compact_peaks(
-        static_cast<std::size_t>(selected_count));
+        selected_count);
     if (!compact_peaks.empty()) {
       check_cuda(cudaMemcpy(compact_peaks.data(),
                             workspace_.detection_compact.data(),
@@ -1588,6 +2367,11 @@ class CudaFfaTileRunner {
                  "CUDA FFA detection compact peaks D2H");
     }
     for (const FfaCudaPeak& compact_peak : compact_peaks) {
+      const auto& group = program_.impl_->execution_plan.groups()[group_index];
+      if (compact_peak.task_index >= group.tasks.size()) {
+        throw std::logic_error("CUDA FFA peak task index is invalid");
+      }
+      const auto& task = group.tasks[compact_peak.task_index];
       if (compact_peak.series_index >= nseries ||
           compact_peak.shift >= task.task.rows_eval ||
           compact_peak.width_index >= task.detection_plan.boxcar_trials.size() ||

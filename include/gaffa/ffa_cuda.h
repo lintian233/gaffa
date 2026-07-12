@@ -36,6 +36,11 @@ struct CudaFfaExecutionOptions {
   // FFA executor.
   std::size_t workspace_bytes_limit = 0;
 
+  // Maximum device memory reserved for threshold-passing peaks before one
+  // prepare group is transferred to the host. Overflow is reported instead of
+  // silently dropping candidates.
+  std::size_t peak_buffer_bytes = 64 * 1024 * 1024;
+
   cudaStream_t stream = nullptr;
 
   [[nodiscard]] CudaLaunchOptions async_launch_options(
