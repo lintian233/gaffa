@@ -13,6 +13,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(GAFFA_ENABLE_COVERAGE "Build host C++ coverage instrumentation" OFF)
+option(GAFFA_ENABLE_LOKI "Build optional Loki integration smoke tests" OFF)
+
 if(GAFFA_ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:--coverage>)
@@ -28,6 +30,38 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(OpenMP)
 include(CTest)
 
+# Loki is an optional periodic-search backend.  Keep its dependency graph out
+# of the core library until the dedicated adapter target is introduced.
+if(GAFFA_ENABLE_LOKI)
+  set(GAFFA_LOKI_HINTS)
+  if(DEFINED ENV{LOKI_ROOT} AND NOT "$ENV{LOKI_ROOT}" STREQUAL "")
+    list(APPEND GAFFA_LOKI_HINTS "$ENV{LOKI_ROOT}")
+  endif()
+  if(DEFINED ENV{HOME} AND NOT "$ENV{HOME}" STREQUAL "")
+    list(APPEND GAFFA_LOKI_HINTS "$ENV{HOME}/opt/loki")
+  endif()
+  find_package(loki 0.0.3 CONFIG REQUIRED HINTS ${GAFFA_LOKI_HINTS})
+
+  foreach(GAFFA_LOKI_CONFIGURATION RELEASE RELWITHDEBINFO DEBUG MINSIZEREL)
+    get_target_property(
+      GAFFA_LOKI_LIBRARY_LOCATION loki::loki
+      "IMPORTED_LOCATION_${GAFFA_LOKI_CONFIGURATION}"
+    )
+    if(GAFFA_LOKI_LIBRARY_LOCATION)
+      break()
+    endif()
+  endforeach()
+  if(NOT GAFFA_LOKI_LIBRARY_LOCATION)
+    get_target_property(GAFFA_LOKI_LIBRARY_LOCATION loki::loki IMPORTED_LOCATION)
+  endif()
+  if(NOT GAFFA_LOKI_LIBRARY_LOCATION)
+    message(FATAL_ERROR "loki::loki does not expose an imported library location")
+  endif()
+  get_filename_component(
+    GAFFA_LOKI_LIBRARY_DIR "${GAFFA_LOKI_LIBRARY_LOCATION}" DIRECTORY
+  )
+endif()
+
 file(GLOB_RECURSE GAFFA_CORE_SOURCES CONFIGURE_DEPENDS
   src/gaffa/*.cpp
   src/gaffa/*.cu
@@ -35,6 +69,7 @@ file(GLOB_RECURSE GAFFA_CORE_SOURCES CONFIGURE_DEPENDS
 list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/bindings\\.cpp$")
 list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/python/.*\\.cpp$")
 list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/.*_legacy\\.cpp$")
+list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/loki/.*")
 
 file(GLOB_RECURSE GAFFA_PYTHON_BINDING_SOURCES CONFIGURE_DEPENDS
   src/gaffa/python/*.cpp
@@ -96,6 +131,29 @@ if(BUILD_TESTING)
 
   include(GoogleTest)
   gtest_discover_tests(gaffa_cpp_tests)
+
+  if(GAFFA_ENABLE_LOKI)
+    add_executable(gaffa_loki_smoke_tests
+      tests/loki/test_loki_smoke.cpp
+      $<TARGET_OBJECTS:gaffa_core_objects>
+    )
+    target_link_libraries(gaffa_loki_smoke_tests PRIVATE
+      GTest::gtest_main
+      loki::loki
+      CUDA::cudart
+      CUDA::cuda_driver
+    )
+    if(OpenMP_CXX_FOUND)
+      target_link_libraries(gaffa_loki_smoke_tests PRIVATE OpenMP::OpenMP_CXX)
+    endif()
+    target_include_directories(gaffa_loki_smoke_tests PRIVATE include include/gaffa)
+    set_target_properties(gaffa_loki_smoke_tests PROPERTIES
+      BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+      CUDA_RESOLVE_DEVICE_SYMBOLS ON
+      LINKER_LANGUAGE CUDA
+    )
+    gtest_discover_tests(gaffa_loki_smoke_tests)
+  endif()
 endif()
 
 file(GLOB GAFFA_BENCHMARK_SOURCES CONFIGURE_DEPENDS
