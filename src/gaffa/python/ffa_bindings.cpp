@@ -1,11 +1,15 @@
 #include "ffa_bindings.h"
 
 #include "gaffa/ffa_peak.h"
+#include "gaffa/ffa_cuda.h"
 #include "gaffa/ffa_plan.h"
 #include "gaffa/ffa_search.h"
 
+#include <cuda_runtime.h>
+
 #include <cstddef>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -16,6 +20,37 @@
 namespace py = pybind11;
 
 namespace {
+
+void check_cuda(cudaError_t status, const char* operation) {
+  if (status != cudaSuccess) {
+    throw std::runtime_error(std::string(operation) + ": " +
+                             cudaGetErrorString(status));
+  }
+}
+
+class CudaDeviceScope {
+ public:
+  explicit CudaDeviceScope(int device_id) {
+    check_cuda(cudaGetDevice(&previous_device_), "cudaGetDevice");
+    if (previous_device_ != device_id) {
+      check_cuda(cudaSetDevice(device_id), "cudaSetDevice");
+      restore_device_ = true;
+    }
+  }
+
+  ~CudaDeviceScope() {
+    if (restore_device_) {
+      static_cast<void>(cudaSetDevice(previous_device_));
+    }
+  }
+
+  CudaDeviceScope(const CudaDeviceScope&) = delete;
+  CudaDeviceScope& operator=(const CudaDeviceScope&) = delete;
+
+ private:
+  int previous_device_ = 0;
+  bool restore_device_ = false;
+};
 
 void validate_time_series_array(const py::buffer_info& info) {
   if (info.ndim != 1) {
@@ -86,6 +121,47 @@ std::vector<gaffa::FfaPeak> ffa_search_cpu_for_python(
       .peaks;
 }
 
+std::vector<gaffa::FfaPeak> ffa_search_cuda_host_for_python(
+    const py::object& time_series_object, const gaffa::FfaSearchPlan& plan,
+    int device_id, float snr_threshold, const py::object& max_peaks) {
+  if (!py::isinstance<py::array>(time_series_object)) {
+    throw py::type_error("FFA time_series must be a numpy.ndarray");
+  }
+  const py::array time_series = py::reinterpret_borrow<py::array>(
+      time_series_object);
+  const py::buffer_info info = time_series.request();
+  validate_time_series_array(info);
+
+  std::size_t peak_limit = 0;
+  if (!max_peaks.is_none()) {
+    peak_limit = max_peaks.cast<std::size_t>();
+    if (peak_limit == 0) {
+      throw py::value_error("max_peaks must be positive or None");
+    }
+  }
+
+  const auto nsamples = static_cast<std::size_t>(info.shape[0]);
+  const auto samples = static_cast<const float*>(info.ptr);
+
+  py::gil_scoped_release release;
+  CudaDeviceScope device_scope(device_id);
+  gaffa::CudaDeviceBuffer<float> device_samples(nsamples);
+  check_cuda(cudaMemcpy(device_samples.data(), samples, device_samples.bytes(),
+                        cudaMemcpyHostToDevice),
+             "cudaMemcpy host-to-device FFA input");
+
+  return gaffa::search_ffa_cuda(
+             static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_samples)
+                 .as_span(device_id),
+             plan,
+             gaffa::FfaSearchOptions{
+                 .snr_threshold = snr_threshold,
+                 .max_peaks = peak_limit,
+             },
+             gaffa::CudaFfaProgramOptions{.device_id = device_id})
+      .peaks;
+}
+
 }  // namespace
 
 namespace gaffa::python {
@@ -133,6 +209,11 @@ void bind_ffa(py::module_& module) {
   module.def("_ffa_search_cpu", &ffa_search_cpu_for_python,
              py::arg("time_series"), py::arg("plan"), py::kw_only(),
              py::arg("snr_threshold") = 6.0F,
+             py::arg("max_peaks") = py::none());
+
+  module.def("_ffa_search_cuda_host", &ffa_search_cuda_host_for_python,
+             py::arg("time_series"), py::arg("plan"), py::kw_only(),
+             py::arg("device_id") = 0, py::arg("snr_threshold") = 6.0F,
              py::arg("max_peaks") = py::none());
 }
 

@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+import gaffa
 from gaffa import ffa
 
 
@@ -65,3 +66,34 @@ def test_ffa_search_rejects_plan_length_mismatch_and_invalid_peak_limit() -> Non
         ffa.ffa_search(series, make_plan(9))
     with pytest.raises(ValueError, match="positive or None"):
         ffa.ffa_search(series, make_plan(series.size), max_peaks=0)
+
+
+def test_ffa_search_rejects_unknown_backend_and_unused_device() -> None:
+    series = np.zeros(8, dtype=np.float32)
+    plan = make_plan(series.size)
+
+    with pytest.raises(ValueError, match="'cpu' or 'cuda'"):
+        ffa.ffa_search(series, plan, backend="opencl")
+    with pytest.raises(ValueError, match="only valid"):
+        ffa.ffa_search(series, plan, device_id=1)
+
+
+@pytest.mark.skipif(gaffa.cuda_device_count() == 0, reason="CUDA device required")
+def test_ffa_search_cuda_matches_cpu() -> None:
+    series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
+    plan = make_plan(series.size)
+
+    cpu_peaks = ffa.ffa_search(series, plan, snr_threshold=1.0)
+    cuda_peaks = ffa.ffa_search(
+        series, plan, snr_threshold=1.0, backend="cuda"
+    )
+
+    assert len(cuda_peaks) == len(cpu_peaks)
+    for cpu_peak, cuda_peak in zip(cpu_peaks, cuda_peaks, strict=True):
+        assert cuda_peak.period == pytest.approx(cpu_peak.period)
+        assert cuda_peak.frequency == pytest.approx(cpu_peak.frequency)
+        assert cuda_peak.snr == pytest.approx(cpu_peak.snr)
+        assert cuda_peak.width == cpu_peak.width
+        assert cuda_peak.phase == cpu_peak.phase
+        assert cuda_peak.shift == cpu_peak.shift
+        assert cuda_peak.bins == cpu_peak.bins

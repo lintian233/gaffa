@@ -1,6 +1,12 @@
 """Fast-folding-algorithm search primitives for preprocessed time series."""
 
-from ._core import FfaPeak, FfaPlan, _ffa_search_cpu, _make_riptide_ffa_plan
+from ._core import (
+    FfaPeak,
+    FfaPlan,
+    _ffa_search_cpu,
+    _ffa_search_cuda_host,
+    _make_riptide_ffa_plan,
+)
 
 
 def make_riptide_plan(
@@ -64,8 +70,10 @@ def ffa_search(
     *,
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
+    backend: str = "cpu",
+    device_id: int = 0,
 ) -> list[FfaPeak]:
-    """Search one preprocessed time series with a CPU FFA plan.
+    """Search one preprocessed time series with an FFA plan.
 
     Parameters
     ----------
@@ -83,6 +91,13 @@ def ffa_search(
         Optional positive safety limit on raw peaks. ``None`` leaves raw peak
         collection unbounded. Reaching a limit raises instead of truncating
         scientific results.
+    backend
+        ``"cpu"`` for the CPU implementation or ``"cuda"`` for the CUDA
+        implementation. CUDA accepts the same host ``numpy.float32`` input,
+        uploads it once, and returns only compact raw peak records.
+    device_id
+        CUDA device ordinal for ``backend="cuda"``. It must remain ``0`` for
+        the CPU backend so a device selection is never silently ignored.
 
     Returns
     -------
@@ -91,16 +106,31 @@ def ffa_search(
 
     Notes
     -----
-    This is the CPU implementation. CUDA search requires an explicit
-    device-resident time-series API and is intentionally not selected here.
+    The CUDA backend is a synchronous host convenience path. It does not
+    expose device-resident buffers or a reusable CUDA program; use the C++
+    CUDA API for a long-lived tiled pipeline.
     """
 
-    return _ffa_search_cpu(
-        time_series,
-        plan,
-        snr_threshold=snr_threshold,
-        max_peaks=max_peaks,
-    )
+    if backend == "cpu":
+        if device_id != 0:
+            raise ValueError("device_id is only valid with backend='cuda'")
+        return _ffa_search_cpu(
+            time_series,
+            plan,
+            snr_threshold=snr_threshold,
+            max_peaks=max_peaks,
+        )
+    if backend == "cuda":
+        if device_id < 0:
+            raise ValueError("device_id must be non-negative")
+        return _ffa_search_cuda_host(
+            time_series,
+            plan,
+            device_id=device_id,
+            snr_threshold=snr_threshold,
+            max_peaks=max_peaks,
+        )
+    raise ValueError("backend must be 'cpu' or 'cuda'")
 
 
 __all__ = ["FfaPeak", "FfaPlan", "ffa_search", "make_riptide_plan"]

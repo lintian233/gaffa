@@ -447,6 +447,18 @@ def _ffa_search_cpu(
     ...
 
 
+def _ffa_search_cuda_host(
+    time_series: NDArray[np.float32],
+    plan: FfaPlan,
+    *,
+    device_id: int = 0,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+) -> list[FfaPeak]:
+    """Private host-input CUDA binding used by :func:`gaffa.ffa.ffa_search`."""
+    ...
+
+
 class FoldedProfile:
     """Folded profile for a dedispersed 1D time series.
 

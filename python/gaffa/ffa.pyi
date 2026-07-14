@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
+from typing import Literal
 
 
 class FfaPlan:
@@ -86,8 +87,10 @@ def ffa_search(
     *,
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
+    backend: Literal["cpu", "cuda"] = "cpu",
+    device_id: int = 0,
 ) -> list[FfaPeak]:
-    """Run CPU FFA peak detection on one preprocessed time series.
+    """Run FFA peak detection on one preprocessed time series.
 
     Parameters
     ----------
@@ -102,6 +105,11 @@ def ffa_search(
     max_peaks
         Optional positive raw-peak safety limit. A reached limit raises rather
         than truncating the result.
+    backend
+        ``"cpu"`` or ``"cuda"``. The CUDA path uploads the host input once
+        and returns only compact raw peak records.
+    device_id
+        CUDA device ordinal. It must remain zero for the CPU backend.
 
     Returns
     -------
