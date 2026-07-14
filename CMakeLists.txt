@@ -13,7 +13,8 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(GAFFA_ENABLE_COVERAGE "Build host C++ coverage instrumentation" OFF)
-option(GAFFA_ENABLE_LOKI "Build optional Loki integration smoke tests" OFF)
+option(GAFFA_ENABLE_LOKI
+       "Build optional Loki public-API integration smoke tests" OFF)
 
 if(GAFFA_ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -146,7 +147,11 @@ if(BUILD_TESTING)
     if(OpenMP_CXX_FOUND)
       target_link_libraries(gaffa_loki_smoke_tests PRIVATE OpenMP::OpenMP_CXX)
     endif()
-    target_include_directories(gaffa_loki_smoke_tests PRIVATE include include/gaffa)
+    target_include_directories(gaffa_loki_smoke_tests PRIVATE
+      include
+      include/gaffa
+      ${CUDAToolkit_INCLUDE_DIRS}
+    )
     set_target_properties(gaffa_loki_smoke_tests PROPERTIES
       BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
       CUDA_RESOLVE_DEVICE_SYMBOLS ON
