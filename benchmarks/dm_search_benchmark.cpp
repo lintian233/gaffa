@@ -335,8 +335,8 @@ gaffa::DmSearchResult run_typed_search(const gaffa::FilterbankData& filterbank,
       search_options(args, filterbank.header.tsamp);
   timings.search_seconds = time_once([&] {
     search_result =
-        gaffa::find_dm_peaks_cpu(dedispersed, dms, filterbank.header.tsamp,
-                                  options);
+        gaffa::search_dedispersed_ffa_cpu(
+            dedispersed, dms, filterbank.header.tsamp, options);
   });
   return search_result;
 }

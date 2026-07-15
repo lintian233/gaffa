@@ -39,17 +39,19 @@ TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
                               std::size_t dm_index,
                               double tsamp);
 
-// Finds significant FFA peaks for every DM row in an eager host dedispersion
-// result. This layer deliberately does not apply a final top-k cap; downstream
-// clustering/candidate selection owns final candidate limiting.
-DmSearchResult find_dm_peaks_cpu(const DedispersedResult<std::uint32_t>& input,
-                                 std::span<const double> dms,
-                                 double tsamp,
-                                 const DmSearchOptions& options);
+// Runs preprocessing and FFA peak search for every DM row in an eager host
+// dedispersion result. Returned peaks retain their source DM metadata; final
+// cross-DM clustering and candidate limiting belong to downstream stages.
+DmSearchResult search_dedispersed_ffa_cpu(
+    const DedispersedResult<std::uint32_t>& input,
+    std::span<const double> dms,
+    double tsamp,
+    const DmSearchOptions& options);
 
-DmSearchResult find_dm_peaks_cpu(const DedispersedResult<float>& input,
-                                 std::span<const double> dms,
-                                 double tsamp,
-                                 const DmSearchOptions& options);
+DmSearchResult search_dedispersed_ffa_cpu(
+    const DedispersedResult<float>& input,
+    std::span<const double> dms,
+    double tsamp,
+    const DmSearchOptions& options);
 
 }  // namespace gaffa

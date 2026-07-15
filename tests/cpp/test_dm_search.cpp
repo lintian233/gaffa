@@ -53,7 +53,8 @@ TEST(DmSearch, FindsEveryDmPeakAndAttachesMetadata) {
   const std::vector<double> dms{12.5, 20.0};
 
   const auto result =
-      gaffa::find_dm_peaks_cpu(input, dms, 1.0, small_search_options());
+      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
+                                         small_search_options());
 
   ASSERT_GE(result.peaks.size(), 2);
   EXPECT_EQ(result.peaks.front().dm_index, 1);
@@ -72,7 +73,8 @@ TEST(DmSearch, AppliesPreprocessPlanBeforeSearch) {
       .kind = gaffa::PreprocessStepKind::Normalise,
   });
 
-  const auto result = gaffa::find_dm_peaks_cpu(input, dms, 1.0, options);
+  const auto result = gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
+                                                         options);
 
   ASSERT_FALSE(result.peaks.empty());
   EXPECT_EQ(result.peaks.front().dm_index, 0);
@@ -90,7 +92,8 @@ TEST(DmSearch, KeepsAllSignificantPeaksInsteadOfTopK) {
   const std::vector<double> dms{10.0, 20.0};
 
   const auto result =
-      gaffa::find_dm_peaks_cpu(input, dms, 1.0, small_search_options());
+      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
+                                         small_search_options());
 
   ASSERT_GE(result.peaks.size(), 2);
   EXPECT_EQ(result.peaks.front().dm_index, 1);
@@ -110,7 +113,8 @@ TEST(DmSearch, ParallelPathMergesPeaks) {
   const std::vector<double> dms{10.0, 20.0, 30.0, 40.0, 50.0};
 
   const auto result =
-      gaffa::find_dm_peaks_cpu(input, dms, 1.0, small_search_options());
+      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
+                                         small_search_options());
 
   ASSERT_GE(result.peaks.size(), 5);
   EXPECT_EQ(result.peaks.front().dm_index, 4);
@@ -125,22 +129,24 @@ TEST(DmSearch, RejectsInvalidInputs) {
   const std::vector<double> dms{10.0};
   const auto options = small_search_options();
 
-  EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(
+  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(
                    gaffa::DedispersedResult<float>{
                        .data = {},
                        .shape = {.ndm = 0, .nsamples = 4},
                    },
                    dms, 1.0, options),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(input, std::vector<double>{}, 1.0,
-                                              options),
+  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(
+                   input, std::vector<double>{}, 1.0, options),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(input, dms, 0.0, options),
+  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(input, dms, 0.0,
+                                                        options),
                std::invalid_argument);
 
   auto bad_options = options;
   bad_options.snr_threshold = INFINITY;
-  EXPECT_THROW((void)gaffa::find_dm_peaks_cpu(input, dms, 1.0, bad_options),
+  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
+                                                        bad_options),
                std::invalid_argument);
 
   EXPECT_THROW((void)gaffa::dm_time_series_cpu(input, 1, 1.0),

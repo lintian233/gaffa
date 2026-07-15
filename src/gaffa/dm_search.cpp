@@ -117,14 +117,14 @@ void validate_preprocessed_time_series(const TimeSeries& time_series,
 }
 
 template <typename T>
-void collect_dm_peaks(const DedispersedResult<T>& input,
-                      std::span<const double> dms,
-                      std::size_t dm_index,
-                      double tsamp,
-                      const PreprocessPlan& preprocess,
-                      const FfaSearchPlan& ffa_plan,
-                      const FfaSearchOptions& ffa_options,
-                      std::vector<DmPeak>& peaks) {
+void append_ffa_peaks_for_dm(const DedispersedResult<T>& input,
+                             std::span<const double> dms,
+                             std::size_t dm_index,
+                             double tsamp,
+                             const PreprocessPlan& preprocess,
+                             const FfaSearchPlan& ffa_plan,
+                             const FfaSearchOptions& ffa_options,
+                             std::vector<DmPeak>& peaks) {
   TimeSeries time_series =
       maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
   validate_preprocessed_time_series(time_series, input.shape, tsamp);
@@ -140,10 +140,10 @@ void collect_dm_peaks(const DedispersedResult<T>& input,
 }
 
 template <typename T>
-DmSearchResult find_dm_peaks_impl(const DedispersedResult<T>& input,
-                                  std::span<const double> dms,
-                                  double tsamp,
-                                  const DmSearchOptions& options) {
+DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
+                                            std::span<const double> dms,
+                                            double tsamp,
+                                            const DmSearchOptions& options) {
   validate_dedispersed_result(input);
   validate_dm_search_inputs(input.shape, dms, tsamp, options);
 
@@ -169,8 +169,9 @@ DmSearchResult find_dm_peaks_impl(const DedispersedResult<T>& input,
         continue;
       }
       try {
-        collect_dm_peaks(input, dms, dm_index, tsamp, options.preprocess,
-                         ffa_plan, ffa_options, local_peaks);
+        append_ffa_peaks_for_dm(input, dms, dm_index, tsamp,
+                                options.preprocess, ffa_plan, ffa_options,
+                                local_peaks);
       } catch (...) {
         bool expected = false;
         if (has_error.compare_exchange_strong(expected, true,
@@ -212,18 +213,20 @@ TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
   return dm_time_series_impl(input, dm_index, tsamp);
 }
 
-DmSearchResult find_dm_peaks_cpu(const DedispersedResult<std::uint32_t>& input,
-                                 std::span<const double> dms,
-                                 double tsamp,
-                                 const DmSearchOptions& options) {
-  return find_dm_peaks_impl(input, dms, tsamp, options);
+DmSearchResult search_dedispersed_ffa_cpu(
+    const DedispersedResult<std::uint32_t>& input,
+    std::span<const double> dms,
+    double tsamp,
+    const DmSearchOptions& options) {
+  return search_dedispersed_ffa_impl(input, dms, tsamp, options);
 }
 
-DmSearchResult find_dm_peaks_cpu(const DedispersedResult<float>& input,
-                                 std::span<const double> dms,
-                                 double tsamp,
-                                 const DmSearchOptions& options) {
-  return find_dm_peaks_impl(input, dms, tsamp, options);
+DmSearchResult search_dedispersed_ffa_cpu(
+    const DedispersedResult<float>& input,
+    std::span<const double> dms,
+    double tsamp,
+    const DmSearchOptions& options) {
+  return search_dedispersed_ffa_impl(input, dms, tsamp, options);
 }
 
 }  // namespace gaffa
