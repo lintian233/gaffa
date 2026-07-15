@@ -14,7 +14,9 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -517,6 +519,7 @@ void print_report(const Args& args,
 
 int main(int argc, char** argv) {
   try {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
     const auto total_start = std::chrono::steady_clock::now();
     const Args args = parse_args(argc, argv);
 

@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -388,6 +389,7 @@ void print_report(const gaffa::FilterbankData& filterbank, const Args& args,
 
 int main(int argc, char** argv) {
   try {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
     const Args args = parse_args(argc, argv);
     if (gaffa::cuda_device_count() == 0) {
       throw std::runtime_error("CUDA device is not visible");

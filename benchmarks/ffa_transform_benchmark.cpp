@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <exception>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -617,6 +618,7 @@ void print_final_report(const Args& args,
 
 int main(int argc, char** argv) {
   try {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
     const Args args = parse_args(argc, argv);
     const auto shape = gaffa::FfaTransformShape{
         .rows = args.rows,

@@ -10,7 +10,9 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <string>
 #include <string_view>
@@ -300,6 +302,7 @@ void print_report(const gaffa::FilterbankData& filterbank, const Args& args,
 
 int main(int argc, char** argv) {
   try {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
     const Args args = parse_args(argc, argv);
 
     gaffa::FilterbankData filterbank;

@@ -216,6 +216,9 @@ endif()
 file(GLOB GAFFA_BENCHMARK_SOURCES CONFIGURE_DEPENDS
   benchmarks/*_benchmark.cpp
 )
+# Loki benchmarks link an optional backend and therefore cannot participate in
+# the always-available core benchmark loop.
+list(FILTER GAFFA_BENCHMARK_SOURCES EXCLUDE REGEX ".*/loki_.*_benchmark\\.cpp$")
 set(GAFFA_BENCHMARK_TARGETS)
 foreach(benchmark_source IN LISTS GAFFA_BENCHMARK_SOURCES)
   get_filename_component(benchmark_name "${benchmark_source}" NAME_WE)
@@ -239,6 +242,36 @@ foreach(benchmark_source IN LISTS GAFFA_BENCHMARK_SOURCES)
   )
   list(APPEND GAFFA_BENCHMARK_TARGETS ${benchmark_target})
 endforeach()
+
+if(GAFFA_ENABLE_LOKI)
+  add_executable(gaffa_loki_dm_search_benchmark EXCLUDE_FROM_ALL
+    benchmarks/loki_dm_search_benchmark.cpp
+    src/gaffa/io/filterbank_legacy.cpp
+    $<TARGET_OBJECTS:gaffa_core_objects>
+  )
+  target_link_libraries(gaffa_loki_dm_search_benchmark PRIVATE
+    gaffa_loki
+    gaffa_cuda_memory
+    CUDA::cudart
+    CUDA::cuda_driver
+  )
+  if(OpenMP_CXX_FOUND)
+    target_link_libraries(gaffa_loki_dm_search_benchmark PRIVATE OpenMP::OpenMP_CXX)
+  endif()
+  target_include_directories(gaffa_loki_dm_search_benchmark PRIVATE
+    include
+    include/gaffa
+    ${CUDAToolkit_INCLUDE_DIRS}
+  )
+  target_compile_definitions(gaffa_loki_dm_search_benchmark
+    PRIVATE GAFFA_ENABLE_LEGACY_FILTERBANK_REFERENCE
+  )
+  set_target_properties(gaffa_loki_dm_search_benchmark PROPERTIES
+    BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    LINKER_LANGUAGE CUDA
+  )
+endif()
 
 if(GAFFA_BENCHMARK_TARGETS)
   add_custom_target(gaffa_benchmarks DEPENDS ${GAFFA_BENCHMARK_TARGETS})

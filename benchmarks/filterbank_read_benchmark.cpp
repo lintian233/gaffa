@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -418,6 +419,7 @@ void print_final_report(const std::vector<BenchmarkResult>& results) {
 
 int main(int argc, char** argv) {
   try {
+    std::cout << std::setprecision(std::numeric_limits<double>::max_digits10);
     const Args args = parse_args(argc, argv);
     std::vector<BenchmarkResult> results;
     const std::vector<Mode> modes = selected_modes(args.mode);
