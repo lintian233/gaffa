@@ -66,10 +66,11 @@ configure-loki: deps-debug
     {{ dev_env }} if [ -f {{ loki_dir }}/CMakeCache.txt ]; then cmake -S . -B {{ loki_dir }} -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_LOKI=ON; else cmake -S . -B {{ loki_dir }} -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_LOKI=ON; fi
 
 build-loki: configure-loki
-    {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki_smoke_tests
+    {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki
 
-test-loki: build-loki
-    {{ dev_env }} ctest --test-dir {{ loki_dir }} -R "^LokiSmoke\\." --output-on-failure
+test-loki: configure-loki
+    {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki_smoke_tests gaffa_loki_pffa_tests
+    {{ dev_env }} ctest --test-dir {{ loki_dir }} -R "^(LokiSmoke|LokiPffaPlan|LokiPffaProgram)\\." --output-on-failure
 
 # Tests and quality checks
 
