@@ -23,24 +23,15 @@ void validate_options(double observation_seconds,
 }
 
 void validate_peak(const DmPeak& peak) {
-  if (!std::isfinite(peak.dm) ||
-      !std::isfinite(peak.peak.motion.reference_time_seconds) ||
-      !std::isfinite(peak.peak.motion.frequency_hz) ||
-      !std::isfinite(peak.peak.motion.acceleration_m_per_s2) ||
-      !std::isfinite(peak.peak.motion.jerk_m_per_s3) ||
-      !std::isfinite(peak.peak.motion.snap_m_per_s4) ||
-      !std::isfinite(peak.peak.duty_cycle) ||
+  if (!std::isfinite(peak.dm) || !std::isfinite(peak.peak.duty_cycle) ||
       !std::isfinite(peak.peak.snr)) {
     throw std::invalid_argument(
         "Candidate selection peaks must contain finite scientific values");
   }
+  validate_periodic_motion(peak.peak.motion);
   if (peak.peak.motion.order != MotionOrder::Frequency) {
     throw std::invalid_argument(
         "Candidate selection currently supports frequency-only periodic peaks");
-  }
-  if (!(peak.peak.motion.frequency_hz > 0.0)) {
-    throw std::invalid_argument(
-        "Candidate selection peak frequency_hz must be > 0");
   }
 }
 

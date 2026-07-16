@@ -32,6 +32,11 @@ struct PeriodicMotion {
   double snap_m_per_s4 = 0.0;
 };
 
+// Validates the canonical representation of a periodic motion model. Every
+// value must be finite, frequency_hz must be positive, and coefficients above
+// order must be zero.
+void validate_periodic_motion(const PeriodicMotion& motion);
+
 // One significant periodic-search detection. phase_bin is absent when a
 // backend scores a folded profile but does not report its maximizing phase.
 struct PeriodicPeak {

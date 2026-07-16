@@ -79,6 +79,12 @@ TEST(CandidateSelection, RejectsInvalidInputs) {
                std::invalid_argument);
 
   bad_peak = peaks.front();
+  bad_peak.peak.motion.acceleration_m_per_s2 = 1.0;
+  EXPECT_THROW((void)gaffa::select_candidates_cpu(
+                   std::vector<gaffa::DmPeak>{bad_peak}, 100.0),
+               std::invalid_argument);
+
+  bad_peak = peaks.front();
   bad_peak.peak.motion.order = gaffa::MotionOrder::Acceleration;
   bad_peak.peak.motion.acceleration_m_per_s2 = 1.0;
   EXPECT_THROW((void)gaffa::select_candidates_cpu(

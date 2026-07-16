@@ -80,25 +80,19 @@ void validate_options(const HarmonicOptions& options) {
 
 void validate_candidate(const Candidate& candidate) {
   const DmPeak& best = candidate.best;
-  if (!std::isfinite(best.dm) ||
-      !std::isfinite(best.peak.motion.reference_time_seconds) ||
-      !std::isfinite(best.peak.motion.frequency_hz) ||
-      !std::isfinite(best.peak.motion.acceleration_m_per_s2) ||
-      !std::isfinite(best.peak.motion.jerk_m_per_s3) ||
-      !std::isfinite(best.peak.motion.snap_m_per_s4) ||
-      !std::isfinite(best.peak.duty_cycle) ||
+  if (!std::isfinite(best.dm) || !std::isfinite(best.peak.duty_cycle) ||
       !std::isfinite(best.peak.snr)) {
     throw std::invalid_argument(
         "Harmonic candidates must contain finite scientific values");
   }
+  validate_periodic_motion(best.peak.motion);
   if (best.peak.motion.order != MotionOrder::Frequency) {
     throw std::invalid_argument(
         "Harmonic filtering currently supports frequency-only candidates");
   }
-  if (!(best.peak.motion.frequency_hz > 0.0) ||
-      !(best.peak.duty_cycle > 0.0) || !(best.peak.snr >= 0.0F)) {
+  if (!(best.peak.duty_cycle > 0.0) || !(best.peak.snr >= 0.0F)) {
     throw std::invalid_argument(
-        "Harmonic candidate frequency, period, duty_cycle, and snr are invalid");
+        "Harmonic candidate duty_cycle or snr is invalid");
   }
 }
 

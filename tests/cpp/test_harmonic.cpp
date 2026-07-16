@@ -89,6 +89,12 @@ TEST(HarmonicFlagging, RejectsInvalidInputs) {
                std::invalid_argument);
 
   bad_candidate = candidates.front();
+  bad_candidate.best.peak.motion.acceleration_m_per_s2 = 1.0;
+  EXPECT_THROW((void)gaffa::flag_harmonics_cpu(
+                   std::vector<gaffa::Candidate>{bad_candidate}, context()),
+               std::invalid_argument);
+
+  bad_candidate = candidates.front();
   bad_candidate.best.peak.motion.order = gaffa::MotionOrder::Acceleration;
   bad_candidate.best.peak.motion.acceleration_m_per_s2 = 1.0;
   EXPECT_THROW((void)gaffa::flag_harmonics_cpu(
