@@ -76,3 +76,20 @@ TEST(FfaPeak, SortsNonFinitePeaksAfterFinitePeaks) {
   EXPECT_FALSE(std::isfinite(peaks[3].snr) &&
                std::isfinite(peaks[3].period));
 }
+
+TEST(FfaPeak, ConvertsToBackendNeutralPeriodicPeak) {
+  const auto ffa_peak = peak(8.0F, 0.25, 4, 7, 3, 64);
+
+  const auto periodic = gaffa::periodic_peak_from_ffa(ffa_peak);
+
+  EXPECT_EQ(periodic.motion.order, gaffa::MotionOrder::Frequency);
+  EXPECT_DOUBLE_EQ(periodic.motion.reference_time_seconds, 0.0);
+  EXPECT_DOUBLE_EQ(periodic.motion.frequency_hz, 4.0);
+  ASSERT_TRUE(periodic.phase_bin.has_value());
+  EXPECT_EQ(*periodic.phase_bin, 7);
+  EXPECT_EQ(periodic.phase_bins, 64);
+  EXPECT_EQ(periodic.boxcar_width_bins, 4);
+  EXPECT_DOUBLE_EQ(periodic.duty_cycle, 4.0 / 64.0);
+  EXPECT_FLOAT_EQ(periodic.snr, 8.0F);
+  EXPECT_DOUBLE_EQ(periodic.period_seconds(), 0.25);
+}

@@ -16,19 +16,14 @@ gaffa::DmPeak dm_peak(double dm,
   return gaffa::DmPeak{
       .dm = dm,
       .dm_index = dm_index,
-      .peak =
-          gaffa::FfaPeak{
-              .period = 1.0 / frequency,
-              .frequency = frequency,
-              .width = width,
-              .duty_cycle = static_cast<double>(width) / 100.0,
-              .width_index = width - 1,
-              .period_index = 0,
-              .phase = 0,
-              .shift = 0,
-              .bins = 100,
-              .snr = snr,
-          },
+      .peak = {
+          .motion = {.frequency_hz = frequency},
+          .phase_bin = 0,
+          .phase_bins = 100,
+          .boxcar_width_bins = width,
+          .duty_cycle = static_cast<double>(width) / 100.0,
+          .snr = snr,
+      },
   };
 }
 
@@ -40,19 +35,13 @@ gaffa::Candidate candidate(double dm,
                            std::size_t dm_index_max) {
   const auto peak = dm_peak(dm, dm_index, frequency, 2, snr);
   return gaffa::Candidate{
-      .dm = dm,
-      .dm_index = dm_index,
-      .period = 1.0 / frequency,
-      .frequency = frequency,
-      .width = 2,
-      .duty_cycle = 0.02,
-      .snr = snr,
+      .best = peak,
       .peak_count = 1,
-      .dm_index_min = dm_index_min,
-      .dm_index_max = dm_index_max,
-      .frequency_min = frequency,
-      .frequency_max = frequency,
-      .best_peak = peak,
+      .extent = {
+          .dm_index_min = dm_index_min,
+          .dm_index_max = dm_index_max,
+          .frequency_hz = {.minimum = frequency, .maximum = frequency},
+      },
   };
 }
 
@@ -78,7 +67,20 @@ TEST(CandidateSelection, RejectsInvalidInputs) {
                std::invalid_argument);
 
   auto bad_peak = peaks.front();
-  bad_peak.peak.frequency = INFINITY;
+  bad_peak.peak.motion.frequency_hz = INFINITY;
+  EXPECT_THROW((void)gaffa::select_candidates_cpu(
+                   std::vector<gaffa::DmPeak>{bad_peak}, 100.0),
+               std::invalid_argument);
+
+  bad_peak = peaks.front();
+  bad_peak.peak.motion.frequency_hz = 0.0;
+  EXPECT_THROW((void)gaffa::select_candidates_cpu(
+                   std::vector<gaffa::DmPeak>{bad_peak}, 100.0),
+               std::invalid_argument);
+
+  bad_peak = peaks.front();
+  bad_peak.peak.motion.order = gaffa::MotionOrder::Acceleration;
+  bad_peak.peak.motion.acceleration_m_per_s2 = 1.0;
   EXPECT_THROW((void)gaffa::select_candidates_cpu(
                    std::vector<gaffa::DmPeak>{bad_peak}, 100.0),
                std::invalid_argument);
@@ -100,12 +102,12 @@ TEST(CandidateSelection, ClustersNearbyFrequencyAndDmPeaks) {
 
   ASSERT_EQ(candidates.size(), 1);
   EXPECT_EQ(candidates.front().peak_count, 3);
-  EXPECT_EQ(candidates.front().dm_index, 1);
-  EXPECT_EQ(candidates.front().dm_index_min, 0);
-  EXPECT_EQ(candidates.front().dm_index_max, 2);
-  EXPECT_FLOAT_EQ(candidates.front().snr, 10.0F);
-  EXPECT_DOUBLE_EQ(candidates.front().frequency_min, 1.0000);
-  EXPECT_DOUBLE_EQ(candidates.front().frequency_max, 1.0009);
+  EXPECT_EQ(candidates.front().best.dm_index, 1);
+  EXPECT_EQ(candidates.front().extent.dm_index_min, 0);
+  EXPECT_EQ(candidates.front().extent.dm_index_max, 2);
+  EXPECT_FLOAT_EQ(candidates.front().best.peak.snr, 10.0F);
+  EXPECT_DOUBLE_EQ(candidates.front().extent.frequency_hz.minimum, 1.0000);
+  EXPECT_DOUBLE_EQ(candidates.front().extent.frequency_hz.maximum, 1.0009);
 }
 
 TEST(CandidateSelection, SeparatesFrequencyClustersOutsideRadius) {
@@ -119,7 +121,7 @@ TEST(CandidateSelection, SeparatesFrequencyClustersOutsideRadius) {
       gaffa::CandidateSelectionOptions{.frequency_cluster_radius = 0.1});
 
   ASSERT_EQ(candidates.size(), 2);
-  EXPECT_FLOAT_EQ(candidates.front().snr, 8.0F);
+  EXPECT_FLOAT_EQ(candidates.front().best.peak.snr, 8.0F);
 }
 
 TEST(CandidateSelection, SeparatesDmClustersOutsideRadius) {
@@ -136,7 +138,7 @@ TEST(CandidateSelection, SeparatesDmClustersOutsideRadius) {
       });
 
   ASSERT_EQ(candidates.size(), 2);
-  EXPECT_FLOAT_EQ(candidates.front().snr, 9.0F);
+  EXPECT_FLOAT_EQ(candidates.front().best.peak.snr, 9.0F);
 }
 
 TEST(CandidateSelection, CanKeepWidthsSeparate) {
@@ -154,7 +156,7 @@ TEST(CandidateSelection, CanKeepWidthsSeparate) {
       });
 
   ASSERT_EQ(candidates.size(), 2);
-  EXPECT_FLOAT_EQ(candidates.front().snr, 9.0F);
+  EXPECT_FLOAT_EQ(candidates.front().best.peak.snr, 9.0F);
 }
 
 TEST(CandidateSelection, ClustersAcrossWidthsByDefault) {
@@ -172,7 +174,7 @@ TEST(CandidateSelection, ClustersAcrossWidthsByDefault) {
 
   ASSERT_EQ(candidates.size(), 1);
   EXPECT_EQ(candidates.front().peak_count, 2);
-  EXPECT_EQ(candidates.front().width, 4);
+  EXPECT_EQ(candidates.front().best.peak.boxcar_width_bins, 4);
 }
 
 TEST(CandidateSelection, AppliesFinalCandidateCapAfterSorting) {
@@ -190,6 +192,6 @@ TEST(CandidateSelection, AppliesFinalCandidateCapAfterSorting) {
       });
 
   ASSERT_EQ(candidates.size(), 2);
-  EXPECT_FLOAT_EQ(candidates[0].snr, 11.0F);
-  EXPECT_FLOAT_EQ(candidates[1].snr, 9.0F);
+  EXPECT_FLOAT_EQ(candidates[0].best.peak.snr, 11.0F);
+  EXPECT_FLOAT_EQ(candidates[1].best.peak.snr, 9.0F);
 }

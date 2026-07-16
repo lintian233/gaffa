@@ -38,7 +38,8 @@ TEST(LokiPffaPlan, RejectsNonPowerOfTwoInput) {
 
 TEST(LokiPffaPlan, RejectsDiscontinuousTaylorModel) {
   auto space = frequency_only_space();
-  space.jerk = gaffa::ClosedRange{.minimum = -1.0, .maximum = 1.0};
+  space.jerk_m_per_s3 =
+      gaffa::ValueRange{.minimum = -1.0, .maximum = 1.0};
   EXPECT_THROW((void)gaffa::make_loki_pffa_plan(1U << 18U, 64.0e-6, space),
                std::invalid_argument);
 }
@@ -52,9 +53,12 @@ TEST(LokiPffaPlan, RejectsZeroWidthFrequencyRange) {
 
 TEST(LokiPffaPlan, RejectsUnsupportedSnapSearch) {
   auto space = frequency_only_space();
-  space.acceleration = gaffa::ClosedRange{.minimum = -1.0, .maximum = 1.0};
-  space.jerk = gaffa::ClosedRange{.minimum = -1.0, .maximum = 1.0};
-  space.snap = gaffa::ClosedRange{.minimum = -1.0, .maximum = 1.0};
+  space.acceleration_m_per_s2 =
+      gaffa::ValueRange{.minimum = -1.0, .maximum = 1.0};
+  space.jerk_m_per_s3 =
+      gaffa::ValueRange{.minimum = -1.0, .maximum = 1.0};
+  space.snap_m_per_s4 =
+      gaffa::ValueRange{.minimum = -1.0, .maximum = 1.0};
   EXPECT_THROW((void)gaffa::make_loki_pffa_plan(1U << 18U, 64.0e-6, space),
                std::invalid_argument);
 }
@@ -102,11 +106,17 @@ TEST(LokiPffaProgram, SearchesOneNormalisedDeviceSeries) {
   const auto& signal_device_const = signal_device;
   const auto peaks = program.search(signal_device_const.as_span(0));
   ASSERT_FALSE(peaks.empty());
+  const double reference_time_seconds =
+      0.5 * static_cast<double>(nsamples) * tsamp_seconds;
   EXPECT_TRUE(std::ranges::all_of(peaks, [](const auto& peak) {
-    return std::isfinite(peak.snr) && peak.frequency_hz > 0.0 &&
-           peak.phase_bins != 0 && peak.boxcar_width != 0 &&
-           peak.duty_cycle > 0.0F;
+    return std::isfinite(peak.snr) && peak.motion.frequency_hz > 0.0 &&
+           peak.phase_bins != 0 && peak.boxcar_width_bins != 0 &&
+           peak.duty_cycle > 0.0;
   }));
+  EXPECT_TRUE(std::ranges::all_of(
+      peaks, [reference_time_seconds](const auto& peak) {
+        return peak.motion.reference_time_seconds == reference_time_seconds;
+      }));
 }
 
 }  // namespace

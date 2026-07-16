@@ -355,43 +355,47 @@ gaffa::DmSearchResult run_search(const gaffa::FilterbankData& filterbank,
 }
 
 void print_peak(std::size_t rank, const gaffa::DmPeak& dm_peak) {
-  const gaffa::FfaPeak& peak = dm_peak.peak;
+  const gaffa::PeriodicPeak& peak = dm_peak.peak;
   std::cout << "peak"
             << " rank=" << rank
             << " dm=" << dm_peak.dm
             << " dm_index=" << dm_peak.dm_index
             << " snr=" << peak.snr
-            << " period=" << peak.period
-            << " frequency=" << peak.frequency
-            << " width=" << peak.width
+            << " period=" << peak.period_seconds()
+            << " frequency=" << peak.motion.frequency_hz
+            << " width=" << peak.boxcar_width_bins
             << " duty_cycle=" << peak.duty_cycle
-            << " phase=" << peak.phase
-            << " shift=" << peak.shift
-            << " bins=" << peak.bins << '\n';
+            << " phase=" << peak.phase_bin.value_or(0)
+            << " phase_known=" << peak.phase_bin.has_value()
+            << " bins=" << peak.phase_bins << '\n';
 }
 
 void print_candidate(std::string_view label,
                      std::size_t rank,
                      const gaffa::Candidate& candidate) {
+  const auto& best = candidate.best;
+  const auto& peak = best.peak;
   std::cout << label
             << " rank=" << rank
-            << " dm=" << candidate.dm
-            << " dm_index=" << candidate.dm_index
-            << " snr=" << candidate.snr
-            << " period=" << candidate.period
-            << " frequency=" << candidate.frequency
-            << " width=" << candidate.width
-            << " duty_cycle=" << candidate.duty_cycle
+            << " dm=" << best.dm
+            << " dm_index=" << best.dm_index
+            << " snr=" << peak.snr
+            << " period=" << peak.period_seconds()
+            << " frequency=" << peak.motion.frequency_hz
+            << " width=" << peak.boxcar_width_bins
+            << " duty_cycle=" << peak.duty_cycle
             << " peak_count=" << candidate.peak_count
-            << " dm_index_min=" << candidate.dm_index_min
-            << " dm_index_max=" << candidate.dm_index_max
-            << " frequency_min=" << candidate.frequency_min
-            << " frequency_max=" << candidate.frequency_max << '\n';
+            << " dm_index_min=" << candidate.extent.dm_index_min
+            << " dm_index_max=" << candidate.extent.dm_index_max
+            << " frequency_min=" << candidate.extent.frequency_hz.minimum
+            << " frequency_max=" << candidate.extent.frequency_hz.maximum << '\n';
 }
 
 void print_harmonic_candidate(std::size_t rank,
                               const gaffa::HarmonicCandidate& candidate) {
   const gaffa::HarmonicRelation& harmonic = candidate.harmonic;
+  const auto& best = candidate.candidate.best;
+  const auto& peak = best.peak;
   std::cout << "harmonic_candidate"
             << " rank=" << rank
             << " parent_rank=" << harmonic.parent_index
@@ -402,13 +406,13 @@ void print_harmonic_candidate(std::size_t rank,
             << " dm_distance=" << harmonic.dm_distance
             << " expected_snr=" << harmonic.expected_snr
             << " snr_distance=" << harmonic.snr_distance
-            << " dm=" << candidate.candidate.dm
-            << " dm_index=" << candidate.candidate.dm_index
-            << " snr=" << candidate.candidate.snr
-            << " period=" << candidate.candidate.period
-            << " frequency=" << candidate.candidate.frequency
-            << " width=" << candidate.candidate.width
-            << " duty_cycle=" << candidate.candidate.duty_cycle
+            << " dm=" << best.dm
+            << " dm_index=" << best.dm_index
+            << " snr=" << peak.snr
+            << " period=" << peak.period_seconds()
+            << " frequency=" << peak.motion.frequency_hz
+            << " width=" << peak.boxcar_width_bins
+            << " duty_cycle=" << peak.duty_cycle
             << " peak_count=" << candidate.candidate.peak_count << '\n';
 }
 

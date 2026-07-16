@@ -60,6 +60,9 @@ TEST(DmSearch, FindsEveryDmPeakAndAttachesMetadata) {
   EXPECT_EQ(result.peaks.front().dm_index, 1);
   EXPECT_DOUBLE_EQ(result.peaks.front().dm, 20.0);
   EXPECT_GT(result.peaks.front().peak.snr, 0.0F);
+  for (const auto& peak : result.peaks) {
+    EXPECT_DOUBLE_EQ(peak.peak.motion.reference_time_seconds, 4.0);
+  }
 }
 
 TEST(DmSearch, AppliesPreprocessPlanBeforeSearch) {

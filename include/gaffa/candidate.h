@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gaffa/dm_search.h"
+#include "gaffa/periodic_peak.h"
 
 #include <cstddef>
 #include <span>
@@ -9,22 +9,10 @@
 namespace gaffa {
 
 struct Candidate {
-  double dm = 0.0;
-  std::size_t dm_index = 0;
-
-  double period = 0.0;
-  double frequency = 0.0;
-  std::size_t width = 0;
-  double duty_cycle = 0.0;
-  float snr = 0.0F;
-
+  // The best-scoring member is the candidate's physical source of truth.
+  DmPeak best{};
   std::size_t peak_count = 0;
-  std::size_t dm_index_min = 0;
-  std::size_t dm_index_max = 0;
-  double frequency_min = 0.0;
-  double frequency_max = 0.0;
-
-  DmPeak best_peak{};
+  CandidateExtent extent{};
 };
 
 struct CandidateSelectionOptions {

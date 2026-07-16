@@ -88,7 +88,7 @@ struct PrefixWindow {
 struct LokiDmPeak {
   double dm = 0.0;
   std::size_t dm_index = 0;
-  gaffa::LokiPffaPeak peak{};
+  gaffa::PeriodicPeak peak{};
 };
 
 template <typename Function>
@@ -202,21 +202,14 @@ gaffa::HarmonicContext harmonic_context(
 }
 
 gaffa::DmPeak project_loki_peak(const LokiDmPeak& source) {
-  const double frequency = source.peak.frequency_hz;
+  const double frequency = source.peak.motion.frequency_hz;
   if (!(frequency > 0.0) || !std::isfinite(frequency)) {
     throw std::runtime_error("Loki returned a non-positive or non-finite frequency");
   }
   return gaffa::DmPeak{
       .dm = source.dm,
       .dm_index = source.dm_index,
-      .peak = gaffa::FfaPeak{
-          .period = 1.0 / frequency,
-          .frequency = frequency,
-          .width = source.peak.boxcar_width,
-          .duty_cycle = source.peak.duty_cycle,
-          .bins = source.peak.phase_bins,
-          .snr = source.peak.snr,
-      },
+      .peak = source.peak,
   };
 }
 
@@ -224,8 +217,8 @@ bool better_loki_peak(const LokiDmPeak& lhs, const LokiDmPeak& rhs) {
   if (lhs.peak.snr != rhs.peak.snr) {
     return lhs.peak.snr > rhs.peak.snr;
   }
-  if (lhs.peak.frequency_hz != rhs.peak.frequency_hz) {
-    return lhs.peak.frequency_hz < rhs.peak.frequency_hz;
+  if (lhs.peak.motion.frequency_hz != rhs.peak.motion.frequency_hz) {
+    return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
   }
   return lhs.dm_index < rhs.dm_index;
 }
@@ -236,19 +229,20 @@ void print_loki_peak(std::size_t rank, const LokiDmPeak& peak) {
             << " dm=" << peak.dm
             << " dm_index=" << peak.dm_index
             << " snr=" << peak.peak.snr
-            << " period=" << 1.0 / peak.peak.frequency_hz
-            << " frequency=" << peak.peak.frequency_hz
+            << " period=" << peak.peak.period_seconds()
+            << " frequency=" << peak.peak.motion.frequency_hz
             << " phase_bins=" << peak.peak.phase_bins
-            << " width=" << peak.peak.boxcar_width
+            << " width=" << peak.peak.boxcar_width_bins
             << " duty_cycle=" << peak.peak.duty_cycle;
-  if (peak.peak.loki_acceleration.has_value()) {
-    std::cout << " loki_acceleration=" << *peak.peak.loki_acceleration;
+  if (peak.peak.motion.order >= gaffa::MotionOrder::Acceleration) {
+    std::cout << " acceleration_m_per_s2="
+              << peak.peak.motion.acceleration_m_per_s2;
   }
-  if (peak.peak.loki_jerk.has_value()) {
-    std::cout << " loki_jerk=" << *peak.peak.loki_jerk;
+  if (peak.peak.motion.order >= gaffa::MotionOrder::Jerk) {
+    std::cout << " jerk_m_per_s3=" << peak.peak.motion.jerk_m_per_s3;
   }
-  if (peak.peak.loki_snap.has_value()) {
-    std::cout << " loki_snap=" << *peak.peak.loki_snap;
+  if (peak.peak.motion.order >= gaffa::MotionOrder::Snap) {
+    std::cout << " snap_m_per_s4=" << peak.peak.motion.snap_m_per_s4;
   }
   std::cout << '\n';
 }
@@ -256,25 +250,29 @@ void print_loki_peak(std::size_t rank, const LokiDmPeak& peak) {
 void print_candidate(std::string_view label,
                      std::size_t rank,
                      const gaffa::Candidate& candidate) {
+  const auto& best = candidate.best;
+  const auto& peak = best.peak;
   std::cout << label
             << " rank=" << rank
-            << " dm=" << candidate.dm
-            << " dm_index=" << candidate.dm_index
-            << " snr=" << candidate.snr
-            << " period=" << candidate.period
-            << " frequency=" << candidate.frequency
-            << " width=" << candidate.width
-            << " duty_cycle=" << candidate.duty_cycle
+            << " dm=" << best.dm
+            << " dm_index=" << best.dm_index
+            << " snr=" << peak.snr
+            << " period=" << peak.period_seconds()
+            << " frequency=" << peak.motion.frequency_hz
+            << " width=" << peak.boxcar_width_bins
+            << " duty_cycle=" << peak.duty_cycle
             << " peak_count=" << candidate.peak_count
-            << " dm_index_min=" << candidate.dm_index_min
-            << " dm_index_max=" << candidate.dm_index_max
-            << " frequency_min=" << candidate.frequency_min
-            << " frequency_max=" << candidate.frequency_max << '\n';
+            << " dm_index_min=" << candidate.extent.dm_index_min
+            << " dm_index_max=" << candidate.extent.dm_index_max
+            << " frequency_min=" << candidate.extent.frequency_hz.minimum
+            << " frequency_max=" << candidate.extent.frequency_hz.maximum << '\n';
 }
 
 void print_harmonic_candidate(std::size_t rank,
                               const gaffa::HarmonicCandidate& candidate) {
   const auto& harmonic = candidate.harmonic;
+  const auto& best = candidate.candidate.best;
+  const auto& peak = best.peak;
   std::cout << "harmonic_candidate"
             << " rank=" << rank
             << " parent_rank=" << harmonic.parent_index
@@ -284,13 +282,13 @@ void print_harmonic_candidate(std::size_t rank,
             << " dm_distance=" << harmonic.dm_distance
             << " expected_snr=" << harmonic.expected_snr
             << " snr_distance=" << harmonic.snr_distance
-            << " dm=" << candidate.candidate.dm
-            << " dm_index=" << candidate.candidate.dm_index
-            << " snr=" << candidate.candidate.snr
-            << " period=" << candidate.candidate.period
-            << " frequency=" << candidate.candidate.frequency
-            << " width=" << candidate.candidate.width
-            << " duty_cycle=" << candidate.candidate.duty_cycle
+            << " dm=" << best.dm
+            << " dm_index=" << best.dm_index
+            << " snr=" << peak.snr
+            << " period=" << peak.period_seconds()
+            << " frequency=" << peak.motion.frequency_hz
+            << " width=" << peak.boxcar_width_bins
+            << " duty_cycle=" << peak.duty_cycle
             << " peak_count=" << candidate.candidate.peak_count << '\n';
 }
 

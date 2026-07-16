@@ -44,4 +44,19 @@ void sort_ffa_peaks(std::vector<FfaPeak>& peaks) {
   std::sort(peaks.begin(), peaks.end(), is_better_ffa_peak);
 }
 
+PeriodicPeak periodic_peak_from_ffa(const FfaPeak& peak) {
+  return PeriodicPeak{
+      .motion = {
+          .order = MotionOrder::Frequency,
+          .reference_time_seconds = 0.0,
+          .frequency_hz = peak.frequency,
+      },
+      .phase_bin = peak.phase,
+      .phase_bins = peak.bins,
+      .boxcar_width_bins = peak.width,
+      .duty_cycle = peak.duty_cycle,
+      .snr = peak.snr,
+  };
+}
+
 }  // namespace gaffa

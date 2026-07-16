@@ -12,7 +12,7 @@ bool is_power_of_two(std::size_t value) {
   return value != 0 && (value & (value - 1)) == 0;
 }
 
-void validate_range(const ClosedRange& range, const char* name,
+void validate_range(const ValueRange& range, const char* name,
                     bool positive, bool require_nonzero_width) {
   if (!std::isfinite(range.minimum) || !std::isfinite(range.maximum) ||
       range.maximum < range.minimum ||
@@ -66,19 +66,21 @@ LokiPffaPlan make_loki_pffa_plan(std::size_t input_nsamples,
   }
   validate_range(search_space.frequency_hz, "frequency", true,
                  /*require_nonzero_width=*/true);
-  if (search_space.jerk.has_value() && !search_space.acceleration.has_value()) {
+  if (search_space.jerk_m_per_s3.has_value() &&
+      !search_space.acceleration_m_per_s2.has_value()) {
     throw std::invalid_argument("Loki jerk search requires acceleration search");
   }
-  if (search_space.snap.has_value()) {
+  if (search_space.snap_m_per_s4.has_value()) {
     throw std::invalid_argument(
         "Loki snap search is not supported by the current Loki region planner");
   }
-  if (search_space.acceleration.has_value()) {
-    validate_range(*search_space.acceleration, "acceleration", false,
+  if (search_space.acceleration_m_per_s2.has_value()) {
+    validate_range(*search_space.acceleration_m_per_s2,
+                   "acceleration_m_per_s2", false,
                    /*require_nonzero_width=*/false);
   }
-  if (search_space.jerk.has_value()) {
-    validate_range(*search_space.jerk, "jerk", false,
+  if (search_space.jerk_m_per_s3.has_value()) {
+    validate_range(*search_space.jerk_m_per_s3, "jerk_m_per_s3", false,
                    /*require_nonzero_width=*/false);
   }
   if (options.phase_bins_min < 2 ||

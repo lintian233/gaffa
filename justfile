@@ -119,7 +119,7 @@ bench-cuda-dm-search file="tests/data/PT2023_0192_Mercer_5_20231221_c8_t4_filtoo
 bench-ffa-transform mode="all" rows="73242" bins="256" nseries="32" iterations="5" warmup="1" validate="no-validate" omp_threads="56": build-benchmarks
     {{ dev_env }} OMP_NUM_THREADS={{ omp_threads }} OMP_PROC_BIND=close OMP_PLACES=cores OMP_DYNAMIC=false /usr/bin/time -v {{ release_dir }}/gaffa_ffa_transform_benchmark {{ mode }} {{ rows }} {{ bins }} {{ nseries }} {{ iterations }} {{ warmup }} {{ validate }}
 
-bench-loki-dm-search file="tests/data/PT2023_0192_Mercer_5_20231221_c8_t4_filtool_01.fil" ndm="64" dm_low="1030" dm_step="0.5" period_min="0.018" period_max="1" snr_threshold="7.5" phase_bins_min="180" phase_bins_max="256" duty_cycle_max="0.2" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32" print_peaks="64" window_mode="truncate": configure-loki-release
+bench-loki-dm-search file="tests/data/PT2023_0192_Mercer_5_20231221_c8_t4_filtool_01.fil" ndm="64" dm_low="1030" dm_step="0.5" period_min="0.018" period_max="1" snr_threshold="7.5" phase_bins_min="180" phase_bins_max="256" duty_cycle_max="0.2" running_median_seconds="5" subband_channels="32" ndm_per_nominal="32" print_peaks="64" window_mode="zero-pad": configure-loki-release
     {{ dev_env }} cmake --build {{ loki_release_dir }} --target gaffa_loki_dm_search_benchmark
     {{ dev_env }} /usr/bin/time -v {{ loki_release_dir }}/gaffa_loki_dm_search_benchmark {{ file }} {{ ndm }} {{ dm_low }} {{ dm_step }} {{ period_min }} {{ period_max }} {{ snr_threshold }} {{ phase_bins_min }} {{ phase_bins_max }} {{ duty_cycle_max }} {{ running_median_seconds }} {{ subband_channels }} {{ ndm_per_nominal }} {{ print_peaks }} {{ window_mode }}
 

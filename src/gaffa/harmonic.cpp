@@ -20,16 +20,18 @@ struct HarmonicRatio {
 
 bool is_better_candidate_for_harmonic(const Candidate& lhs,
                                       const Candidate& rhs) {
-  if (lhs.snr != rhs.snr) {
-    return lhs.snr > rhs.snr;
+  if (lhs.best.peak.snr != rhs.best.peak.snr) {
+    return lhs.best.peak.snr > rhs.best.peak.snr;
   }
   if (lhs.peak_count != rhs.peak_count) {
     return lhs.peak_count > rhs.peak_count;
   }
-  if (lhs.frequency != rhs.frequency) {
-    return lhs.frequency < rhs.frequency;
+  if (lhs.best.peak.motion.frequency_hz !=
+      rhs.best.peak.motion.frequency_hz) {
+    return lhs.best.peak.motion.frequency_hz <
+           rhs.best.peak.motion.frequency_hz;
   }
-  return lhs.dm_index < rhs.dm_index;
+  return lhs.best.dm_index < rhs.best.dm_index;
 }
 
 void validate_context(const HarmonicContext& context) {
@@ -77,15 +79,24 @@ void validate_options(const HarmonicOptions& options) {
 }
 
 void validate_candidate(const Candidate& candidate) {
-  if (!std::isfinite(candidate.dm) || !std::isfinite(candidate.period) ||
-      !std::isfinite(candidate.frequency) ||
-      !std::isfinite(candidate.duty_cycle) ||
-      !std::isfinite(candidate.snr)) {
+  const DmPeak& best = candidate.best;
+  if (!std::isfinite(best.dm) ||
+      !std::isfinite(best.peak.motion.reference_time_seconds) ||
+      !std::isfinite(best.peak.motion.frequency_hz) ||
+      !std::isfinite(best.peak.motion.acceleration_m_per_s2) ||
+      !std::isfinite(best.peak.motion.jerk_m_per_s3) ||
+      !std::isfinite(best.peak.motion.snap_m_per_s4) ||
+      !std::isfinite(best.peak.duty_cycle) ||
+      !std::isfinite(best.peak.snr)) {
     throw std::invalid_argument(
         "Harmonic candidates must contain finite scientific values");
   }
-  if (!(candidate.frequency > 0.0) || !(candidate.period > 0.0) ||
-      !(candidate.duty_cycle > 0.0) || !(candidate.snr >= 0.0F)) {
+  if (best.peak.motion.order != MotionOrder::Frequency) {
+    throw std::invalid_argument(
+        "Harmonic filtering currently supports frequency-only candidates");
+  }
+  if (!(best.peak.motion.frequency_hz > 0.0) ||
+      !(best.peak.duty_cycle > 0.0) || !(best.peak.snr >= 0.0F)) {
     throw std::invalid_argument(
         "Harmonic candidate frequency, period, duty_cycle, and snr are invalid");
   }
@@ -164,7 +175,7 @@ std::optional<HarmonicRatio> nearest_harmonic_ratio(
 }
 
 double pulse_width_seconds(const Candidate& candidate) {
-  return candidate.period * candidate.duty_cycle;
+  return candidate.best.peak.period_seconds() * candidate.best.peak.duty_cycle;
 }
 
 double dm_distance(const Candidate& parent,
@@ -175,7 +186,7 @@ double dm_distance(const Candidate& parent,
   const double high = std::max(context.frequency_low_mhz,
                                context.frequency_high_mhz);
   const double band_delay_ms =
-      std::abs(parent.dm - child.dm) * kDispersionDelayMs *
+      std::abs(parent.best.dm - child.best.dm) * kDispersionDelayMs *
       std::abs(1.0 / (low * low) - 1.0 / (high * high));
   const double width_seconds =
       std::min(pulse_width_seconds(parent), pulse_width_seconds(child));
@@ -190,22 +201,26 @@ std::optional<HarmonicRelation> test_harmonic_relation(
     const HarmonicOptions& options,
     const std::vector<HarmonicRatio>& ratios) {
   const auto harmonic_ratio =
-      nearest_harmonic_ratio(child.frequency / parent.frequency, ratios);
+      nearest_harmonic_ratio(child.best.peak.motion.frequency_hz /
+                                 parent.best.peak.motion.frequency_hz,
+                             ratios);
   if (!harmonic_ratio) {
     return std::nullopt;
   }
 
-  const double expected_frequency = parent.frequency * harmonic_ratio->value;
+  const double expected_frequency =
+      parent.best.peak.motion.frequency_hz * harmonic_ratio->value;
   const double frequency_error_bins =
-      std::abs(child.frequency - expected_frequency) *
+      std::abs(child.best.peak.motion.frequency_hz - expected_frequency) *
       context.observation_seconds;
   if (frequency_error_bins > options.frequency_tolerance_bins) {
     return std::nullopt;
   }
 
   const double fast_duty_cycle =
-      child.frequency >= parent.frequency ? child.duty_cycle
-                                          : parent.duty_cycle;
+      child.best.peak.motion.frequency_hz >= parent.best.peak.motion.frequency_hz
+          ? child.best.peak.duty_cycle
+          : parent.best.peak.duty_cycle;
   const double phase_distance = frequency_error_bins / fast_duty_cycle;
   if (phase_distance > options.phase_distance_max) {
     return std::nullopt;
@@ -217,11 +232,11 @@ std::optional<HarmonicRelation> test_harmonic_relation(
   }
 
   const double expected_snr =
-      static_cast<double>(parent.snr) /
+      static_cast<double>(parent.best.peak.snr) /
       std::sqrt(static_cast<double>(harmonic_ratio->numerator) *
                 static_cast<double>(harmonic_ratio->denominator));
   const double snr_distance =
-      std::abs(static_cast<double>(child.snr) - expected_snr);
+      std::abs(static_cast<double>(child.best.peak.snr) - expected_snr);
   if (options.use_snr_consistency &&
       snr_distance > options.snr_distance_max) {
     return std::nullopt;

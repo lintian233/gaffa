@@ -23,21 +23,39 @@ void validate_options(double observation_seconds,
 }
 
 void validate_peak(const DmPeak& peak) {
-  if (!std::isfinite(peak.dm) || !std::isfinite(peak.peak.period) ||
-      !std::isfinite(peak.peak.frequency) ||
+  if (!std::isfinite(peak.dm) ||
+      !std::isfinite(peak.peak.motion.reference_time_seconds) ||
+      !std::isfinite(peak.peak.motion.frequency_hz) ||
+      !std::isfinite(peak.peak.motion.acceleration_m_per_s2) ||
+      !std::isfinite(peak.peak.motion.jerk_m_per_s3) ||
+      !std::isfinite(peak.peak.motion.snap_m_per_s4) ||
       !std::isfinite(peak.peak.duty_cycle) ||
       !std::isfinite(peak.peak.snr)) {
     throw std::invalid_argument(
         "Candidate selection peaks must contain finite scientific values");
   }
+  if (peak.peak.motion.order != MotionOrder::Frequency) {
+    throw std::invalid_argument(
+        "Candidate selection currently supports frequency-only periodic peaks");
+  }
+  if (!(peak.peak.motion.frequency_hz > 0.0)) {
+    throw std::invalid_argument(
+        "Candidate selection peak frequency_hz must be > 0");
+  }
 }
 
 bool is_better_dm_peak_for_candidate(const DmPeak& lhs, const DmPeak& rhs) {
-  if (is_better_ffa_peak(lhs.peak, rhs.peak)) {
-    return true;
+  if (lhs.peak.snr != rhs.peak.snr) {
+    return lhs.peak.snr > rhs.peak.snr;
   }
-  if (is_better_ffa_peak(rhs.peak, lhs.peak)) {
-    return false;
+  if (lhs.peak.motion.frequency_hz != rhs.peak.motion.frequency_hz) {
+    return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
+  }
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
+  }
+  if (lhs.peak.phase_bin != rhs.peak.phase_bin) {
+    return lhs.peak.phase_bin < rhs.peak.phase_bin;
   }
   if (lhs.dm_index != rhs.dm_index) {
     return lhs.dm_index < rhs.dm_index;
@@ -46,27 +64,28 @@ bool is_better_dm_peak_for_candidate(const DmPeak& lhs, const DmPeak& rhs) {
 }
 
 bool is_better_candidate(const Candidate& lhs, const Candidate& rhs) {
-  if (is_better_dm_peak_for_candidate(lhs.best_peak, rhs.best_peak)) {
+  if (is_better_dm_peak_for_candidate(lhs.best, rhs.best)) {
     return true;
   }
-  if (is_better_dm_peak_for_candidate(rhs.best_peak, lhs.best_peak)) {
+  if (is_better_dm_peak_for_candidate(rhs.best, lhs.best)) {
     return false;
   }
   if (lhs.peak_count != rhs.peak_count) {
     return lhs.peak_count > rhs.peak_count;
   }
-  if (lhs.frequency != rhs.frequency) {
-    return lhs.frequency < rhs.frequency;
+  if (lhs.best.peak.motion.frequency_hz != rhs.best.peak.motion.frequency_hz) {
+    return lhs.best.peak.motion.frequency_hz <
+           rhs.best.peak.motion.frequency_hz;
   }
-  return lhs.dm_index < rhs.dm_index;
+  return lhs.best.dm_index < rhs.best.dm_index;
 }
 
 bool peak_order(const DmPeak& lhs, const DmPeak& rhs) {
-  if (lhs.peak.frequency != rhs.peak.frequency) {
-    return lhs.peak.frequency < rhs.peak.frequency;
+  if (lhs.peak.motion.frequency_hz != rhs.peak.motion.frequency_hz) {
+    return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
   }
-  if (lhs.peak.width != rhs.peak.width) {
-    return lhs.peak.width < rhs.peak.width;
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
   }
   if (lhs.dm_index != rhs.dm_index) {
     return lhs.dm_index < rhs.dm_index;
@@ -78,15 +97,15 @@ bool dm_group_order(const DmPeak& lhs, const DmPeak& rhs) {
   if (lhs.dm_index != rhs.dm_index) {
     return lhs.dm_index < rhs.dm_index;
   }
-  if (lhs.peak.width != rhs.peak.width) {
-    return lhs.peak.width < rhs.peak.width;
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
   }
-  return lhs.peak.frequency < rhs.peak.frequency;
+  return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
 }
 
 bool width_then_dm_group_order(const DmPeak& lhs, const DmPeak& rhs) {
-  if (lhs.peak.width != rhs.peak.width) {
-    return lhs.peak.width < rhs.peak.width;
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
   }
   return dm_group_order(lhs, rhs);
 }
@@ -105,35 +124,56 @@ Candidate make_candidate(std::vector<DmPeak>::const_iterator begin,
   }
 
   auto best = begin;
-  std::size_t dm_index_min = std::numeric_limits<std::size_t>::max();
-  std::size_t dm_index_max = 0;
-  double frequency_min = std::numeric_limits<double>::infinity();
-  double frequency_max = -std::numeric_limits<double>::infinity();
+  CandidateExtent extent{
+      .dm_index_min = std::numeric_limits<std::size_t>::max(),
+      .dm_index_max = 0,
+      .frequency_hz = {.minimum = std::numeric_limits<double>::infinity(),
+                       .maximum = -std::numeric_limits<double>::infinity()},
+      .motion = {
+          .acceleration_m_per_s2 = {
+              .minimum = std::numeric_limits<double>::infinity(),
+              .maximum = -std::numeric_limits<double>::infinity()},
+          .jerk_m_per_s3 = {.minimum = std::numeric_limits<double>::infinity(),
+                            .maximum = -std::numeric_limits<double>::infinity()},
+          .snap_m_per_s4 = {.minimum = std::numeric_limits<double>::infinity(),
+                            .maximum = -std::numeric_limits<double>::infinity()},
+      },
+  };
 
   for (auto current = begin; current != end; ++current) {
     if (is_better_dm_peak_for_candidate(*current, *best)) {
       best = current;
     }
-    dm_index_min = std::min(dm_index_min, current->dm_index);
-    dm_index_max = std::max(dm_index_max, current->dm_index);
-    frequency_min = std::min(frequency_min, current->peak.frequency);
-    frequency_max = std::max(frequency_max, current->peak.frequency);
+    extent.dm_index_min = std::min(extent.dm_index_min, current->dm_index);
+    extent.dm_index_max = std::max(extent.dm_index_max, current->dm_index);
+    extent.frequency_hz.minimum = std::min(
+        extent.frequency_hz.minimum, current->peak.motion.frequency_hz);
+    extent.frequency_hz.maximum = std::max(
+        extent.frequency_hz.maximum, current->peak.motion.frequency_hz);
+    extent.motion.acceleration_m_per_s2.minimum = std::min(
+        extent.motion.acceleration_m_per_s2.minimum,
+        current->peak.motion.acceleration_m_per_s2);
+    extent.motion.acceleration_m_per_s2.maximum = std::max(
+        extent.motion.acceleration_m_per_s2.maximum,
+        current->peak.motion.acceleration_m_per_s2);
+    extent.motion.jerk_m_per_s3.minimum = std::min(
+        extent.motion.jerk_m_per_s3.minimum,
+        current->peak.motion.jerk_m_per_s3);
+    extent.motion.jerk_m_per_s3.maximum = std::max(
+        extent.motion.jerk_m_per_s3.maximum,
+        current->peak.motion.jerk_m_per_s3);
+    extent.motion.snap_m_per_s4.minimum = std::min(
+        extent.motion.snap_m_per_s4.minimum,
+        current->peak.motion.snap_m_per_s4);
+    extent.motion.snap_m_per_s4.maximum = std::max(
+        extent.motion.snap_m_per_s4.maximum,
+        current->peak.motion.snap_m_per_s4);
   }
 
   return Candidate{
-      .dm = best->dm,
-      .dm_index = best->dm_index,
-      .period = best->peak.period,
-      .frequency = best->peak.frequency,
-      .width = best->peak.width,
-      .duty_cycle = best->peak.duty_cycle,
-      .snr = best->peak.snr,
+      .best = *best,
       .peak_count = static_cast<std::size_t>(end - begin),
-      .dm_index_min = dm_index_min,
-      .dm_index_max = dm_index_max,
-      .frequency_min = frequency_min,
-      .frequency_max = frequency_max,
-      .best_peak = *best,
+      .extent = extent,
   };
 }
 
@@ -153,10 +193,11 @@ void append_dm_clusters(std::vector<DmPeak>::iterator begin,
 
   auto cluster_begin = begin;
   std::size_t previous_dm_index = begin->dm_index;
-  std::size_t previous_width = begin->peak.width;
+  std::size_t previous_width = begin->peak.boxcar_width_bins;
   for (auto current = std::next(begin); current != end; ++current) {
     const bool same_width =
-        options.cluster_across_widths || current->peak.width == previous_width;
+        options.cluster_across_widths ||
+        current->peak.boxcar_width_bins == previous_width;
     const bool same_dm =
         same_dm_cluster(previous_dm_index, current->dm_index,
                         options.dm_cluster_radius);
@@ -165,7 +206,7 @@ void append_dm_clusters(std::vector<DmPeak>::iterator begin,
       cluster_begin = current;
     }
     previous_dm_index = current->dm_index;
-    previous_width = current->peak.width;
+    previous_width = current->peak.boxcar_width_bins;
   }
   candidates.push_back(make_candidate(cluster_begin, end));
 }
@@ -192,14 +233,15 @@ std::vector<Candidate> select_candidates_cpu(
   std::vector<Candidate> candidates;
 
   auto frequency_begin = sorted_peaks.begin();
-  double previous_frequency = frequency_begin->peak.frequency;
+  double previous_frequency = frequency_begin->peak.motion.frequency_hz;
   for (auto current = std::next(sorted_peaks.begin());
        current != sorted_peaks.end(); ++current) {
-    if (current->peak.frequency - previous_frequency > frequency_radius_hz) {
+    if (current->peak.motion.frequency_hz - previous_frequency >
+        frequency_radius_hz) {
       append_dm_clusters(frequency_begin, current, options, candidates);
       frequency_begin = current;
     }
-    previous_frequency = current->peak.frequency;
+    previous_frequency = current->peak.motion.frequency_hz;
   }
   append_dm_clusters(frequency_begin, sorted_peaks.end(), options, candidates);
 

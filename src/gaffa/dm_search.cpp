@@ -87,11 +87,17 @@ void validate_dm_search_inputs(DedispersedShape shape,
 }
 
 bool is_better_dm_peak(const DmPeak& lhs, const DmPeak& rhs) {
-  if (is_better_ffa_peak(lhs.peak, rhs.peak)) {
-    return true;
+  if (lhs.peak.snr != rhs.peak.snr) {
+    return lhs.peak.snr > rhs.peak.snr;
   }
-  if (is_better_ffa_peak(rhs.peak, lhs.peak)) {
-    return false;
+  if (lhs.peak.motion.frequency_hz != rhs.peak.motion.frequency_hz) {
+    return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
+  }
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
+  }
+  if (lhs.peak.phase_bin != rhs.peak.phase_bin) {
+    return lhs.peak.phase_bin < rhs.peak.phase_bin;
   }
   if (lhs.dm_index != rhs.dm_index) {
     return lhs.dm_index < rhs.dm_index;
@@ -121,6 +127,7 @@ void append_ffa_peaks_for_dm(const DedispersedResult<T>& input,
                              std::span<const double> dms,
                              std::size_t dm_index,
                              double tsamp,
+                             double reference_time_seconds,
                              const PreprocessPlan& preprocess,
                              const FfaSearchPlan& ffa_plan,
                              const FfaSearchOptions& ffa_options,
@@ -131,10 +138,12 @@ void append_ffa_peaks_for_dm(const DedispersedResult<T>& input,
   const FfaSearchResult search =
       search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
   for (const auto& peak : search.peaks) {
+    PeriodicPeak periodic_peak = periodic_peak_from_ffa(peak);
+    periodic_peak.motion.reference_time_seconds = reference_time_seconds;
     peaks.push_back(DmPeak{
         .dm = dms[dm_index],
         .dm_index = dm_index,
-        .peak = peak,
+        .peak = std::move(periodic_peak),
     });
   }
 }
@@ -153,6 +162,14 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
   };
   const FfaSearchPlan ffa_plan =
       make_riptide_ffa_plan(input.shape.nsamples, tsamp, options.plan);
+  // All task outputs describe the same input observation, including tasks that
+  // downsample internally. Use that observation's midpoint as their common
+  // physical epoch rather than deriving an epoch from each prepared task.
+  const double reference_time_seconds =
+      0.5 * static_cast<double>(input.shape.nsamples) * tsamp;
+  if (!std::isfinite(reference_time_seconds)) {
+    throw std::overflow_error("DM search reference time is not finite");
+  }
 
   std::vector<DmPeak> global_peaks;
   std::exception_ptr error;
@@ -170,6 +187,7 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
       }
       try {
         append_ffa_peaks_for_dm(input, dms, dm_index, tsamp,
+                                reference_time_seconds,
                                 options.preprocess, ffa_plan, ffa_options,
                                 local_peaks);
       } catch (...) {

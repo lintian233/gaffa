@@ -4,6 +4,7 @@
 #include "gaffa/ffa_peak.h"
 #include "gaffa/ffa_plan.h"
 #include "gaffa/ffa_search.h"
+#include "gaffa/periodic_peak.h"
 #include "gaffa/preprocessing.h"
 
 #include <cstddef>
@@ -12,12 +13,6 @@
 #include <vector>
 
 namespace gaffa {
-
-struct DmPeak {
-  double dm = 0.0;
-  std::size_t dm_index = 0;
-  FfaPeak peak{};
-};
 
 struct DmSearchOptions {
   RiptideFfaPlanOptions plan{};

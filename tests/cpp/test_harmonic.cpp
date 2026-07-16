@@ -17,19 +17,14 @@ gaffa::DmPeak dm_peak(double dm,
   return gaffa::DmPeak{
       .dm = dm,
       .dm_index = dm_index,
-      .peak =
-          gaffa::FfaPeak{
-              .period = 1.0 / frequency,
-              .frequency = frequency,
-              .width = width,
-              .duty_cycle = static_cast<double>(width) / 100.0,
-              .width_index = width - 1,
-              .period_index = 0,
-              .phase = 0,
-              .shift = 0,
-              .bins = 100,
-              .snr = snr,
-          },
+      .peak = {
+          .motion = {.frequency_hz = frequency},
+          .phase_bin = 0,
+          .phase_bins = 100,
+          .boxcar_width_bins = width,
+          .duty_cycle = static_cast<double>(width) / 100.0,
+          .snr = snr,
+      },
   };
 }
 
@@ -39,19 +34,13 @@ gaffa::Candidate candidate(double dm,
                            float snr) {
   const auto peak = dm_peak(dm, dm_index, frequency, 2, snr);
   return gaffa::Candidate{
-      .dm = dm,
-      .dm_index = dm_index,
-      .period = 1.0 / frequency,
-      .frequency = frequency,
-      .width = 2,
-      .duty_cycle = 0.02,
-      .snr = snr,
+      .best = peak,
       .peak_count = 1,
-      .dm_index_min = dm_index,
-      .dm_index_max = dm_index,
-      .frequency_min = frequency,
-      .frequency_max = frequency,
-      .best_peak = peak,
+      .extent = {
+          .dm_index_min = dm_index,
+          .dm_index_max = dm_index,
+          .frequency_hz = {.minimum = frequency, .maximum = frequency},
+      },
   };
 }
 
@@ -88,7 +77,20 @@ TEST(HarmonicFlagging, RejectsInvalidInputs) {
                std::invalid_argument);
 
   auto bad_candidate = candidates.front();
-  bad_candidate.frequency = INFINITY;
+  bad_candidate.best.peak.motion.frequency_hz = INFINITY;
+  EXPECT_THROW((void)gaffa::flag_harmonics_cpu(
+                   std::vector<gaffa::Candidate>{bad_candidate}, context()),
+               std::invalid_argument);
+
+  bad_candidate = candidates.front();
+  bad_candidate.best.peak.motion.acceleration_m_per_s2 = INFINITY;
+  EXPECT_THROW((void)gaffa::flag_harmonics_cpu(
+                   std::vector<gaffa::Candidate>{bad_candidate}, context()),
+               std::invalid_argument);
+
+  bad_candidate = candidates.front();
+  bad_candidate.best.peak.motion.order = gaffa::MotionOrder::Acceleration;
+  bad_candidate.best.peak.motion.acceleration_m_per_s2 = 1.0;
   EXPECT_THROW((void)gaffa::flag_harmonics_cpu(
                    std::vector<gaffa::Candidate>{bad_candidate}, context()),
                std::invalid_argument);
@@ -242,5 +244,5 @@ TEST(HarmonicFiltering, RemovesFlaggedHarmonicsAndAppliesCap) {
   const auto filtered = gaffa::remove_harmonics_cpu(flagged, 1);
 
   ASSERT_EQ(filtered.size(), 1);
-  EXPECT_DOUBLE_EQ(filtered.front().frequency, 1.0);
+  EXPECT_DOUBLE_EQ(filtered.front().best.peak.motion.frequency_hz, 1.0);
 }

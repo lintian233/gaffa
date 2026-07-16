@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gaffa/cuda_memory.h"
+#include "gaffa/periodic_peak.h"
 
 #include <cuda_runtime_api.h>
 
@@ -11,22 +12,17 @@
 
 namespace gaffa {
 
-// Inclusive numeric range used by Loki's Taylor-parameter search grid.
-struct ClosedRange {
-  double minimum = 0.0;
-  double maximum = 0.0;
-};
-
-// Loki supports contiguous Taylor models only: frequency; acceleration plus
-// frequency; jerk plus acceleration plus frequency; or snap through
-// frequency. Values retain Loki's parameter convention. The current adapter
+// Loki supports contiguous line-of-sight motion models only: frequency;
+// acceleration plus frequency; jerk plus acceleration plus frequency; or snap
+// through frequency. The motion limits use SI units: m/s^2, m/s^3, and m/s^4.
+// Loki defines the model at the observation midpoint. The current adapter
 // rejects snap plans because Loki's public region planner cannot schedule the
 // four-parameter model yet.
 struct LokiTaylorSearchSpace {
-  ClosedRange frequency_hz{};
-  std::optional<ClosedRange> acceleration{};
-  std::optional<ClosedRange> jerk{};
-  std::optional<ClosedRange> snap{};
+  ValueRange frequency_hz{};
+  std::optional<ValueRange> acceleration_m_per_s2{};
+  std::optional<ValueRange> jerk_m_per_s3{};
+  std::optional<ValueRange> snap_m_per_s4{};
 };
 
 struct LokiPffaPlanOptions {
@@ -92,17 +88,6 @@ struct LokiPffaExecutionOptions {
   std::size_t max_compact_peaks_total = 1'000'000;
 };
 
-struct LokiPffaPeak {
-  float snr = 0.0F;
-  double frequency_hz = 0.0;
-  std::optional<double> loki_acceleration{};
-  std::optional<double> loki_jerk{};
-  std::optional<double> loki_snap{};
-  std::size_t phase_bins = 0;
-  std::size_t boxcar_width = 0;
-  float duty_cycle = 0.0F;
-};
-
 // Reusable, device-affine time-domain Loki P-FFA executor. It accepts one
 // normalized time series. The program owns an explicit unit-variance buffer;
 // it does not infer or modify the caller's signal statistics. A Program is
@@ -121,7 +106,7 @@ class LokiPffaProgram {
   [[nodiscard]] int device_id() const noexcept;
   [[nodiscard]] const LokiPffaPlan& plan() const noexcept;
 
-  std::vector<LokiPffaPeak> search(
+  std::vector<PeriodicPeak> search(
       CudaSpan<const float> normalised_time_series,
       LokiPffaExecutionOptions options = {});
 

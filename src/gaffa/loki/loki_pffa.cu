@@ -104,17 +104,19 @@ std::size_t checked_add(std::size_t lhs, std::size_t rhs,
 std::vector<loki::ParamLimit> make_loki_limits(
     const LokiTaylorSearchSpace& search_space) {
   std::vector<loki::ParamLimit> limits;
-  if (search_space.snap.has_value()) {
+  if (search_space.snap_m_per_s4.has_value()) {
     limits.push_back(
-        {.min = search_space.snap->minimum, .max = search_space.snap->maximum});
+        {.min = search_space.snap_m_per_s4->minimum,
+         .max = search_space.snap_m_per_s4->maximum});
   }
-  if (search_space.jerk.has_value()) {
+  if (search_space.jerk_m_per_s3.has_value()) {
     limits.push_back(
-        {.min = search_space.jerk->minimum, .max = search_space.jerk->maximum});
+        {.min = search_space.jerk_m_per_s3->minimum,
+         .max = search_space.jerk_m_per_s3->maximum});
   }
-  if (search_space.acceleration.has_value()) {
-    limits.push_back({.min = search_space.acceleration->minimum,
-                      .max = search_space.acceleration->maximum});
+  if (search_space.acceleration_m_per_s2.has_value()) {
+    limits.push_back({.min = search_space.acceleration_m_per_s2->minimum,
+                      .max = search_space.acceleration_m_per_s2->maximum});
   }
   limits.push_back({.min = search_space.frequency_hz.minimum,
                     .max = search_space.frequency_hz.maximum});
@@ -174,8 +176,8 @@ struct LokiPffaProgram::Impl {
   [[nodiscard]] static loki::search::PulsarSearchConfig make_base_config(
       const LokiPffaPlan& plan, std::size_t budget_bytes);
   void initialize(cudaStream_t stream);
-  [[nodiscard]] static LokiPffaPeak make_peak(const Region& region, float snr,
-                                               std::uint32_t flat_index);
+  [[nodiscard]] PeriodicPeak make_peak(const Region& region, float snr,
+                                       std::uint32_t flat_index) const;
 
   ~Impl() {
     if (options.device_id < 0) {
@@ -392,9 +394,9 @@ void LokiPffaProgram::Impl::initialize(cudaStream_t stream) {
   layout.emplace(std::move(new_layout));
 }
 
-LokiPffaPeak LokiPffaProgram::Impl::make_peak(const Region& region,
-                                               float snr,
-                                               std::uint32_t flat_index) {
+PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
+                                              float snr,
+                                              std::uint32_t flat_index) const {
   const std::size_t width_count = region.widths.size();
   const std::size_t coordinate_index = flat_index / width_count;
   const std::size_t width_index = flat_index % width_count;
@@ -417,22 +419,32 @@ LokiPffaPeak LokiPffaProgram::Impl::make_peak(const Region& region,
     values.push_back(parameter_value(limits[index], counts[index], parameter_index));
   }
 
-  LokiPffaPeak peak{
-      .snr = snr,
-      .frequency_hz = values.back(),
+  PeriodicPeak peak{
+      .motion = {
+          .order = MotionOrder::Frequency,
+          .reference_time_seconds =
+              0.5 * static_cast<double>(plan.input_nsamples()) *
+              plan.tsamp_seconds(),
+          .frequency_hz = values.back(),
+      },
+      .phase_bin = std::nullopt,
       .phase_bins = static_cast<std::size_t>(region.config.get_nbins()),
-      .boxcar_width = region.widths[width_index],
+      .boxcar_width_bins = region.widths[width_index],
+      .snr = snr,
   };
-  peak.duty_cycle = static_cast<float>(peak.boxcar_width) /
-                    static_cast<float>(peak.phase_bins);
+  peak.duty_cycle = static_cast<double>(peak.boxcar_width_bins) /
+                    static_cast<double>(peak.phase_bins);
   if (values.size() >= 2) {
-    peak.loki_acceleration = values[values.size() - 2];
+    peak.motion.order = MotionOrder::Acceleration;
+    peak.motion.acceleration_m_per_s2 = values[values.size() - 2];
   }
   if (values.size() >= 3) {
-    peak.loki_jerk = values[values.size() - 3];
+    peak.motion.order = MotionOrder::Jerk;
+    peak.motion.jerk_m_per_s3 = values[values.size() - 3];
   }
   if (values.size() >= 4) {
-    peak.loki_snap = values[values.size() - 4];
+    peak.motion.order = MotionOrder::Snap;
+    peak.motion.snap_m_per_s4 = values[values.size() - 4];
   }
   return peak;
 }
@@ -457,7 +469,7 @@ const LokiPffaPlan& LokiPffaProgram::plan() const noexcept {
   return impl_->plan;
 }
 
-std::vector<LokiPffaPeak> LokiPffaProgram::search(
+std::vector<PeriodicPeak> LokiPffaProgram::search(
     CudaSpan<const float> normalised_time_series,
     LokiPffaExecutionOptions execution_options) {
   if (normalised_time_series.data == nullptr ||
@@ -484,7 +496,7 @@ std::vector<LokiPffaPeak> LokiPffaProgram::search(
   }
   impl_->initialize(execution_options.stream);
 
-  std::vector<LokiPffaPeak> peaks;
+  std::vector<PeriodicPeak> peaks;
   for (const auto& region : impl_->layout->regions) {
     check_cuda(cudaMemcpyAsync(impl_->widths.data(), region.widths.data(),
                                region.widths.size() * sizeof(std::uint32_t),
@@ -531,7 +543,8 @@ std::vector<LokiPffaPeak> LokiPffaProgram::search(
                "cudaStreamSynchronize Loki compact peaks");
     peaks.reserve(checked_add(peaks.size(), passing, "Loki peak count overflow"));
     for (std::size_t index = 0; index < passing; ++index) {
-      peaks.push_back(Impl::make_peak(region, host_scores[index], host_indices[index]));
+      peaks.push_back(
+          impl_->make_peak(region, host_scores[index], host_indices[index]));
     }
     // FFACUDA owns the region-specific phase map. Reset under the owning
     // device guard before moving on to the next region.
