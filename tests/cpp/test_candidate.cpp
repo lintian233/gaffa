@@ -113,6 +113,24 @@ TEST(CandidateClustering, WidthPolicyIsExplicit) {
   EXPECT_EQ(merged.candidates.front().best.peak.boxcar_width_bins, 4);
 }
 
+TEST(CandidateClustering, StrictWidthPolicyAlsoRequiresProfileResolution) {
+  auto first = dm_peak(10.0, 0, 1.0000, 4, 7.0F);
+  first.peak.phase_bins = 180;
+  auto second = dm_peak(11.0, 1, 1.0005, 4, 9.0F);
+  second.peak.phase_bins = 256;
+
+  const auto groups = std::vector<gaffa::DmPeakGroups>{
+      group({first}),
+      group({second}),
+  };
+  const auto strict = cluster(
+      groups, {.cluster_across_widths = false});
+  const auto permissive = cluster(groups);
+
+  EXPECT_EQ(strict.candidates.size(), 2);
+  EXPECT_EQ(permissive.candidates.size(), 1);
+}
+
 TEST(CandidateClustering, SupportsTaylorMotion) {
   auto first = dm_peak(10.0, 0, 10.0, 2, 7.0F);
   first.peak.motion = {

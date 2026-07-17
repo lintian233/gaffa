@@ -179,7 +179,8 @@ bool width_compatible(const DmPeak& lhs,
                       const DmPeak& rhs,
                       bool cluster_across_widths) {
   return cluster_across_widths ||
-         lhs.peak.boxcar_width_bins == rhs.peak.boxcar_width_bins;
+         (lhs.peak.phase_bins == rhs.peak.phase_bins &&
+          lhs.peak.boxcar_width_bins == rhs.peak.boxcar_width_bins);
 }
 
 bool peaks_link(const DmPeak& lhs,
