@@ -56,12 +56,14 @@ TEST(DmSearch, FindsEveryDmPeakAndAttachesMetadata) {
       gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
                                          small_search_options());
 
-  ASSERT_GE(result.peaks.size(), 2);
-  EXPECT_EQ(result.peaks.front().dm_index, 1);
-  EXPECT_DOUBLE_EQ(result.peaks.front().dm, 20.0);
-  EXPECT_GT(result.peaks.front().peak.snr, 0.0F);
-  for (const auto& peak : result.peaks) {
-    EXPECT_DOUBLE_EQ(peak.peak.motion.reference_time_seconds, 4.0);
+  ASSERT_EQ(result.peak_groups.size(), 2);
+  EXPECT_EQ(result.peak_groups.front().members.front().dm_index, 0);
+  EXPECT_DOUBLE_EQ(result.peak_groups[1].members.front().dm, 20.0);
+  for (const auto& groups : result.peak_groups) {
+    ASSERT_FALSE(groups.members.empty());
+    for (const auto& peak : groups.members) {
+      EXPECT_DOUBLE_EQ(peak.peak.motion.reference_time_seconds, 4.0);
+    }
   }
 }
 
@@ -79,9 +81,10 @@ TEST(DmSearch, AppliesPreprocessPlanBeforeSearch) {
   const auto result = gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
                                                          options);
 
-  ASSERT_FALSE(result.peaks.empty());
-  EXPECT_EQ(result.peaks.front().dm_index, 0);
-  EXPECT_DOUBLE_EQ(result.peaks.front().dm, 30.0);
+  ASSERT_EQ(result.peak_groups.size(), 1);
+  ASSERT_FALSE(result.peak_groups.front().members.empty());
+  EXPECT_EQ(result.peak_groups.front().members.front().dm_index, 0);
+  EXPECT_DOUBLE_EQ(result.peak_groups.front().members.front().dm, 30.0);
 }
 
 TEST(DmSearch, KeepsAllSignificantPeaksInsteadOfTopK) {
@@ -98,8 +101,10 @@ TEST(DmSearch, KeepsAllSignificantPeaksInsteadOfTopK) {
       gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
                                          small_search_options());
 
-  ASSERT_GE(result.peaks.size(), 2);
-  EXPECT_EQ(result.peaks.front().dm_index, 1);
+  ASSERT_EQ(result.peak_groups.size(), 2);
+  EXPECT_GE(result.peak_groups[0].members.size() +
+                result.peak_groups[1].members.size(),
+            2);
 }
 
 TEST(DmSearch, ParallelPathMergesPeaks) {
@@ -119,9 +124,9 @@ TEST(DmSearch, ParallelPathMergesPeaks) {
       gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
                                          small_search_options());
 
-  ASSERT_GE(result.peaks.size(), 5);
-  EXPECT_EQ(result.peaks.front().dm_index, 4);
-  EXPECT_DOUBLE_EQ(result.peaks.front().dm, 50.0);
+  ASSERT_EQ(result.peak_groups.size(), 5);
+  EXPECT_EQ(result.peak_groups.front().members.front().dm_index, 0);
+  EXPECT_DOUBLE_EQ(result.peak_groups.back().members.front().dm, 50.0);
 }
 
 TEST(DmSearch, RejectsInvalidInputs) {

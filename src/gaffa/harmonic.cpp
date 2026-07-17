@@ -1,5 +1,7 @@
 #include "gaffa/harmonic.h"
 
+#include "gaffa/periodic_match.h"
+
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -18,13 +20,12 @@ struct HarmonicRatio {
   double value = 1.0;
 };
 
-bool is_better_candidate_for_harmonic(const Candidate& lhs,
-                                      const Candidate& rhs) {
+bool is_better_candidate(const Candidate& lhs, const Candidate& rhs) {
   if (lhs.best.peak.snr != rhs.best.peak.snr) {
     return lhs.best.peak.snr > rhs.best.peak.snr;
   }
-  if (lhs.peak_count != rhs.peak_count) {
-    return lhs.peak_count > rhs.peak_count;
+  if (lhs.member_count != rhs.member_count) {
+    return lhs.member_count > rhs.member_count;
   }
   if (lhs.best.peak.motion.frequency_hz !=
       rhs.best.peak.motion.frequency_hz) {
@@ -56,8 +57,9 @@ void validate_options(const HarmonicOptions& options) {
   if (options.denominator_max == 0) {
     throw std::invalid_argument("Harmonic denominator_max must be > 0");
   }
-  if (options.frequency_tolerance_bins < 0.0 ||
-      !std::isfinite(options.frequency_tolerance_bins)) {
+  if (options.frequency_tolerance_bins &&
+      (*options.frequency_tolerance_bins < 0.0 ||
+       !std::isfinite(*options.frequency_tolerance_bins))) {
     throw std::invalid_argument(
         "Harmonic frequency_tolerance_bins must be finite and >= 0");
   }
@@ -78,21 +80,20 @@ void validate_options(const HarmonicOptions& options) {
   }
 }
 
-void validate_candidate(const Candidate& candidate) {
-  const DmPeak& best = candidate.best;
-  if (!std::isfinite(best.dm) || !std::isfinite(best.peak.duty_cycle) ||
-      !std::isfinite(best.peak.snr)) {
-    throw std::invalid_argument(
-        "Harmonic candidates must contain finite scientific values");
-  }
-  validate_periodic_motion(best.peak.motion);
-  if (best.peak.motion.order != MotionOrder::Frequency) {
-    throw std::invalid_argument(
-        "Harmonic filtering currently supports frequency-only candidates");
-  }
-  if (!(best.peak.duty_cycle > 0.0) || !(best.peak.snr >= 0.0F)) {
-    throw std::invalid_argument(
-        "Harmonic candidate duty_cycle or snr is invalid");
+void validate_candidate_set(const CandidateSet& candidate_set) {
+  for (const Candidate& candidate : candidate_set.candidates) {
+    const DmPeak& best = candidate.best;
+    if (!std::isfinite(best.dm) || !std::isfinite(best.peak.duty_cycle) ||
+        !std::isfinite(best.peak.snr)) {
+      throw std::invalid_argument(
+          "Harmonic candidates must contain finite scientific values");
+    }
+    validate_periodic_motion(best.peak.motion);
+    if (!(best.peak.duty_cycle > 0.0) || !(best.peak.snr >= 0.0F)) {
+      throw std::invalid_argument(
+          "Harmonic candidate duty_cycle or snr is invalid");
+    }
+    (void)candidate_set.members_of(candidate);
   }
 }
 
@@ -104,9 +105,9 @@ std::vector<HarmonicRatio> make_harmonic_ratios(
        ++numerator) {
     for (std::size_t denominator = 1; denominator <= options.denominator_max;
          ++denominator) {
-      const auto divisor = std::gcd(numerator, denominator);
-      const auto reduced_numerator = numerator / divisor;
-      const auto reduced_denominator = denominator / divisor;
+      const std::size_t divisor = std::gcd(numerator, denominator);
+      const std::size_t reduced_numerator = numerator / divisor;
+      const std::size_t reduced_denominator = denominator / divisor;
       if (reduced_numerator == reduced_denominator) {
         continue;
       }
@@ -118,7 +119,6 @@ std::vector<HarmonicRatio> make_harmonic_ratios(
       });
     }
   }
-
   std::sort(ratios.begin(), ratios.end(),
             [](const HarmonicRatio& lhs, const HarmonicRatio& rhs) {
               if (lhs.value != rhs.value) {
@@ -145,27 +145,29 @@ std::optional<HarmonicRatio> nearest_harmonic_ratio(
   if (!(ratio > 0.0) || ratios.empty()) {
     return std::nullopt;
   }
-
   const auto lower = std::lower_bound(
       ratios.begin(), ratios.end(), ratio,
       [](const HarmonicRatio& lhs, double value) { return lhs.value < value; });
-
   std::optional<HarmonicRatio> best;
-  auto consider = [&](std::vector<HarmonicRatio>::const_iterator it) {
-    if (it == ratios.end()) {
+  auto consider = [&](std::vector<HarmonicRatio>::const_iterator current) {
+    if (current == ratios.end()) {
       return;
     }
-    if (!best ||
-        std::abs(it->value - ratio) < std::abs(best->value - ratio)) {
-      best = *it;
+    if (!best || std::abs(current->value - ratio) <
+                     std::abs(best->value - ratio)) {
+      best = *current;
     }
   };
-
   consider(lower);
   if (lower != ratios.begin()) {
     consider(std::prev(lower));
   }
   return best;
+}
+
+double frequency_at_observation_start(const Candidate& candidate) {
+  const PeriodicMotion& motion = candidate.best.peak.motion;
+  return periodic_frequency_hz_at(motion, -motion.reference_time_seconds);
 }
 
 double pulse_width_seconds(const Candidate& candidate) {
@@ -175,10 +177,10 @@ double pulse_width_seconds(const Candidate& candidate) {
 double dm_distance(const Candidate& parent,
                    const Candidate& child,
                    const HarmonicContext& context) {
-  const double low = std::min(context.frequency_low_mhz,
-                              context.frequency_high_mhz);
-  const double high = std::max(context.frequency_low_mhz,
-                               context.frequency_high_mhz);
+  const double low =
+      std::min(context.frequency_low_mhz, context.frequency_high_mhz);
+  const double high =
+      std::max(context.frequency_low_mhz, context.frequency_high_mhz);
   const double band_delay_ms =
       std::abs(parent.best.dm - child.best.dm) * kDispersionDelayMs *
       std::abs(1.0 / (low * low) - 1.0 / (high * high));
@@ -194,28 +196,32 @@ std::optional<HarmonicRelation> test_harmonic_relation(
     const HarmonicContext& context,
     const HarmonicOptions& options,
     const std::vector<HarmonicRatio>& ratios) {
-  const auto harmonic_ratio =
-      nearest_harmonic_ratio(child.best.peak.motion.frequency_hz /
-                                 parent.best.peak.motion.frequency_hz,
-                             ratios);
-  if (!harmonic_ratio) {
+  const double parent_frequency = frequency_at_observation_start(parent);
+  const double child_frequency = frequency_at_observation_start(child);
+  const auto ratio =
+      nearest_harmonic_ratio(child_frequency / parent_frequency, ratios);
+  if (!ratio) {
     return std::nullopt;
   }
 
-  const double expected_frequency =
-      parent.best.peak.motion.frequency_hz * harmonic_ratio->value;
+  const PhaseDrift phase_drift = harmonic_phase_drift(
+      parent.best.peak.motion, child.best.peak.motion, ratio->value,
+      context.observation_seconds);
+  const FrequencyDrift frequency_drift = harmonic_frequency_drift(
+      parent.best.peak.motion, child.best.peak.motion, ratio->value,
+      context.observation_seconds);
   const double frequency_error_bins =
-      std::abs(child.best.peak.motion.frequency_hz - expected_frequency) *
-      context.observation_seconds;
-  if (frequency_error_bins > options.frequency_tolerance_bins) {
+      frequency_drift.maximum_hz * context.observation_seconds;
+  if (options.frequency_tolerance_bins &&
+      frequency_error_bins > *options.frequency_tolerance_bins) {
     return std::nullopt;
   }
 
-  const double fast_duty_cycle =
-      child.best.peak.motion.frequency_hz >= parent.best.peak.motion.frequency_hz
-          ? child.best.peak.duty_cycle
-          : parent.best.peak.duty_cycle;
-  const double phase_distance = frequency_error_bins / fast_duty_cycle;
+  const double fast_duty_cycle = child_frequency >= parent_frequency
+                                     ? child.best.peak.duty_cycle
+                                     : parent.best.peak.duty_cycle;
+  const double phase_distance =
+      phase_drift.maximum_cycles / fast_duty_cycle;
   if (phase_distance > options.phase_distance_max) {
     return std::nullopt;
   }
@@ -227,8 +233,8 @@ std::optional<HarmonicRelation> test_harmonic_relation(
 
   const double expected_snr =
       static_cast<double>(parent.best.peak.snr) /
-      std::sqrt(static_cast<double>(harmonic_ratio->numerator) *
-                static_cast<double>(harmonic_ratio->denominator));
+      std::sqrt(static_cast<double>(ratio->numerator) *
+                static_cast<double>(ratio->denominator));
   const double snr_distance =
       std::abs(static_cast<double>(child.best.peak.snr) - expected_snr);
   if (options.use_snr_consistency &&
@@ -239,8 +245,10 @@ std::optional<HarmonicRelation> test_harmonic_relation(
   return HarmonicRelation{
       .is_harmonic = true,
       .parent_index = parent_index,
-      .numerator = harmonic_ratio->numerator,
-      .denominator = harmonic_ratio->denominator,
+      .numerator = ratio->numerator,
+      .denominator = ratio->denominator,
+      .maximum_phase_drift_cycles = phase_drift.maximum_cycles,
+      .phase_drift_time_seconds = phase_drift.time_seconds,
       .frequency_error_bins = frequency_error_bins,
       .phase_distance = phase_distance,
       .dm_distance = distance,
@@ -251,65 +259,61 @@ std::optional<HarmonicRelation> test_harmonic_relation(
 
 }  // namespace
 
-std::vector<HarmonicCandidate> flag_harmonics_cpu(
-    std::span<const Candidate> candidates,
+std::vector<HarmonicRelation> flag_harmonics_cpu(
+    const CandidateSet& candidates,
     const HarmonicContext& context,
     const HarmonicOptions& options) {
   validate_context(context);
   validate_options(options);
-  if (candidates.empty()) {
-    return {};
-  }
+  validate_candidate_set(candidates);
 
-  std::vector<HarmonicCandidate> flagged;
-  flagged.reserve(candidates.size());
-  for (const Candidate& candidate : candidates) {
-    validate_candidate(candidate);
-    flagged.push_back(HarmonicCandidate{.candidate = candidate});
-  }
-
-  std::sort(flagged.begin(), flagged.end(),
-            [](const HarmonicCandidate& lhs,
-               const HarmonicCandidate& rhs) {
-              return is_better_candidate_for_harmonic(lhs.candidate,
-                                                      rhs.candidate);
-            });
+  std::vector<HarmonicRelation> relations(candidates.candidates.size());
+  std::vector<std::size_t> order(candidates.candidates.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::sort(order.begin(), order.end(), [&](std::size_t lhs, std::size_t rhs) {
+    return is_better_candidate(candidates.candidates[lhs],
+                               candidates.candidates[rhs]);
+  });
 
   const std::vector<HarmonicRatio> ratios = make_harmonic_ratios(options);
-
-  for (std::size_t parent_index = 0; parent_index < flagged.size();
-       ++parent_index) {
-    if (flagged[parent_index].harmonic.is_harmonic) {
+  for (std::size_t parent_rank = 0; parent_rank < order.size(); ++parent_rank) {
+    const std::size_t parent_index = order[parent_rank];
+    if (relations[parent_index].is_harmonic) {
       continue;
     }
-    const Candidate& parent = flagged[parent_index].candidate;
-    for (std::size_t child_index = parent_index + 1;
-         child_index < flagged.size(); ++child_index) {
-      if (flagged[child_index].harmonic.is_harmonic) {
+    const Candidate& parent = candidates.candidates[parent_index];
+    for (std::size_t child_rank = parent_rank + 1;
+         child_rank < order.size(); ++child_rank) {
+      const std::size_t child_index = order[child_rank];
+      if (relations[child_index].is_harmonic) {
         continue;
       }
-      const Candidate& child = flagged[child_index].candidate;
-      auto relation = test_harmonic_relation(parent, child, parent_index,
-                                             context, options, ratios);
+      const auto relation = test_harmonic_relation(
+          parent, candidates.candidates[child_index], parent_index, context,
+          options, ratios);
       if (relation) {
-        flagged[child_index].harmonic = *relation;
+        relations[child_index] = *relation;
       }
     }
   }
-
-  return flagged;
+  return relations;
 }
 
-std::vector<Candidate> remove_harmonics_cpu(
-    std::span<const HarmonicCandidate> candidates,
+std::vector<std::size_t> remove_harmonics_cpu(
+    const CandidateSet& candidates,
+    std::span<const HarmonicRelation> relations,
     std::size_t max_candidates) {
-  std::vector<Candidate> selected;
-  selected.reserve(candidates.size());
-  for (const HarmonicCandidate& candidate : candidates) {
-    if (candidate.harmonic.is_harmonic) {
+  if (relations.size() != candidates.candidates.size()) {
+    throw std::invalid_argument(
+        "Harmonic relation count must match candidate count");
+  }
+  std::vector<std::size_t> selected;
+  selected.reserve(candidates.candidates.size());
+  for (std::size_t index = 0; index < relations.size(); ++index) {
+    if (relations[index].is_harmonic) {
       continue;
     }
-    selected.push_back(candidate.candidate);
+    selected.push_back(index);
     if (max_candidates != 0 && selected.size() >= max_candidates) {
       break;
     }

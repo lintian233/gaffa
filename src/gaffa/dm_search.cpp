@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cmath>
 #include <exception>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -86,25 +87,6 @@ void validate_dm_search_inputs(DedispersedShape shape,
   }
 }
 
-bool is_better_dm_peak(const DmPeak& lhs, const DmPeak& rhs) {
-  if (lhs.peak.snr != rhs.peak.snr) {
-    return lhs.peak.snr > rhs.peak.snr;
-  }
-  if (lhs.peak.motion.frequency_hz != rhs.peak.motion.frequency_hz) {
-    return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
-  }
-  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
-    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
-  }
-  if (lhs.peak.phase_bin != rhs.peak.phase_bin) {
-    return lhs.peak.phase_bin < rhs.peak.phase_bin;
-  }
-  if (lhs.dm_index != rhs.dm_index) {
-    return lhs.dm_index < rhs.dm_index;
-  }
-  return lhs.dm < rhs.dm;
-}
-
 TimeSeries maybe_preprocess(TimeSeries input, const PreprocessPlan& plan) {
   if (plan.steps.empty()) {
     return input;
@@ -123,20 +105,24 @@ void validate_preprocessed_time_series(const TimeSeries& time_series,
 }
 
 template <typename T>
-void append_ffa_peaks_for_dm(const DedispersedResult<T>& input,
-                             std::span<const double> dms,
-                             std::size_t dm_index,
-                             double tsamp,
-                             double reference_time_seconds,
-                             const PreprocessPlan& preprocess,
-                             const FfaSearchPlan& ffa_plan,
-                             const FfaSearchOptions& ffa_options,
-                             std::vector<DmPeak>& peaks) {
+DmPeakGroups search_ffa_peaks_for_dm(
+    const DedispersedResult<T>& input,
+    std::span<const double> dms,
+    std::size_t dm_index,
+    double tsamp,
+    double reference_time_seconds,
+    double searched_duration_seconds,
+    const PreprocessPlan& preprocess,
+    const FfaSearchPlan& ffa_plan,
+    const FfaSearchOptions& ffa_options,
+    const DmPeakGroupingOptions& grouping) {
   TimeSeries time_series =
       maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
   validate_preprocessed_time_series(time_series, input.shape, tsamp);
   const FfaSearchResult search =
       search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
+  std::vector<DmPeak> peaks;
+  peaks.reserve(search.peaks.size());
   for (const auto& peak : search.peaks) {
     PeriodicPeak periodic_peak = periodic_peak_from_ffa(peak);
     periodic_peak.motion.reference_time_seconds = reference_time_seconds;
@@ -146,6 +132,7 @@ void append_ffa_peaks_for_dm(const DedispersedResult<T>& input,
         .peak = std::move(periodic_peak),
     });
   }
+  return group_dm_peaks_cpu(peaks, searched_duration_seconds, grouping);
 }
 
 template <typename T>
@@ -170,15 +157,21 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
   if (!std::isfinite(reference_time_seconds)) {
     throw std::overflow_error("DM search reference time is not finite");
   }
+  const double searched_duration_seconds =
+      static_cast<double>(input.shape.nsamples) * tsamp;
+  if (!(searched_duration_seconds > 0.0) ||
+      !std::isfinite(searched_duration_seconds)) {
+    throw std::overflow_error("DM search duration is not finite and > 0");
+  }
 
-  std::vector<DmPeak> global_peaks;
+  std::vector<DmPeakGroups> global_peak_groups;
   std::exception_ptr error;
   std::atomic_bool has_error = false;
   const bool parallel = input.shape.ndm > 4;
 
 #pragma omp parallel if(parallel)
   {
-    std::vector<DmPeak> local_peaks;
+    std::vector<DmPeakGroups> local_peak_groups;
 
 #pragma omp for schedule(dynamic, 1)
     for (std::size_t dm_index = 0; dm_index < input.shape.ndm; ++dm_index) {
@@ -186,10 +179,13 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
         continue;
       }
       try {
-        append_ffa_peaks_for_dm(input, dms, dm_index, tsamp,
-                                reference_time_seconds,
-                                options.preprocess, ffa_plan, ffa_options,
-                                local_peaks);
+        DmPeakGroups groups = search_ffa_peaks_for_dm(
+            input, dms, dm_index, tsamp, reference_time_seconds,
+            searched_duration_seconds, options.preprocess, ffa_plan,
+            ffa_options, options.grouping);
+        if (!groups.groups.empty()) {
+          local_peak_groups.push_back(std::move(groups));
+        }
       } catch (...) {
         bool expected = false;
         if (has_error.compare_exchange_strong(expected, true,
@@ -200,10 +196,11 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
       }
     }
 
-#pragma omp critical(dm_search_peaks)
+#pragma omp critical(dm_search_peak_groups)
     {
-      global_peaks.insert(global_peaks.end(), local_peaks.begin(),
-                          local_peaks.end());
+      global_peak_groups.insert(global_peak_groups.end(),
+                                std::make_move_iterator(local_peak_groups.begin()),
+                                std::make_move_iterator(local_peak_groups.end()));
     }
   }
 
@@ -211,9 +208,12 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
     std::rethrow_exception(error);
   }
 
-  std::sort(global_peaks.begin(), global_peaks.end(), is_better_dm_peak);
+  std::sort(global_peak_groups.begin(), global_peak_groups.end(),
+            [](const DmPeakGroups& lhs, const DmPeakGroups& rhs) {
+              return lhs.members.front().dm_index < rhs.members.front().dm_index;
+            });
   return DmSearchResult{
-      .peaks = std::move(global_peaks),
+      .peak_groups = std::move(global_peak_groups),
   };
 }
 

@@ -55,7 +55,8 @@ struct Timings {
   double window = 0.0;
   double preprocess = 0.0;
   double loki_search = 0.0;
-  double candidate = 0.0;
+  double grouping = 0.0;
+  double clustering = 0.0;
   double harmonic = 0.0;
   double total = 0.0;
 };
@@ -85,11 +86,7 @@ struct PrefixWindow {
   }
 };
 
-struct LokiDmPeak {
-  double dm = 0.0;
-  std::size_t dm_index = 0;
-  gaffa::PeriodicPeak peak{};
-};
+using LokiDmPeak = gaffa::DmPeak;
 
 template <typename Function>
 double time_once(Function&& function) {
@@ -169,12 +166,11 @@ PrefixWindow make_prefix_window(std::size_t source_nsamples, WindowMode mode) {
   };
 }
 
-gaffa::CandidateSelectionOptions candidate_options() {
-  return gaffa::CandidateSelectionOptions{
-      .frequency_cluster_radius = 0.1,
-      .dm_cluster_radius = 50,
+gaffa::CandidateClusteringOptions candidate_options() {
+  return gaffa::CandidateClusteringOptions{
+      .max_phase_distance_cycles = 0.1,
+      .max_dm_index_distance = 50,
       .cluster_across_widths = true,
-      .max_candidates = 0,
   };
 }
 
@@ -198,18 +194,6 @@ gaffa::HarmonicContext harmonic_context(
       .observation_seconds = observation_seconds,
       .frequency_low_mhz = *low,
       .frequency_high_mhz = *high,
-  };
-}
-
-gaffa::DmPeak project_loki_peak(const LokiDmPeak& source) {
-  const double frequency = source.peak.motion.frequency_hz;
-  if (!(frequency > 0.0) || !std::isfinite(frequency)) {
-    throw std::runtime_error("Loki returned a non-positive or non-finite frequency");
-  }
-  return gaffa::DmPeak{
-      .dm = source.dm,
-      .dm_index = source.dm_index,
-      .peak = source.peak,
   };
 }
 
@@ -261,7 +245,7 @@ void print_candidate(std::string_view label,
             << " frequency=" << peak.motion.frequency_hz
             << " width=" << peak.boxcar_width_bins
             << " duty_cycle=" << peak.duty_cycle
-            << " peak_count=" << candidate.peak_count
+            << " peak_count=" << candidate.member_count
             << " dm_index_min=" << candidate.extent.dm_index_min
             << " dm_index_max=" << candidate.extent.dm_index_max
             << " frequency_min=" << candidate.extent.frequency_hz.minimum
@@ -269,15 +253,19 @@ void print_candidate(std::string_view label,
 }
 
 void print_harmonic_candidate(std::size_t rank,
-                              const gaffa::HarmonicCandidate& candidate) {
-  const auto& harmonic = candidate.harmonic;
-  const auto& best = candidate.candidate.best;
+                              const gaffa::Candidate& candidate,
+                              const gaffa::HarmonicRelation& harmonic) {
+  const auto& best = candidate.best;
   const auto& peak = best.peak;
   std::cout << "harmonic_candidate"
             << " rank=" << rank
             << " parent_rank=" << harmonic.parent_index
             << " ratio=" << harmonic.numerator << '/' << harmonic.denominator
             << " frequency_error_bins=" << harmonic.frequency_error_bins
+            << " maximum_phase_drift_cycles="
+            << harmonic.maximum_phase_drift_cycles
+            << " phase_drift_time_seconds="
+            << harmonic.phase_drift_time_seconds
             << " phase_distance=" << harmonic.phase_distance
             << " dm_distance=" << harmonic.dm_distance
             << " expected_snr=" << harmonic.expected_snr
@@ -289,7 +277,7 @@ void print_harmonic_candidate(std::size_t rank,
             << " frequency=" << peak.motion.frequency_hz
             << " width=" << peak.boxcar_width_bins
             << " duty_cycle=" << peak.duty_cycle
-            << " peak_count=" << candidate.candidate.peak_count << '\n';
+            << " peak_count=" << candidate.member_count << '\n';
 }
 
 template <typename T>
@@ -488,28 +476,28 @@ int main(int argc, char** argv) {
         },
         filterbank.samples);
 
-    std::vector<gaffa::DmPeak> projected_peaks;
-    projected_peaks.reserve(raw_peaks.size());
-    for (const auto& raw_peak : raw_peaks) {
-      projected_peaks.push_back(project_loki_peak(raw_peak));
-    }
-    std::vector<gaffa::Candidate> candidates;
-    timings.candidate = time_once([&] {
-      candidates = gaffa::select_candidates_cpu(
-          projected_peaks,
-          static_cast<double>(window.search_nsamples) * filterbank.header.tsamp,
+    std::vector<gaffa::DmPeakGroups> peak_groups;
+    const double searched_duration_seconds =
+        static_cast<double>(window.search_nsamples) * filterbank.header.tsamp;
+    gaffa::CandidateSet candidates;
+    timings.grouping = time_once([&] {
+      peak_groups =
+          gaffa::group_dm_peak_batch_cpu(raw_peaks, searched_duration_seconds);
+    });
+    timings.clustering = time_once([&] {
+      candidates = gaffa::cluster_dm_peak_groups_cpu(
+          peak_groups, searched_duration_seconds,
           candidate_options());
     });
-    std::vector<gaffa::HarmonicCandidate> harmonic_candidates;
-    std::vector<gaffa::Candidate> filtered_candidates;
+    std::vector<gaffa::HarmonicRelation> harmonic_candidates;
+    std::vector<std::size_t> filtered_candidates;
     timings.harmonic = time_once([&] {
       harmonic_candidates = gaffa::flag_harmonics_cpu(
           candidates,
-          harmonic_context(filterbank.header,
-                           static_cast<double>(window.search_nsamples) *
-                               filterbank.header.tsamp),
+          harmonic_context(filterbank.header, searched_duration_seconds),
           harmonic_options());
-      filtered_candidates = gaffa::remove_harmonics_cpu(harmonic_candidates);
+      filtered_candidates =
+          gaffa::remove_harmonics_cpu(candidates, harmonic_candidates);
     });
     timings.total = std::chrono::duration<double>(
                         std::chrono::steady_clock::now() - total_begin)
@@ -519,8 +507,8 @@ int main(int argc, char** argv) {
     std::sort(sorted_raw.begin(), sorted_raw.end(), better_loki_peak);
     const std::size_t harmonic_count = std::count_if(
         harmonic_candidates.begin(), harmonic_candidates.end(),
-        [](const gaffa::HarmonicCandidate& candidate) {
-          return candidate.harmonic.is_harmonic;
+        [](const gaffa::HarmonicRelation& relation) {
+          return relation.is_harmonic;
         });
     std::size_t free_bytes = 0;
     std::size_t total_bytes = 0;
@@ -538,8 +526,8 @@ int main(int argc, char** argv) {
               << " phase_bins_min=" << args.phase_bins_min
               << " phase_bins_max=" << args.phase_bins_max
               << " duty_cycle_max=" << args.duty_cycle_max
-              << " taylor_model=frequency"
-              << " candidate_projection=frequency_only"
+              << " taylor_model=backend_plan"
+              << " candidate_projection=taylor_phase"
               << " window_mode=" << args.window_mode
               << " print_peaks=" << args.print_peaks << '\n';
     std::cout << "window source_nsamples=" << window.source_nsamples
@@ -559,7 +547,8 @@ int main(int argc, char** argv) {
               << " window_seconds=" << timings.window
               << " preprocess_seconds=" << timings.preprocess
               << " loki_search_seconds=" << timings.loki_search
-              << " candidate_seconds=" << timings.candidate
+              << " grouping_seconds=" << timings.grouping
+              << " clustering_seconds=" << timings.clustering
               << " harmonic_seconds=" << timings.harmonic
               << " total_seconds=" << timings.total << '\n';
     std::cout << "memory dedispersed_bytes=" << dedispersed_bytes
@@ -568,8 +557,13 @@ int main(int argc, char** argv) {
               << " preprocess_workspace_bytes=" << preprocess_workspace_bytes
               << " free_device_bytes=" << free_bytes
               << " total_device_bytes=" << total_bytes << '\n';
+    std::size_t local_group_count = 0;
+    for (const auto& groups : peak_groups) {
+      local_group_count += groups.groups.size();
+    }
     std::cout << "result raw_loki_peaks=" << raw_peaks.size()
-              << " raw_candidates=" << candidates.size()
+              << " local_groups=" << local_group_count
+              << " clustered_candidates=" << candidates.candidates.size()
               << " harmonic_candidates=" << harmonic_count
               << " candidates=" << filtered_candidates.size() << '\n';
 
@@ -583,27 +577,31 @@ int main(int argc, char** argv) {
                 << sorted_raw.size() - raw_print_count << '\n';
     }
     const std::size_t candidate_print_count =
-        std::min(args.print_peaks, candidates.size());
+        std::min(args.print_peaks, candidates.candidates.size());
     for (std::size_t rank = 0; rank < candidate_print_count; ++rank) {
-      print_candidate("raw_candidate", rank, candidates[rank]);
+      print_candidate("clustered_candidate", rank,
+                      candidates.candidates[rank]);
     }
-    if (candidate_print_count < candidates.size()) {
-      std::cout << "result raw_candidates_omitted="
-                << candidates.size() - candidate_print_count << '\n';
+    if (candidate_print_count < candidates.candidates.size()) {
+      std::cout << "result clustered_candidates_omitted="
+                << candidates.candidates.size() - candidate_print_count
+                << '\n';
     }
     std::size_t harmonic_printed = 0;
     for (std::size_t rank = 0;
          rank < harmonic_candidates.size() && harmonic_printed < args.print_peaks;
          ++rank) {
-      if (harmonic_candidates[rank].harmonic.is_harmonic) {
-        print_harmonic_candidate(rank, harmonic_candidates[rank]);
+      if (harmonic_candidates[rank].is_harmonic) {
+        print_harmonic_candidate(rank, candidates.candidates[rank],
+                                 harmonic_candidates[rank]);
         ++harmonic_printed;
       }
     }
     const std::size_t final_print_count =
         std::min(args.print_peaks, filtered_candidates.size());
     for (std::size_t rank = 0; rank < final_print_count; ++rank) {
-      print_candidate("candidate", rank, filtered_candidates[rank]);
+      print_candidate("candidate", rank,
+                      candidates.candidates[filtered_candidates[rank]]);
     }
     if (final_print_count < filtered_candidates.size()) {
       std::cout << "result candidates_omitted="

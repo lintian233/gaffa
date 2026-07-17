@@ -53,7 +53,8 @@ struct Timings {
   double convert = 0.0;
   double preprocess = 0.0;
   double ffa = 0.0;
-  double candidate = 0.0;
+  double grouping = 0.0;
+  double clustering = 0.0;
   double harmonic = 0.0;
   double read = 0.0;
   double total = 0.0;
@@ -104,12 +105,11 @@ Args parse_args(int argc, char** argv) {
   return args;
 }
 
-gaffa::CandidateSelectionOptions candidate_options(const Args& args) {
-  return gaffa::CandidateSelectionOptions{
-      .frequency_cluster_radius = 0.1,
-      .dm_cluster_radius = 50,
+gaffa::CandidateClusteringOptions candidate_options() {
+  return gaffa::CandidateClusteringOptions{
+      .max_phase_distance_cycles = 0.1,
+      .max_dm_index_distance = 50,
       .cluster_across_widths = true,
-      .max_candidates = 0,
   };
 }
 
@@ -151,7 +151,7 @@ void print_candidate(std::string_view label,
             << " frequency=" << peak.motion.frequency_hz
             << " width=" << peak.boxcar_width_bins
             << " duty_cycle=" << peak.duty_cycle
-            << " peak_count=" << candidate.peak_count
+            << " peak_count=" << candidate.member_count
             << " dm_index_min=" << candidate.extent.dm_index_min
             << " dm_index_max=" << candidate.extent.dm_index_max
             << " frequency_min=" << candidate.extent.frequency_hz.minimum
@@ -159,15 +159,19 @@ void print_candidate(std::string_view label,
 }
 
 void print_harmonic_candidate(std::size_t rank,
-                              const gaffa::HarmonicCandidate& candidate) {
-  const auto& harmonic = candidate.harmonic;
-  const auto& best = candidate.candidate.best;
+                              const gaffa::Candidate& candidate,
+                              const gaffa::HarmonicRelation& harmonic) {
+  const auto& best = candidate.best;
   const auto& peak = best.peak;
   std::cout << "harmonic_candidate"
             << " rank=" << rank
             << " parent_rank=" << harmonic.parent_index
             << " ratio=" << harmonic.numerator << '/' << harmonic.denominator
             << " frequency_error_bins=" << harmonic.frequency_error_bins
+            << " maximum_phase_drift_cycles="
+            << harmonic.maximum_phase_drift_cycles
+            << " phase_drift_time_seconds="
+            << harmonic.phase_drift_time_seconds
             << " phase_distance=" << harmonic.phase_distance
             << " dm_distance=" << harmonic.dm_distance
             << " expected_snr=" << harmonic.expected_snr
@@ -179,7 +183,7 @@ void print_harmonic_candidate(std::size_t rank,
             << " frequency=" << peak.motion.frequency_hz
             << " width=" << peak.boxcar_width_bins
             << " duty_cycle=" << peak.duty_cycle
-            << " peak_count=" << candidate.candidate.peak_count << '\n';
+            << " peak_count=" << candidate.member_count << '\n';
 }
 
 template <typename T>
@@ -303,19 +307,25 @@ int main(int argc, char** argv) {
                               float_bytes, preprocess_workspace, ffa_workspace,
                               observation_seconds);
         }, filterbank.samples);
-    std::vector<gaffa::Candidate> candidates;
-    timings.candidate = time_once([&] {
-      candidates = gaffa::select_candidates_cpu(
-          peaks, observation_seconds, candidate_options(args));
+    std::vector<gaffa::DmPeakGroups> peak_groups;
+    timings.grouping = time_once([&] {
+      peak_groups =
+          gaffa::group_dm_peak_batch_cpu(peaks, observation_seconds);
     });
-    std::vector<gaffa::HarmonicCandidate> flagged_candidates;
-    std::vector<gaffa::Candidate> filtered_candidates;
+    gaffa::CandidateSet candidates;
+    timings.clustering = time_once([&] {
+      candidates = gaffa::cluster_dm_peak_groups_cpu(
+          peak_groups, observation_seconds, candidate_options());
+    });
+    std::vector<gaffa::HarmonicRelation> flagged_candidates;
+    std::vector<std::size_t> filtered_candidates;
     timings.harmonic = time_once([&] {
       flagged_candidates = gaffa::flag_harmonics_cpu(
           candidates, harmonic_context(filterbank.header, observation_seconds),
           harmonic_options());
       filtered_candidates =
-          gaffa::remove_harmonics_cpu(flagged_candidates, args.max_candidates);
+          gaffa::remove_harmonics_cpu(candidates, flagged_candidates,
+                                      args.max_candidates);
     });
     timings.total = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - total_begin).count();
@@ -329,19 +339,17 @@ int main(int argc, char** argv) {
               << " bins_max=" << args.bins_max
               << " max_peaks=" << args.max_peaks
               << " max_candidates=" << args.max_candidates
-              << " candidate_frequency_cluster_radius="
-              << candidate_options(args).frequency_cluster_radius
-              << " candidate_dm_cluster_radius="
-              << candidate_options(args).dm_cluster_radius
+              << " candidate_max_phase_distance_cycles="
+              << candidate_options().max_phase_distance_cycles
+              << " candidate_max_dm_index_distance="
+              << candidate_options().max_dm_index_distance
               << " candidate_cluster_across_widths="
-              << candidate_options(args).cluster_across_widths
-              << " candidate_max_candidates="
-              << candidate_options(args).max_candidates
+              << candidate_options().cluster_across_widths
               << " harmonic_max_harmonic=" << harmonic_options().max_harmonic
               << " harmonic_denominator_max="
               << harmonic_options().denominator_max
               << " harmonic_frequency_tolerance_bins="
-              << harmonic_options().frequency_tolerance_bins
+              << harmonic_options().frequency_tolerance_bins.value_or(-1.0)
               << " harmonic_phase_distance_max="
               << harmonic_options().phase_distance_max
               << " harmonic_dm_distance_max="
@@ -354,7 +362,8 @@ int main(int argc, char** argv) {
               << " convert_seconds=" << timings.convert
               << " preprocess_seconds=" << timings.preprocess
               << " ffa_seconds=" << timings.ffa
-              << " candidate_seconds=" << timings.candidate
+              << " grouping_seconds=" << timings.grouping
+              << " clustering_seconds=" << timings.clustering
               << " harmonic_seconds=" << timings.harmonic
               << " total_seconds=" << timings.total << '\n';
     std::cout << "memory dedispersed_bytes=" << dedispersed_bytes
@@ -365,37 +374,45 @@ int main(int argc, char** argv) {
               << " total_device_bytes=" << total_bytes << '\n';
     const std::size_t harmonic_count = std::count_if(
         flagged_candidates.begin(), flagged_candidates.end(),
-        [](const gaffa::HarmonicCandidate& candidate) {
-          return candidate.harmonic.is_harmonic;
+        [](const gaffa::HarmonicRelation& relation) {
+          return relation.is_harmonic;
         });
+    std::size_t local_group_count = 0;
+    for (const auto& groups : peak_groups) {
+      local_group_count += groups.groups.size();
+    }
     std::cout << "result peaks=" << peaks.size()
-              << " raw_candidates=" << candidates.size()
+              << " local_groups=" << local_group_count
+              << " clustered_candidates=" << candidates.candidates.size()
               << " harmonic_candidates=" << harmonic_count
               << " candidates=" << filtered_candidates.size() << '\n';
 
     const std::size_t raw_print_count =
-        std::min(args.print_peaks, candidates.size());
+        std::min(args.print_peaks, candidates.candidates.size());
     for (std::size_t rank = 0; rank < raw_print_count; ++rank) {
-      print_candidate("raw_candidate", rank, candidates[rank]);
+      print_candidate("clustered_candidate", rank,
+                      candidates.candidates[rank]);
     }
-    if (raw_print_count < candidates.size()) {
-      std::cout << "result raw_candidates_omitted="
-                << candidates.size() - raw_print_count << '\n';
+    if (raw_print_count < candidates.candidates.size()) {
+      std::cout << "result clustered_candidates_omitted="
+                << candidates.candidates.size() - raw_print_count << '\n';
     }
     std::size_t harmonic_printed = 0;
     for (std::size_t rank = 0;
          rank < flagged_candidates.size() && harmonic_printed < args.print_peaks;
          ++rank) {
-      if (!flagged_candidates[rank].harmonic.is_harmonic) {
+      if (!flagged_candidates[rank].is_harmonic) {
         continue;
       }
-      print_harmonic_candidate(rank, flagged_candidates[rank]);
+      print_harmonic_candidate(rank, candidates.candidates[rank],
+                               flagged_candidates[rank]);
       ++harmonic_printed;
     }
     const std::size_t final_print_count =
         std::min(args.print_peaks, filtered_candidates.size());
     for (std::size_t rank = 0; rank < final_print_count; ++rank) {
-      print_candidate("candidate", rank, filtered_candidates[rank]);
+      print_candidate("candidate", rank,
+                      candidates.candidates[filtered_candidates[rank]]);
     }
     if (final_print_count < filtered_candidates.size()) {
       std::cout << "result candidates_omitted="
