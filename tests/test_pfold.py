@@ -3,8 +3,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from gaffa._core import _fold_dedispersed_profile, _fold_dedispersed_spectrum
-from gaffa.dedispersion import dedisperse_single_dm, dedisperse_spectrum
+from gaffa.dedispersion import (
+    DedispersedResult,
+    dedisperse_single_dm,
+    dedisperse_spectrum,
+)
 from gaffa.io import Filterbank
 from gaffa.pfold import (
     FoldResult,
@@ -110,9 +113,8 @@ def test_fold_profile_uses_dm_index() -> None:
         dtype=np.uint32,
     )
 
-    result = _fold_dedispersed_profile(
-        data,
-        tsamp=0.25,
+    result = fold_profile(
+        DedispersedResult(data, tsamp=0.25),
         period=1.0,
         nbin=2,
         dm_index=1,
@@ -123,7 +125,9 @@ def test_fold_profile_uses_dm_index() -> None:
     )
 
 
-def test_fold_rejects_non_contiguous_data() -> None:
+def test_raw_fold_binding_rejects_non_contiguous_spectrum() -> None:
+    from gaffa._core import _fold_dedispersed_spectrum
+
     spectrum = dedisperse_spectrum(Filterbank(BASETEST), dm=0.0, backend="cpu")
 
     with pytest.raises(ValueError, match="C-contiguous"):
@@ -137,7 +141,9 @@ def test_fold_rejects_non_contiguous_data() -> None:
         )
 
 
-def test_fold_profile_rejects_non_contiguous_data() -> None:
+def test_raw_fold_binding_rejects_non_contiguous_time_series() -> None:
+    from gaffa._core import _fold_dedispersed_profile
+
     data = np.arange(16, dtype=np.uint32).reshape(2, 8)
 
     with pytest.raises(ValueError, match="C-contiguous"):

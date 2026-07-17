@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import overload
 
-from ._core import DedispersedResult, DedispersedSpectrum, FoldResult, FoldedProfile
+from ..dedispersion import DedispersedResult, DedispersedSpectrum
+from ._bindings import FoldResult as FoldResult, FoldedProfile as FoldedProfile
 
 
 def fold_profile(
@@ -56,8 +57,8 @@ def fold_spectrum(
     tsubint
         Subintegration length in seconds.
     nsubband
-        Optional number of frequency subbands. The current channel count must
-        be exactly divisible by this value.
+        Optional frequency subband count. The input channel count must be
+        exactly divisible by this value.
 
     Returns
     -------
@@ -86,3 +87,17 @@ def fold(
     tsubint: float = 10.0,
     nsubband: int | None = None,
 ) -> FoldResult: ...
+
+
+def fold(
+    data: DedispersedResult | DedispersedSpectrum,
+    *,
+    period: float,
+    nbin: int,
+    dm_index: int = 0,
+    tsubint: float = 10.0,
+    nsubband: int | None = None,
+) -> FoldedProfile | FoldResult: ...
+
+
+__all__ = ["FoldResult", "FoldedProfile", "fold", "fold_profile", "fold_spectrum"]

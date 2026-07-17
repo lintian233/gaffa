@@ -81,8 +81,11 @@ configure-loki-release: deps-release
 test-python:
     {{ dev_env }} python -m pytest -v --cov
 
+typecheck-python:
+    {{ dev_env }} pyright
+
 # Backward-compatible Python test entry point.
-test: test-python
+test: typecheck-python test-python
 
 test-cpp: build
     {{ dev_env }} ctest --test-dir {{ debug_dir }} --output-on-failure

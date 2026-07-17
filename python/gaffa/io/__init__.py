@@ -1,3 +1,3 @@
-from gaffa._core import Filterbank, FilterbankHeader
+from .._core import Filterbank, FilterbankHeader
 
 __all__ = ["Filterbank", "FilterbankHeader"]

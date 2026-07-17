@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "pyright>=1.1.390",
   "pytest>=8.0",
   "pytest-cov",
   "ruff>=0.5",
@@ -78,3 +79,9 @@ target-version = "py312"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.pyright]
+include = ["python", "tests/typecheck"]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportMissingModuleSource = "none"

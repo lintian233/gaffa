@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import overload
 
-from ._core import (
+from .._core import (
     DedispersedResult,
     DedispersedSpectrum,
     FoldResult,
@@ -21,26 +21,7 @@ def fold_profile(
     nbin: int,
     dm_index: int = 0,
 ) -> FoldedProfile:
-    """Fold a dedispersed 1D time series into an integrated profile.
-
-    Parameters
-    ----------
-    dedispersed
-        Host-resident dedispersed time series returned by
-        ``gaffa.dedispersion.dedisperse_single_dm`` or another single/multi-DM
-        dedispersion function.
-    period
-        Folding period in seconds.
-    nbin
-        Number of phase bins.
-    dm_index
-        Row index in ``dedispersed.data``. Single-DM results use the default 0.
-
-    Returns
-    -------
-    FoldedProfile
-        Integrated profile, exposure, and phase coordinate.
-    """
+    """Fold a dedispersed 1D time series into an integrated profile."""
 
     if dm_index < 0:
         raise ValueError("dm_index must be non-negative")
@@ -61,30 +42,7 @@ def fold_spectrum(
     tsubint: float = 10.0,
     nsubband: int | None = None,
 ) -> FoldResult:
-    """Fold a single-DM dedispersed dynamic spectrum.
-
-    Parameters
-    ----------
-    spectrum
-        Host-resident dedispersed dynamic spectrum returned by
-        ``gaffa.dedispersion.dedisperse_spectrum``.
-    period
-        Folding period in seconds.
-    nbin
-        Number of phase bins.
-    tsubint
-        Subintegration length in seconds.
-    nsubband
-        Optional number of frequency subbands. When provided, the current
-        channel count must be exactly divisible by this value.
-
-    Returns
-    -------
-    FoldResult
-        Folded products. ``cube`` has shape ``(nsubint, nchans, nbin)``;
-        ``profile`` has shape ``(nbin,)``; ``freq_phase`` has shape
-        ``(nchans, nbin)``; and ``time_phase`` has shape ``(nsubint, nbin)``.
-    """
+    """Fold a single-DM dedispersed dynamic spectrum."""
 
     if nsubband is not None and nsubband <= 0:
         raise ValueError("nsubband must be positive")
@@ -129,12 +87,7 @@ def fold(
     tsubint: float = 10.0,
     nsubband: int | None = None,
 ) -> FoldedProfile | FoldResult:
-    """Fold a dedispersed time series or dynamic spectrum.
-
-    This is a convenience dispatcher. Prefer ``fold_profile`` for 1D
-    dedispersed time series and ``fold_spectrum`` for 2D dedispersed spectra
-    when writing stable analysis code.
-    """
+    """Fold a dedispersed time series or dynamic spectrum."""
 
     if isinstance(data, DedispersedResult):
         return fold_profile(data, period=period, nbin=nbin, dm_index=dm_index)

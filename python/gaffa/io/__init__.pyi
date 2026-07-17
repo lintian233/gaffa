@@ -1,6 +1,6 @@
 """Filterbank I/O API."""
 
-from gaffa._core import Filterbank, FilterbankHeader
+from ._bindings import Filterbank as Filterbank, FilterbankHeader as FilterbankHeader
 
 __all__ = [
     "Filterbank",
