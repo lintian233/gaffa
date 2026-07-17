@@ -77,11 +77,11 @@ LokiPffaPlan make_loki_pffa_plan(std::size_t input_nsamples,
   if (search_space.acceleration_m_per_s2.has_value()) {
     validate_range(*search_space.acceleration_m_per_s2,
                    "acceleration_m_per_s2", false,
-                   /*require_nonzero_width=*/false);
+                   /*require_nonzero_width=*/true);
   }
   if (search_space.jerk_m_per_s3.has_value()) {
     validate_range(*search_space.jerk_m_per_s3, "jerk_m_per_s3", false,
-                   /*require_nonzero_width=*/false);
+                   /*require_nonzero_width=*/true);
   }
   if (options.phase_bins_min < 2 ||
       options.phase_bins_max < options.phase_bins_min || !(options.eta > 0.0) ||

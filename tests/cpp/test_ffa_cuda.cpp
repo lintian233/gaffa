@@ -1375,14 +1375,17 @@ TEST(FfaCuda, TransformUsesPreparedPrefixAndRespectsStride) {
           .device_id = 0,
       });
 
-  std::vector<float> output(nseries * output_stride);
-  cudaMemcpy(output.data(), device_output.data(), output.size() * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  std::vector<float> output(nseries * task_elements);
+  ASSERT_EQ(cudaMemcpy2D(output.data(), task_elements * sizeof(float),
+                         device_output.data(), output_stride * sizeof(float),
+                         task_elements * sizeof(float), nseries,
+                         cudaMemcpyDeviceToHost),
+            cudaSuccess);
   const auto expected = expected_transform(compact_input, nseries, shape);
 
   for (std::size_t series = 0; series < nseries; ++series) {
     for (std::size_t index = 0; index < task_elements; ++index) {
-      EXPECT_FLOAT_EQ(output[series * output_stride + index],
+      EXPECT_FLOAT_EQ(output[series * task_elements + index],
                       expected[series * task_elements + index])
           << "series=" << series << " index=" << index;
     }
