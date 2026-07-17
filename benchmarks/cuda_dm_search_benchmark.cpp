@@ -126,12 +126,12 @@ gaffa::HarmonicOptions harmonic_options() {
 }
 
 gaffa::HarmonicContext harmonic_context(
-    const gaffa::FilterbankHeader& header) {
+    const gaffa::FilterbankHeader& header,
+    double observation_seconds) {
   const auto [low, high] = std::minmax_element(header.frequency_table.begin(),
                                                 header.frequency_table.end());
   return gaffa::HarmonicContext{
-      .observation_seconds =
-          header.tsamp * static_cast<double>(header.nsamples),
+      .observation_seconds = observation_seconds,
       .frequency_low_mhz = *low,
       .frequency_high_mhz = *high,
   };
@@ -189,7 +189,8 @@ std::vector<gaffa::DmPeak> run_typed(const gaffa::FilterbankData& filterbank,
                                      std::size_t& dedispersed_bytes,
                                      std::size_t& float_bytes,
                                      std::size_t& preprocess_workspace,
-                                     std::size_t& ffa_workspace) {
+                                     std::size_t& ffa_workspace,
+                                     double& observation_seconds) {
   const auto plan = gaffa::MultiDmDedispersionPlan{
       .dm_low = args.dm_low, .dm_step = args.dm_step, .ndm = args.ndm,
       .ref_frequency_mhz = filterbank.header.frequency_table.back(),
@@ -256,6 +257,11 @@ std::vector<gaffa::DmPeak> run_typed(const gaffa::FilterbankData& filterbank,
   float_bytes = device_series.bytes();
   preprocess_workspace = preprocess_program.workspace_shape().total_bytes;
   ffa_workspace = ffa_program.workspace_shape().total_bytes;
+  observation_seconds =
+      static_cast<double>(dedispersed.shape.nsamples) * filterbank.header.tsamp;
+  if (!(observation_seconds > 0.0) || !std::isfinite(observation_seconds)) {
+    throw std::overflow_error("CUDA DM-search observation time is not finite and > 0");
+  }
   // FfaPeak is deliberately independent of observation-time context. This
   // benchmark owns that context, so normalize its backend-neutral output to
   // the same midpoint epoch used by the CPU DM search and Loki P-FFA paths.
@@ -289,23 +295,25 @@ int main(int argc, char** argv) {
     timings.read = time_once([&] { filterbank = gaffa::read_filterbank(args.path); });
     std::size_t dedispersed_bytes = 0, float_bytes = 0, preprocess_workspace = 0,
                 ffa_workspace = 0;
+    double observation_seconds = 0.0;
     const auto peaks = std::visit(
         [&](const auto& values) {
           using T = typename std::decay_t<decltype(values)>::value_type;
           return run_typed<T>(filterbank, args, timings, dedispersed_bytes,
-                              float_bytes, preprocess_workspace, ffa_workspace);
+                              float_bytes, preprocess_workspace, ffa_workspace,
+                              observation_seconds);
         }, filterbank.samples);
     std::vector<gaffa::Candidate> candidates;
     timings.candidate = time_once([&] {
       candidates = gaffa::select_candidates_cpu(
-          peaks, filterbank.header.tsamp * filterbank.header.nsamples,
-          candidate_options(args));
+          peaks, observation_seconds, candidate_options(args));
     });
     std::vector<gaffa::HarmonicCandidate> flagged_candidates;
     std::vector<gaffa::Candidate> filtered_candidates;
     timings.harmonic = time_once([&] {
       flagged_candidates = gaffa::flag_harmonics_cpu(
-          candidates, harmonic_context(filterbank.header), harmonic_options());
+          candidates, harmonic_context(filterbank.header, observation_seconds),
+          harmonic_options());
       filtered_candidates =
           gaffa::remove_harmonics_cpu(flagged_candidates, args.max_candidates);
     });

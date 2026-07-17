@@ -55,6 +55,11 @@ struct Timings {
   double total_seconds = 0.0;
 };
 
+struct SearchRun {
+  gaffa::DmSearchResult result;
+  double observation_seconds = 0.0;
+};
+
 void usage(const char* program) {
   std::cerr
       << "Usage: " << program
@@ -300,21 +305,21 @@ gaffa::HarmonicOptions harmonic_options() {
 }
 
 gaffa::HarmonicContext harmonic_context(
-    const gaffa::FilterbankHeader& header) {
+    const gaffa::FilterbankHeader& header,
+    double observation_seconds) {
   const auto [low, high] = std::minmax_element(header.frequency_table.begin(),
                                                header.frequency_table.end());
   return gaffa::HarmonicContext{
-      .observation_seconds =
-          header.tsamp * static_cast<double>(header.nsamples),
+      .observation_seconds = observation_seconds,
       .frequency_low_mhz = *low,
       .frequency_high_mhz = *high,
   };
 }
 
 template <typename T>
-gaffa::DmSearchResult run_typed_search(const gaffa::FilterbankData& filterbank,
-                                       const Args& args,
-                                       Timings& timings) {
+SearchRun run_typed_search(const gaffa::FilterbankData& filterbank,
+                           const Args& args,
+                           Timings& timings) {
   const auto view = gaffa::sample_view<T>(filterbank);
   using OutT = std::conditional_t<std::is_same_v<T, float>, float, std::uint32_t>;
   gaffa::DedispersedResult<OutT> dedispersed;
@@ -340,14 +345,18 @@ gaffa::DmSearchResult run_typed_search(const gaffa::FilterbankData& filterbank,
         gaffa::search_dedispersed_ffa_cpu(
             dedispersed, dms, filterbank.header.tsamp, options);
   });
-  return search_result;
+  return SearchRun{
+      .result = std::move(search_result),
+      .observation_seconds =
+          filterbank.header.tsamp * static_cast<double>(dedispersed.shape.nsamples),
+  };
 }
 
-gaffa::DmSearchResult run_search(const gaffa::FilterbankData& filterbank,
-                                 const Args& args,
-                                 Timings& timings) {
+SearchRun run_search(const gaffa::FilterbankData& filterbank,
+                     const Args& args,
+                     Timings& timings) {
   return std::visit(
-      [&](const auto& values) -> gaffa::DmSearchResult {
+      [&](const auto& values) -> SearchRun {
         using T = typename std::decay_t<decltype(values)>::value_type;
         return run_typed_search<T>(filterbank, args, timings);
       },
@@ -531,19 +540,21 @@ int main(int argc, char** argv) {
     Timings timings;
     timings.read_seconds =
         time_once([&] { filterbank = gaffa::read_filterbank(args.path); });
-    const gaffa::DmSearchResult result = run_search(filterbank, args, timings);
+    SearchRun search_run = run_search(filterbank, args, timings);
+    const gaffa::DmSearchResult& result = search_run.result;
     std::vector<gaffa::Candidate> candidates;
     timings.candidate_seconds = time_once([&] {
       candidates = gaffa::select_candidates_cpu(
-          result.peaks,
-          filterbank.header.tsamp * static_cast<double>(filterbank.header.nsamples),
+          result.peaks, search_run.observation_seconds,
           candidate_options());
     });
     std::vector<gaffa::HarmonicCandidate> flagged_candidates;
     std::vector<gaffa::Candidate> filtered_candidates;
     timings.harmonic_seconds = time_once([&] {
       flagged_candidates = gaffa::flag_harmonics_cpu(
-          candidates, harmonic_context(filterbank.header), harmonic_options());
+          candidates,
+          harmonic_context(filterbank.header, search_run.observation_seconds),
+          harmonic_options());
       filtered_candidates =
           gaffa::remove_harmonics_cpu(flagged_candidates, args.max_candidates);
     });

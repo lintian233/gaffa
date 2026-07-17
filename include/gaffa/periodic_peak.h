@@ -22,7 +22,9 @@ enum class MotionOrder : std::uint8_t {
 };
 
 // Periodic signal parameters at reference_time_seconds, measured relative to
-// the start of the searched time interval. Motion values use SI units.
+// the start of this backend's searched time interval. The frequency and
+// line-of-sight acceleration, jerk, and snap are the direct search
+// coordinates. Motion values use SI units.
 struct PeriodicMotion {
   MotionOrder order = MotionOrder::Frequency;
   double reference_time_seconds = 0.0;
@@ -36,6 +38,21 @@ struct PeriodicMotion {
 // value must be finite, frequency_hz must be positive, and coefficients above
 // order must be zero.
 void validate_periodic_motion(const PeriodicMotion& motion);
+
+// Returns the phase difference in cycles at offset_seconds relative to the
+// motion reference epoch. This uses the first-order line-of-sight Doppler
+// model shared by the current GAFFA and Loki periodic searches. The caller
+// must pass a previously validated motion model.
+[[nodiscard]] double periodic_phase_offset_cycles(
+    const PeriodicMotion& motion,
+    double offset_seconds) noexcept;
+
+// Returns the instantaneous observed frequency at offset_seconds relative to
+// the motion reference epoch under the same Doppler model. The caller must
+// pass a previously validated motion model.
+[[nodiscard]] double periodic_frequency_hz_at(
+    const PeriodicMotion& motion,
+    double offset_seconds) noexcept;
 
 // One significant periodic-search detection. phase_bin is absent when a
 // backend scores a folded profile but does not report its maximizing phase.

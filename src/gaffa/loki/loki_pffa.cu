@@ -422,6 +422,8 @@ PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
   PeriodicPeak peak{
       .motion = {
           .order = MotionOrder::Frequency,
+          // Loki's direct coordinates are defined on the full plan-length
+          // search window, which may include benchmark-local zero padding.
           .reference_time_seconds =
               0.5 * static_cast<double>(plan.input_nsamples()) *
               plan.tsamp_seconds(),
