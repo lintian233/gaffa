@@ -149,6 +149,7 @@ DmPeakGroups group_dm_peaks_cpu(
     std::unordered_map<detail::PhaseTrajectoryCell, std::vector<std::size_t>,
                        detail::PhaseTrajectoryCellHash>
         groups_by_cell;
+    
     groups_by_cell.reserve(count);
     std::vector<std::size_t> unindexed_groups;
 

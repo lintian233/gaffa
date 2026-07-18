@@ -50,7 +50,8 @@ struct Timings {
   double read_seconds = 0.0;
   double dedisperse_seconds = 0.0;
   double search_seconds = 0.0;
-  double candidate_seconds = 0.0;
+  double grouping_seconds = 0.0;
+  double clustering_seconds = 0.0;
   double harmonic_seconds = 0.0;
   double total_seconds = 0.0;
 };
@@ -390,10 +391,7 @@ bool better_peak(const gaffa::DmPeak& lhs, const gaffa::DmPeak& rhs) {
 
 std::vector<gaffa::DmPeak> sorted_raw_peaks(
     const gaffa::DmSearchResult& result) {
-  std::vector<gaffa::DmPeak> peaks;
-  for (const auto& groups : result.peak_groups) {
-    peaks.insert(peaks.end(), groups.members.begin(), groups.members.end());
-  }
+  std::vector<gaffa::DmPeak> peaks = result.peaks;
   std::sort(peaks.begin(), peaks.end(), better_peak);
   return peaks;
 }
@@ -451,6 +449,7 @@ void print_harmonic_candidate(std::size_t rank,
 void print_report(const Args& args,
                   const gaffa::FilterbankData& filterbank,
                   const gaffa::DmSearchResult& result,
+                  const std::vector<gaffa::DmPeakGroups>& peak_groups,
                   const gaffa::CandidateSet& candidate_set,
                   const std::vector<gaffa::HarmonicRelation>& relations,
                   const std::vector<std::size_t>& filtered_candidates,
@@ -498,12 +497,13 @@ void print_report(const Args& args,
             << " read_seconds=" << timings.read_seconds
             << " dedisperse_seconds=" << timings.dedisperse_seconds
             << " search_seconds=" << timings.search_seconds
-            << " candidate_seconds=" << timings.candidate_seconds
+            << " grouping_seconds=" << timings.grouping_seconds
+            << " clustering_seconds=" << timings.clustering_seconds
             << " harmonic_seconds=" << timings.harmonic_seconds
             << " total_seconds=" << timings.total_seconds << '\n';
   const std::vector<gaffa::DmPeak> raw_peaks = sorted_raw_peaks(result);
   std::size_t local_group_count = 0;
-  for (const auto& groups : result.peak_groups) {
+  for (const auto& groups : peak_groups) {
     local_group_count += groups.groups.size();
   }
   std::cout << "result"
@@ -574,10 +574,15 @@ int main(int argc, char** argv) {
         time_once([&] { filterbank = gaffa::read_filterbank(args.path); });
     SearchRun search_run = run_search(filterbank, args, timings);
     const gaffa::DmSearchResult& result = search_run.result;
+    std::vector<gaffa::DmPeakGroups> peak_groups;
+    timings.grouping_seconds = time_once([&] {
+      peak_groups = gaffa::group_dm_peak_batch_cpu(
+          result.peaks, search_run.observation_seconds);
+    });
     gaffa::CandidateSet candidates;
-    timings.candidate_seconds = time_once([&] {
+    timings.clustering_seconds = time_once([&] {
       candidates = gaffa::cluster_dm_peak_groups_cpu(
-          result.peak_groups, search_run.observation_seconds,
+          peak_groups, search_run.observation_seconds,
           candidate_options());
     });
     std::vector<gaffa::HarmonicRelation> flagged_candidates;
@@ -595,8 +600,8 @@ int main(int argc, char** argv) {
     timings.total_seconds =
         std::chrono::duration<double>(total_end - total_start).count();
 
-    print_report(args, filterbank, result, candidates, flagged_candidates,
-                 filtered_candidates, timings);
+    print_report(args, filterbank, result, peak_groups, candidates,
+                 flagged_candidates, filtered_candidates, timings);
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "error: " << error.what() << '\n';

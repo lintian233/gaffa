@@ -105,23 +105,21 @@ void validate_preprocessed_time_series(const TimeSeries& time_series,
 }
 
 template <typename T>
-DmPeakGroups search_ffa_peaks_for_dm(
+DmPeaks search_ffa_peaks_for_dm(
     const DedispersedResult<T>& input,
     std::span<const double> dms,
     std::size_t dm_index,
     double tsamp,
     double reference_time_seconds,
-    double searched_duration_seconds,
     const PreprocessPlan& preprocess,
     const FfaSearchPlan& ffa_plan,
-    const FfaSearchOptions& ffa_options,
-    const DmPeakGroupingOptions& grouping) {
+    const FfaSearchOptions& ffa_options) {
   TimeSeries time_series =
       maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
   validate_preprocessed_time_series(time_series, input.shape, tsamp);
   const FfaSearchResult search =
       search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
-  std::vector<DmPeak> peaks;
+  DmPeaks peaks;
   peaks.reserve(search.peaks.size());
   for (const auto& peak : search.peaks) {
     PeriodicPeak periodic_peak = periodic_peak_from_ffa(peak);
@@ -132,7 +130,7 @@ DmPeakGroups search_ffa_peaks_for_dm(
         .peak = std::move(periodic_peak),
     });
   }
-  return group_dm_peaks_cpu(peaks, searched_duration_seconds, grouping);
+  return peaks;
 }
 
 template <typename T>
@@ -164,14 +162,14 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
     throw std::overflow_error("DM search duration is not finite and > 0");
   }
 
-  std::vector<DmPeakGroups> global_peak_groups;
+  DmPeaks global_peaks;
   std::exception_ptr error;
   std::atomic_bool has_error = false;
   const bool parallel = input.shape.ndm > 4;
 
 #pragma omp parallel if(parallel)
   {
-    std::vector<DmPeakGroups> local_peak_groups;
+    DmPeaks local_peaks;
 
 #pragma omp for schedule(dynamic, 1)
     for (std::size_t dm_index = 0; dm_index < input.shape.ndm; ++dm_index) {
@@ -179,12 +177,14 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
         continue;
       }
       try {
-        DmPeakGroups groups = search_ffa_peaks_for_dm(
+        DmPeaks peaks = search_ffa_peaks_for_dm(
             input, dms, dm_index, tsamp, reference_time_seconds,
-            searched_duration_seconds, options.preprocess, ffa_plan,
-            ffa_options, options.grouping);
-        if (!groups.groups.empty()) {
-          local_peak_groups.push_back(std::move(groups));
+            options.preprocess, ffa_plan,
+            ffa_options);
+        if (!peaks.empty()) {
+          local_peaks.insert(local_peaks.end(),
+                             std::make_move_iterator(peaks.begin()),
+                             std::make_move_iterator(peaks.end()));
         }
       } catch (...) {
         bool expected = false;
@@ -196,11 +196,11 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
       }
     }
 
-#pragma omp critical(dm_search_peak_groups)
+#pragma omp critical(dm_search_peaks)
     {
-      global_peak_groups.insert(global_peak_groups.end(),
-                                std::make_move_iterator(local_peak_groups.begin()),
-                                std::make_move_iterator(local_peak_groups.end()));
+      global_peaks.insert(global_peaks.end(),
+                          std::make_move_iterator(local_peaks.begin()),
+                          std::make_move_iterator(local_peaks.end()));
     }
   }
 
@@ -208,12 +208,12 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
     std::rethrow_exception(error);
   }
 
-  std::sort(global_peak_groups.begin(), global_peak_groups.end(),
-            [](const DmPeakGroups& lhs, const DmPeakGroups& rhs) {
-              return lhs.members.front().dm_index < rhs.members.front().dm_index;
-            });
+  std::stable_sort(global_peaks.begin(), global_peaks.end(),
+                   [](const DmPeak& lhs, const DmPeak& rhs) {
+                     return lhs.dm_index < rhs.dm_index;
+                   });
   return DmSearchResult{
-      .peak_groups = std::move(global_peak_groups),
+      .peaks = std::move(global_peaks),
   };
 }
 

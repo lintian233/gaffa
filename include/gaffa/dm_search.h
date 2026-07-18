@@ -4,7 +4,6 @@
 #include "gaffa/ffa_peak.h"
 #include "gaffa/ffa_plan.h"
 #include "gaffa/ffa_search.h"
-#include "gaffa/peak_grouping.h"
 #include "gaffa/periodic_peak.h"
 #include "gaffa/preprocessing.h"
 
@@ -21,11 +20,10 @@ struct DmSearchOptions {
   float snr_threshold = 6.0F;
   // 0 means unbounded. Applied per DM and per FFA block as a raw peak guard.
   std::size_t max_peaks = 0;
-  DmPeakGroupingOptions grouping{};
 };
 
 struct DmSearchResult {
-  std::vector<DmPeakGroups> peak_groups;
+  DmPeaks peaks;
 };
 
 TimeSeries dm_time_series_cpu(const DedispersedResult<std::uint32_t>& input,
@@ -37,8 +35,8 @@ TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
                               double tsamp);
 
 // Runs preprocessing and FFA peak search for every DM row in an eager host
-// dedispersion result. Each returned entry owns all raw peaks for one DM trial
-// plus its local peak groups; cross-DM clustering belongs downstream.
+// dedispersion result. The result contains raw DmPeak responses; grouping,
+// cross-DM clustering, and candidate filtering belong downstream.
 DmSearchResult search_dedispersed_ffa_cpu(
     const DedispersedResult<std::uint32_t>& input,
     std::span<const double> dms,

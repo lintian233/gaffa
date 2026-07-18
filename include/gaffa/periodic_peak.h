@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace gaffa {
 
@@ -75,6 +76,9 @@ struct DmPeak {
   std::size_t dm_index = 0;
   PeriodicPeak peak{};
 };
+
+// Raw periodic-search responses from one backend or a batch of DM trials.
+using DmPeaks = std::vector<DmPeak>;
 
 struct MotionRange {
   ValueRange acceleration_m_per_s2{};
