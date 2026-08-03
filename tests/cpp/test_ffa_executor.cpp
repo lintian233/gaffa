@@ -10,8 +10,7 @@
 
 namespace {
 
-gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
-                               double downsample_factor,
+gaffa::FfaSearchTask make_task(double downsample_factor,
                                std::size_t prepared_nsamples,
                                std::size_t rows,
                                std::size_t rows_eval,
@@ -19,7 +18,6 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
   return gaffa::FfaSearchTask{
       .downsample_factor = downsample_factor,
       .effective_tsamp = downsample_factor,
-      .input_nsamples = input_nsamples,
       .prepared_nsamples = prepared_nsamples,
       .bins = bins,
       .rows = rows,
@@ -42,7 +40,8 @@ std::vector<float> run_manual_transform(std::span<const float> input,
 TEST(FfaExecutorCpu, RejectsInvalidInputs) {
   const std::vector<float> input{1, 2, 3, 4};
   const gaffa::FfaSearchPlan plan{
-      .tasks = {make_task(input.size(), 1.0, input.size(), 2, 2, 2)},
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, input.size(), 2, 2, 2)},
   };
 
   EXPECT_THROW(gaffa::for_each_ffa_block_cpu({}, plan, [](const auto&) {}),
@@ -56,23 +55,31 @@ TEST(FfaExecutorCpu, RejectsInvalidInputs) {
 TEST(FfaExecutorCpu, RejectsInvalidTask) {
   const std::vector<float> input{1, 2, 3, 4};
 
-  auto task = make_task(input.size(), 1.0, input.size(), 2, 2, 2);
-  task.input_nsamples = input.size() + 1;
+  auto task = make_task(1.0, input.size(), 2, 2, 2);
   EXPECT_THROW(gaffa::for_each_ffa_block_cpu(
-                   input, gaffa::FfaSearchPlan{.tasks = {task}},
+                   input, gaffa::FfaSearchPlan{
+                              .observation = {.nsamples = input.size() + 1,
+                                              .tsamp_seconds = 1.0},
+                              .tasks = {task}},
                    [](const auto&) {}),
                std::invalid_argument);
 
-  task = make_task(input.size(), 1.0, input.size(), 2, 3, 2);
+  task = make_task(1.0, input.size(), 2, 3, 2);
   EXPECT_THROW(gaffa::for_each_ffa_block_cpu(
-                   input, gaffa::FfaSearchPlan{.tasks = {task}},
+                   input, gaffa::FfaSearchPlan{
+                              .observation = {.nsamples = input.size(),
+                                              .tsamp_seconds = 1.0},
+                              .tasks = {task}},
                    [](const auto&) {}),
                std::invalid_argument);
 
-  task = make_task(input.size(), 1.0, input.size(), 2, 2, 2);
+  task = make_task(1.0, input.size(), 2, 2, 2);
   task.effective_tsamp = 0.0;
   EXPECT_THROW(gaffa::for_each_ffa_block_cpu(
-                   input, gaffa::FfaSearchPlan{.tasks = {task}},
+                   input, gaffa::FfaSearchPlan{
+                              .observation = {.nsamples = input.size(),
+                                              .tsamp_seconds = 1.0},
+                              .tasks = {task}},
                    [](const auto&) {}),
                std::invalid_argument);
 }
@@ -84,8 +91,10 @@ TEST(FfaExecutorCpu, RunsSingleTaskWithoutDownsample) {
       3, 0,
       4, 0,
   };
-  const auto task = make_task(input.size(), 1.0, input.size(), 4, 2, 2);
-  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+  const auto task = make_task(1.0, input.size(), 4, 2, 2);
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {task}};
 
   int calls = 0;
   gaffa::FfaBlockView observed;
@@ -110,8 +119,10 @@ TEST(FfaExecutorCpu, RunsSingleTaskWithoutDownsample) {
 
 TEST(FfaExecutorCpu, RunsSingleTaskWithWeightedDownsample) {
   const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
-  const auto task = make_task(input.size(), 2.0, 4, 2, 2, 2);
-  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+  const auto task = make_task(2.0, 4, 2, 2, 2);
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {task}};
 
   std::vector<float> observed_transform;
   float observed_stdnoise = 0.0F;
@@ -133,9 +144,10 @@ TEST(FfaExecutorCpu, RunsSingleTaskWithWeightedDownsample) {
 TEST(FfaExecutorCpu, CallsConsumerForEachTask) {
   const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(input.size(), 1.0, input.size(), 4, 4, 2),
-          make_task(input.size(), 2.0, 4, 2, 1, 2),
+          make_task(1.0, input.size(), 4, 4, 2),
+          make_task(2.0, 4, 2, 1, 2),
       },
   };
 
@@ -154,9 +166,10 @@ TEST(FfaExecutorCpu, CallsConsumerForEachTask) {
 TEST(FfaExecutorCpu, ReusesPreparedDownsampleForAdjacentTasks) {
   const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(input.size(), 2.0, 4, 2, 2, 2),
-          make_task(input.size(), 2.0, 4, 1, 1, 4),
+          make_task(2.0, 4, 2, 2, 2),
+          make_task(2.0, 4, 1, 1, 4),
       },
   };
 
@@ -183,8 +196,10 @@ TEST(FfaExecutorCpu, RowExecutorMatchesMaterializedBlockRows) {
       3, 0,
       4, 0,
   };
-  const auto task = make_task(input.size(), 1.0, input.size(), 4, 2, 2);
-  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+  const auto task = make_task(1.0, input.size(), 4, 2, 2);
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {task}};
 
   std::vector<std::vector<float>> rows;
   std::vector<std::size_t> shifts;
@@ -208,8 +223,10 @@ TEST(FfaExecutorCpu, RowExecutorMatchesMaterializedBlockRows) {
 
 TEST(FfaExecutorCpu, RowExecutorMatchesDownsampledBlockRows) {
   const std::vector<float> input{1, 2, 3, 4, 5, 6, 7, 8};
-  const auto task = make_task(input.size(), 2.0, 4, 2, 2, 2);
-  const gaffa::FfaSearchPlan plan{.tasks = {task}};
+  const auto task = make_task(2.0, 4, 2, 2, 2);
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {task}};
 
   std::vector<std::vector<float>> rows;
   gaffa::for_each_ffa_row_cpu(input, plan, [&](const gaffa::FfaRowView& row) {

@@ -76,4 +76,27 @@ double periodic_frequency_hz_at(const PeriodicMotion& motion,
          (1.0 - velocity_m_per_s / kSpeedOfLightMPerS);
 }
 
+DmPeaks attach_dm_peaks(std::span<const PeriodicPeak> peaks,
+                        double dm,
+                        std::size_t dm_index) {
+  if (!std::isfinite(dm)) {
+    throw std::invalid_argument("DM peak dm must be finite");
+  }
+  DmPeaks result;
+  result.reserve(peaks.size());
+  for (const PeriodicPeak& peak : peaks) {
+    validate_periodic_motion(peak.motion);
+    if (!std::isfinite(peak.duty_cycle) || !std::isfinite(peak.snr)) {
+      throw std::invalid_argument(
+          "Periodic peak values must be finite before attaching DM");
+    }
+    result.push_back(DmPeak{
+        .dm = dm,
+        .dm_index = dm_index,
+        .peak = peak,
+    });
+  }
+  return result;
+}
+
 }  // namespace gaffa

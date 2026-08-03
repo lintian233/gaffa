@@ -1,6 +1,8 @@
 #include "gaffa/candidate_analysis.h"
 
 #include <algorithm>
+#include <cmath>
+#include <stdexcept>
 #include <utility>
 
 namespace gaffa {
@@ -9,6 +11,9 @@ CandidateResult make_candidates_cpu(
     std::span<const DmPeak> peaks,
     const HarmonicContext& context,
     const CandidateOptions& options) {
+  if (!std::isfinite(options.selection.snr_min)) {
+    throw std::invalid_argument("Candidate snr_min must be finite");
+  }
   const std::vector<DmPeakGroups> groups = group_dm_peak_batch_cpu(
       peaks, context.observation_seconds, options.grouping);
   CandidateSet candidate_set = cluster_dm_peak_groups_cpu(

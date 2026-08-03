@@ -20,8 +20,7 @@
 
 namespace {
 
-gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
-                               double downsample_factor,
+gaffa::FfaSearchTask make_task(double downsample_factor,
                                std::size_t prepared_nsamples,
                                std::size_t rows,
                                std::size_t rows_eval,
@@ -29,7 +28,6 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
   return gaffa::FfaSearchTask{
       .downsample_factor = downsample_factor,
       .effective_tsamp = downsample_factor,
-      .input_nsamples = input_nsamples,
       .prepared_nsamples = prepared_nsamples,
       .bins = bins,
       .rows = rows,
@@ -41,9 +39,10 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
 
 gaffa::FfaSearchPlan valid_plan() {
   return gaffa::FfaSearchPlan{
+      .observation = {.nsamples = 2048, .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(2048, 1.0, 2048, 16, 16, 64),
-          make_task(2048, 2.0, 1024, 8, 8, 128),
+          make_task(1.0, 2048, 16, 16, 64),
+          make_task(2.0, 1024, 8, 8, 128),
       },
       .width_trials = {1, 2, 3},
   };
@@ -51,10 +50,11 @@ gaffa::FfaSearchPlan valid_plan() {
 
 gaffa::FfaSearchPlan grouped_plan() {
   return gaffa::FfaSearchPlan{
+      .observation = {.nsamples = 64, .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(64, 1.0, 64, 4, 4, 8),
-          make_task(64, 2.0, 32, 4, 4, 8),
-          make_task(64, 1.0, 64, 8, 8, 8),
+          make_task(1.0, 64, 4, 4, 8),
+          make_task(2.0, 32, 4, 4, 8),
+          make_task(1.0, 64, 8, 8, 8),
       },
       .width_trials = {1, 2, 4},
   };
@@ -348,9 +348,8 @@ TEST(FfaCuda, CompileExecutionPlanRejectsInvalidPlan) {
                std::invalid_argument);
 }
 
-TEST(FfaCuda, ExecutionPlanRejectsTasksWithDifferentInputLengths) {
+TEST(FfaCuda, ExecutionPlanRejectsPreparedLengthInconsistentWithObservation) {
   auto plan = grouped_plan();
-  plan.tasks.back().input_nsamples = 128;
   plan.tasks.back().prepared_nsamples = 128;
   plan.tasks.back().rows = 16;
 
@@ -377,7 +376,8 @@ TEST(FfaCuda, ExecutionPlanPreservesRiptidePrepareReuseContract) {
     EXPECT_EQ(group.prepare_key.input_nsamples, nsamples);
     ASSERT_FALSE(group.tasks.empty());
     for (const auto& task : group.tasks) {
-      EXPECT_EQ(task.task.input_nsamples, group.prepare_key.input_nsamples);
+      EXPECT_EQ(execution_plan.observation().nsamples,
+                group.prepare_key.input_nsamples);
       EXPECT_EQ(task.task.downsample_factor,
                 group.prepare_key.downsample_factor);
       EXPECT_EQ(task.task.prepared_nsamples, group.prepared_nsamples);
@@ -475,8 +475,9 @@ TEST(FfaCuda, ProgramSharedSubtreeTransformMatchesCpuForOddRows) {
   constexpr std::size_t bins = 180;
   constexpr std::size_t nseries = 2;
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = rows * bins, .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(rows * bins, 1.0, rows * bins, rows, rows, bins),
+          make_task(1.0, rows * bins, rows, rows, bins),
       },
       .width_trials = {1, 2, 4, 8},
   };
@@ -504,8 +505,9 @@ TEST(FfaCuda, ProgramSharedSubtreeTransformMatchesCpuForLargeBins) {
   constexpr std::size_t rows = 9;
   constexpr std::size_t bins = 512;
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = rows * bins, .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(rows * bins, 1.0, rows * bins, rows, rows, bins),
+          make_task(1.0, rows * bins, rows, rows, bins),
       },
       .width_trials = {1, 2, 4, 8},
   };
@@ -952,7 +954,8 @@ TEST(FfaCuda, BatchSearchMatchesCpuForNonWarpAlignedBins) {
   constexpr std::size_t rows = 3;
   constexpr std::size_t nsamples = rows * bins;
   const gaffa::FfaSearchPlan plan{
-      .tasks = {make_task(nsamples, 1.0, nsamples, rows, rows, bins)},
+      .observation = {.nsamples = nsamples, .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, nsamples, rows, rows, bins)},
       .width_trials = {1, 2, 17, 64, 129, 200},
   };
   std::vector<float> host_input(nsamples);
@@ -989,6 +992,50 @@ TEST(FfaCuda, BatchSearchMatchesCpuForNonWarpAlignedBins) {
   }
 }
 
+TEST(FfaCuda, PeriodicConvenienceUsesProgramObservationMidpoint) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  constexpr std::size_t bins = 8;
+  constexpr std::size_t rows = 4;
+  constexpr std::size_t nsamples = rows * bins;
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = nsamples, .tsamp_seconds = 0.25},
+      .tasks = {gaffa::FfaSearchTask{
+          .downsample_factor = 1.0,
+          .effective_tsamp = 0.25,
+          .prepared_nsamples = nsamples,
+          .bins = bins,
+          .rows = rows,
+          .rows_eval = rows,
+          .period_begin = 2.0,
+          .period_end = 2.25,
+      }},
+      .width_trials = {1, 2},
+  };
+  const std::vector<float> host_input{
+      0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5,
+      0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5, 0, 0, 0, 5,
+  };
+  gaffa::CudaDeviceBuffer<float> device_input(host_input.size());
+  ASSERT_EQ(cudaMemcpy(device_input.data(), host_input.data(),
+                       host_input.size() * sizeof(float),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  const gaffa::FfaSearchOptions options{.snr_threshold = 0.0F};
+  gaffa::CudaFfaProgram program(plan);
+  const auto periodic = gaffa::search_ffa_periodic_cuda(
+      program,
+      static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
+          .as_span(0),
+      options);
+
+  ASSERT_FALSE(periodic.empty());
+  EXPECT_DOUBLE_EQ(periodic.front().motion.reference_time_seconds, 4.0);
+}
+
 TEST(FfaCuda, BatchSearchTerminalMergeFusionMatchesCpu) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";
@@ -998,7 +1045,8 @@ TEST(FfaCuda, BatchSearchTerminalMergeFusionMatchesCpu) {
   constexpr std::size_t bins = 180;
   constexpr std::size_t nsamples = rows * bins;
   const gaffa::FfaSearchPlan plan{
-      .tasks = {make_task(nsamples, 1.0, nsamples, rows, rows, bins)},
+      .observation = {.nsamples = nsamples, .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, nsamples, rows, rows, bins)},
       .width_trials = {1, 2, 4, 8, 16},
   };
   std::vector<float> host_input(nsamples);
@@ -1040,7 +1088,8 @@ TEST(FfaCuda, BatchSearchTerminalMergeFusionMatchesCpuAcrossPrefixTiles) {
   constexpr std::size_t bins = 512;
   constexpr std::size_t nsamples = rows * bins;
   const gaffa::FfaSearchPlan plan{
-      .tasks = {make_task(nsamples, 1.0, nsamples, rows, rows, bins)},
+      .observation = {.nsamples = nsamples, .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, nsamples, rows, rows, bins)},
       .width_trials = {1, 2, 8, 16, 32},
   };
   std::vector<float> host_input(nsamples);
@@ -1136,7 +1185,7 @@ TEST(FfaCuda, PrepareMatchesCpuWithoutDownsample) {
   }
 
   const std::vector<float> input{1, 2, 3, 4, 5, 10, 20, 30, 40, 50};
-  const auto task = make_task(5, 1.0, 5, 1, 1, 5);
+  const auto task = make_task(1.0, 5, 1, 1, 5);
 
   const auto output = prepare_on_cuda(input, 2, 5, task);
   EXPECT_EQ(output, expected_prepared(input, 2, 5, 1.0));
@@ -1149,7 +1198,7 @@ TEST(FfaCuda, PrepareMatchesCpuIntegerDownsample) {
 
   const std::vector<float> input{1, 2, 3, 4, 5, 6,
                                  7, 8, 9, 10, 11, 12};
-  const auto task = make_task(6, 2.0, 3, 1, 1, 3);
+  const auto task = make_task(2.0, 3, 1, 1, 3);
 
   const auto output = prepare_on_cuda(input, 2, 6, task);
   EXPECT_EQ(output, expected_prepared(input, 2, 6, 2.0));
@@ -1163,8 +1212,8 @@ TEST(FfaCuda, PrepareMatchesCpuFractionalDownsample) {
   const std::vector<float> input{1, 2, 3, 4, 5, 6, 7,
                                  3, 1, 4, 1, 5, 9, 2};
   const double factor = 2.5;
-  const auto task = make_task(7, factor, gaffa::downsampled_size(7, factor),
-                              1, 1, 2);
+  const auto task =
+      make_task(factor, gaffa::downsampled_size(7, factor), 1, 1, 2);
 
   const auto output = prepare_on_cuda(input, 2, 7, task);
   const auto expected = expected_prepared(input, 2, 7, factor);
@@ -1184,7 +1233,7 @@ TEST(FfaCuda, PrepareAcceptsExplicitStream) {
 
   const std::vector<float> input{1, 2, 3, 4, 5, 6,
                                  7, 8, 9, 10, 11, 12};
-  const auto task = make_task(6, 2.0, 3, 1, 1, 3);
+  const auto task = make_task(2.0, 3, 1, 1, 3);
   const auto output = prepare_on_cuda(
       input, 2, 6, task,
       gaffa::CudaLaunchOptions{
@@ -1205,7 +1254,7 @@ TEST(FfaCuda, PrepareRejectsInvalidArguments) {
       .nsamples = 4,
       .device_id = 0,
   };
-  const auto task = make_task(4, 1.0, 4, 1, 1, 4);
+  const auto task = make_task(1.0, 4, 1, 1, 4);
 
   auto null_input = input;
   null_input.data = nullptr;
@@ -1219,11 +1268,6 @@ TEST(FfaCuda, PrepareRejectsInvalidArguments) {
 
   EXPECT_THROW(gaffa::prepare_ffa_input_cuda(
                    input, task, fake_cuda_span(&fake_output, 4, 1)),
-               std::invalid_argument);
-
-  auto mismatched_task = task;
-  mismatched_task.input_nsamples = 5;
-  EXPECT_THROW(gaffa::prepare_ffa_input_cuda(input, mismatched_task, output),
                std::invalid_argument);
 
   auto wrong_size_task = task;

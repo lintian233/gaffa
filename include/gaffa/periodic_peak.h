@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace gaffa {
@@ -79,6 +80,12 @@ struct DmPeak {
 
 // Raw periodic-search responses from one backend or a batch of DM trials.
 using DmPeaks = std::vector<DmPeak>;
+
+// Attaches one dedispersion-trial identity to backend-neutral periodic peaks.
+// The source peaks are copied because DmPeaks owns its values independently.
+DmPeaks attach_dm_peaks(std::span<const PeriodicPeak> peaks,
+                        double dm,
+                        std::size_t dm_index);
 
 struct MotionRange {
   ValueRange acceleration_m_per_s2{};

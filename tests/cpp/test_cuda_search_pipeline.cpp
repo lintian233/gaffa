@@ -25,10 +25,10 @@ bool has_cuda_device() {
 gaffa::FfaSearchPlan pipeline_ffa_plan(std::size_t nsamples) {
   constexpr std::size_t bins = 8;
   return gaffa::FfaSearchPlan{
+      .observation = {.nsamples = nsamples, .tsamp_seconds = 0.001},
       .tasks = {gaffa::FfaSearchTask{
           .downsample_factor = 1.0,
           .effective_tsamp = 0.001,
-          .input_nsamples = nsamples,
           .prepared_nsamples = nsamples,
           .bins = bins,
           .rows = nsamples / bins,

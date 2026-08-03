@@ -28,71 +28,19 @@ struct PreparedSampleCache {
   std::vector<float> downsampled;
 };
 
-void validate_task(const FfaSearchTask& task, std::size_t input_nsamples) {
-  if (task.input_nsamples != input_nsamples) {
-    throw std::invalid_argument(
-        "FFA executor task input_nsamples must match time series size");
-  }
-  if (!std::isfinite(task.downsample_factor) ||
-      task.downsample_factor < 1.0) {
-    throw std::invalid_argument(
-        "FFA executor task downsample_factor must be finite and >= 1");
-  }
-  if (!(task.effective_tsamp > 0.0) || !std::isfinite(task.effective_tsamp)) {
-    throw std::invalid_argument(
-        "FFA executor task effective_tsamp must be finite and > 0");
-  }
-  if (task.bins <= 1) {
-    throw std::invalid_argument("FFA executor task bins must be > 1");
-  }
-  if (task.rows == 0) {
-    throw std::invalid_argument("FFA executor task rows must be > 0");
-  }
-  if (task.rows_eval == 0 || task.rows_eval > task.rows) {
-    throw std::invalid_argument(
-        "FFA executor task rows_eval must satisfy 0 < rows_eval <= rows");
-  }
-  if (task.prepared_nsamples == 0) {
-    throw std::invalid_argument(
-        "FFA executor task prepared_nsamples must be > 0");
-  }
-
-  const std::size_t full_size = checked_multiply(task.rows, task.bins);
-  if (full_size > task.prepared_nsamples) {
-    throw std::invalid_argument(
-        "FFA executor task rows * bins must be <= prepared_nsamples");
-  }
-
-  if (is_no_downsample(task.downsample_factor)) {
-    if (task.prepared_nsamples != input_nsamples) {
-      throw std::invalid_argument(
-          "FFA executor no-downsample task prepared_nsamples must match input "
-          "size");
-    }
-    return;
-  }
-
-  if (task.prepared_nsamples != downsampled_size(input_nsamples,
-                                        task.downsample_factor)) {
-    throw std::invalid_argument(
-        "FFA executor task prepared_nsamples must match downsampled_size");
-  }
-}
-
 void validate_inputs(std::span<const float> time_series,
                      const FfaSearchPlan& plan,
                      bool consumer_is_callable) {
   if (time_series.empty()) {
     throw std::invalid_argument("FFA executor time series must not be empty");
   }
-  if (plan.tasks.empty()) {
-    throw std::invalid_argument("FFA executor plan must contain at least one task");
-  }
   if (!consumer_is_callable) {
     throw std::invalid_argument("FFA executor consumer must be callable");
   }
-  for (const auto& task : plan.tasks) {
-    validate_task(task, time_series.size());
+  validate_ffa_search_plan(plan);
+  if (time_series.size() != plan.observation.nsamples) {
+    throw std::invalid_argument(
+        "FFA executor time series size must match plan observation nsamples");
   }
 }
 
@@ -146,7 +94,7 @@ void for_each_ffa_block_cpu(std::span<const float> time_series,
         .task = &task,
         .shape = FfaTransformShape{.rows = task.rows_eval, .bins = task.bins},
         .transform = std::span<const float>(transform).first(exposed_size),
-        .stdnoise = ffa_task_stdnoise(task),
+        .stdnoise = ffa_task_stdnoise(plan.observation, task),
     });
   }
 }
@@ -174,7 +122,7 @@ void for_each_ffa_row_cpu(std::span<const float> time_series,
         .rows = task.rows,
         .bins = task.bins,
     };
-    const float stdnoise = ffa_task_stdnoise(task);
+    const float stdnoise = ffa_task_stdnoise(plan.observation, task);
     for_each_ffa_transform_row_cpu(
         prepared.first(full_size), full_shape, task.rows_eval, scratch, work,
         row_buffer, [&](const FfaTransformRowView& row) {

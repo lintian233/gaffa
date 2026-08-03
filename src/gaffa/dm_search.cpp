@@ -110,27 +110,15 @@ DmPeaks search_ffa_peaks_for_dm(
     std::span<const double> dms,
     std::size_t dm_index,
     double tsamp,
-    double reference_time_seconds,
     const PreprocessPlan& preprocess,
     const FfaSearchPlan& ffa_plan,
     const FfaSearchOptions& ffa_options) {
   TimeSeries time_series =
       maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
   validate_preprocessed_time_series(time_series, input.shape, tsamp);
-  const FfaSearchResult search =
-      search_ffa_cpu(time_series.data, ffa_plan, ffa_options);
-  DmPeaks peaks;
-  peaks.reserve(search.peaks.size());
-  for (const auto& peak : search.peaks) {
-    PeriodicPeak periodic_peak = periodic_peak_from_ffa(peak);
-    periodic_peak.motion.reference_time_seconds = reference_time_seconds;
-    peaks.push_back(DmPeak{
-        .dm = dms[dm_index],
-        .dm_index = dm_index,
-        .peak = std::move(periodic_peak),
-    });
-  }
-  return peaks;
+  const std::vector<PeriodicPeak> peaks = search_ffa_periodic_cpu(
+      time_series.data, ffa_plan, ffa_options);
+  return attach_dm_peaks(peaks, dms[dm_index], dm_index);
 }
 
 template <typename T>
@@ -147,20 +135,6 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
   };
   const FfaSearchPlan ffa_plan =
       make_riptide_ffa_plan(input.shape.nsamples, tsamp, options.plan);
-  // All task outputs describe the same input observation, including tasks that
-  // downsample internally. Use that observation's midpoint as their common
-  // physical epoch rather than deriving an epoch from each prepared task.
-  const double reference_time_seconds =
-      0.5 * static_cast<double>(input.shape.nsamples) * tsamp;
-  if (!std::isfinite(reference_time_seconds)) {
-    throw std::overflow_error("DM search reference time is not finite");
-  }
-  const double searched_duration_seconds =
-      static_cast<double>(input.shape.nsamples) * tsamp;
-  if (!(searched_duration_seconds > 0.0) ||
-      !std::isfinite(searched_duration_seconds)) {
-    throw std::overflow_error("DM search duration is not finite and > 0");
-  }
 
   DmPeaks global_peaks;
   std::exception_ptr error;
@@ -178,8 +152,7 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
       }
       try {
         DmPeaks peaks = search_ffa_peaks_for_dm(
-            input, dms, dm_index, tsamp, reference_time_seconds,
-            options.preprocess, ffa_plan,
+            input, dms, dm_index, tsamp, options.preprocess, ffa_plan,
             ffa_options);
         if (!peaks.empty()) {
           local_peaks.insert(local_peaks.end(),

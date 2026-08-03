@@ -261,25 +261,12 @@ std::vector<gaffa::DmPeak> run_typed(const gaffa::FilterbankData& filterbank,
   float_bytes = device_series.bytes();
   preprocess_workspace = preprocess_program.workspace_shape().total_bytes;
   ffa_workspace = ffa_program.workspace_shape().total_bytes;
-  observation_seconds =
-      static_cast<double>(dedispersed.shape.nsamples) * filterbank.header.tsamp;
-  if (!(observation_seconds > 0.0) || !std::isfinite(observation_seconds)) {
-    throw std::overflow_error("CUDA DM-search observation time is not finite and > 0");
-  }
-  // FfaPeak is deliberately independent of observation-time context. This
-  // benchmark owns that context, so normalize its backend-neutral output to
-  // the same midpoint epoch used by the CPU DM search and Loki P-FFA paths.
-  const double reference_time_seconds =
-      0.5 * static_cast<double>(dedispersed.shape.nsamples) *
-      filterbank.header.tsamp;
-  if (!std::isfinite(reference_time_seconds)) {
-    throw std::overflow_error("CUDA DM-search reference time is not finite");
-  }
+  observation_seconds = ffa_plan.observation.duration_seconds();
   std::vector<gaffa::DmPeak> peaks;
   peaks.reserve(ffa_result.peaks.size());
   for (const auto& item : ffa_result.peaks) {
-    auto peak = gaffa::periodic_peak_from_ffa(item.peak);
-    peak.motion.reference_time_seconds = reference_time_seconds;
+    auto peak = gaffa::periodic_peak_from_ffa(item.peak,
+                                               ffa_plan.observation);
     peaks.push_back({.dm = args.dm_low + item.series_index * args.dm_step,
                      .dm_index = item.series_index,
                      .peak = std::move(peak)});

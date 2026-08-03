@@ -79,11 +79,16 @@ TEST(FfaPeak, SortsNonFinitePeaksAfterFinitePeaks) {
 
 TEST(FfaPeak, ConvertsToBackendNeutralPeriodicPeak) {
   const auto ffa_peak = peak(8.0F, 0.25, 4, 7, 3, 64);
+  const gaffa::FfaObservation observation{
+      .nsamples = 64,
+      .tsamp_seconds = 0.25,
+  };
 
-  const auto periodic = gaffa::periodic_peak_from_ffa(ffa_peak);
+  const auto periodic =
+      gaffa::periodic_peak_from_ffa(ffa_peak, observation);
 
   EXPECT_EQ(periodic.motion.order, gaffa::MotionOrder::Frequency);
-  EXPECT_DOUBLE_EQ(periodic.motion.reference_time_seconds, 0.0);
+  EXPECT_DOUBLE_EQ(periodic.motion.reference_time_seconds, 8.0);
   EXPECT_DOUBLE_EQ(periodic.motion.frequency_hz, 4.0);
   ASSERT_TRUE(periodic.phase_bin.has_value());
   EXPECT_EQ(*periodic.phase_bin, 7);
@@ -92,4 +97,40 @@ TEST(FfaPeak, ConvertsToBackendNeutralPeriodicPeak) {
   EXPECT_DOUBLE_EQ(periodic.duty_cycle, 4.0 / 64.0);
   EXPECT_FLOAT_EQ(periodic.snr, 8.0F);
   EXPECT_DOUBLE_EQ(periodic.period_seconds(), 0.25);
+}
+
+TEST(FfaPeak, ConvertsPeakBatchWithSharedObservation) {
+  const std::vector<gaffa::FfaPeak> ffa_peaks{
+      peak(8.0F, 0.25, 4, 7, 3, 64),
+      peak(7.0F, 0.5, 2, 1, 1, 64),
+  };
+  const gaffa::FfaObservation observation{
+      .nsamples = 128,
+      .tsamp_seconds = 0.125,
+  };
+
+  const auto periodic =
+      gaffa::periodic_peaks_from_ffa(ffa_peaks, observation);
+
+  ASSERT_EQ(periodic.size(), 2);
+  EXPECT_DOUBLE_EQ(periodic[0].motion.reference_time_seconds, 8.0);
+  EXPECT_DOUBLE_EQ(periodic[1].motion.reference_time_seconds, 8.0);
+  EXPECT_DOUBLE_EQ(periodic[0].motion.frequency_hz, 4.0);
+  EXPECT_DOUBLE_EQ(periodic[1].motion.frequency_hz, 2.0);
+}
+
+TEST(FfaPeak, RejectsInvalidProjectionObservation) {
+  const auto ffa_peak = peak(8.0F, 0.25, 4, 7, 3, 64);
+  EXPECT_THROW(
+      (void)gaffa::periodic_peak_from_ffa(
+          ffa_peak, {.nsamples = 0, .tsamp_seconds = 0.25}),
+      std::invalid_argument);
+  EXPECT_THROW(
+      (void)gaffa::periodic_peak_from_ffa(
+          ffa_peak, {.nsamples = 64, .tsamp_seconds = INFINITY}),
+      std::invalid_argument);
+  EXPECT_THROW(
+      (void)gaffa::periodic_peaks_from_ffa(
+          {}, {.nsamples = 0, .tsamp_seconds = 0.25}),
+      std::invalid_argument);
 }

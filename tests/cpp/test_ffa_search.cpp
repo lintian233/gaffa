@@ -11,8 +11,7 @@
 
 namespace {
 
-gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
-                               double downsample_factor,
+gaffa::FfaSearchTask make_task(double downsample_factor,
                                std::size_t prepared_nsamples,
                                std::size_t rows,
                                std::size_t rows_eval,
@@ -20,7 +19,6 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
   return gaffa::FfaSearchTask{
       .downsample_factor = downsample_factor,
       .effective_tsamp = downsample_factor,
-      .input_nsamples = input_nsamples,
       .prepared_nsamples = prepared_nsamples,
       .bins = bins,
       .rows = rows,
@@ -32,7 +30,8 @@ gaffa::FfaSearchTask make_task(std::size_t input_nsamples,
 
 gaffa::FfaSearchPlan single_task_plan(std::size_t input_nsamples) {
   return gaffa::FfaSearchPlan{
-      .tasks = {make_task(input_nsamples, 1.0, input_nsamples, 4, 4, 2)},
+      .observation = {.nsamples = input_nsamples, .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, input_nsamples, 4, 4, 2)},
       .width_trials = {1},
   };
 }
@@ -84,12 +83,33 @@ TEST(FfaSearchCpu, FindsPeaksThroughExecutorAndDetection) {
   EXPECT_EQ(result.peaks.front().bins, 2);
 }
 
+TEST(FfaSearchCpu, PeriodicConvenienceUsesPlanObservationMidpoint) {
+  const std::vector<float> input{0, 0, 0, 5, 0, 0, 0, 5};
+  auto plan = single_task_plan(input.size());
+  plan.observation.tsamp_seconds = 0.25;
+  plan.tasks.front().effective_tsamp = 0.25;
+  plan.tasks.front().period_begin = 0.5;
+  plan.tasks.front().period_end = 0.75;
+  const gaffa::FfaSearchOptions options{.snr_threshold = 0.0F};
+
+  const auto raw = gaffa::search_ffa_cpu(input, plan, options);
+  const auto periodic = gaffa::search_ffa_periodic_cpu(input, plan, options);
+
+  ASSERT_EQ(periodic.size(), raw.peaks.size());
+  ASSERT_FALSE(periodic.empty());
+  EXPECT_DOUBLE_EQ(periodic.front().motion.reference_time_seconds, 1.0);
+  EXPECT_DOUBLE_EQ(periodic.front().motion.frequency_hz,
+                   raw.peaks.front().frequency);
+  EXPECT_EQ(periodic.front().phase_bin, raw.peaks.front().phase);
+}
+
 TEST(FfaSearchCpu, CollectsPeaksAcrossBlocks) {
   const std::vector<float> input{0, 0, 0, 1, 0, 0, 0, 10};
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(input.size(), 1.0, input.size(), 4, 4, 2),
-          make_task(input.size(), 1.0, input.size(), 2, 2, 4),
+          make_task(1.0, input.size(), 4, 4, 2),
+          make_task(1.0, input.size(), 2, 2, 4),
       },
       .width_trials = {1},
   };
@@ -107,7 +127,8 @@ TEST(FfaSearchCpu, CollectsPeaksAcrossBlocks) {
 TEST(FfaSearchCpu, ReportsDownsampledTaskPeriod) {
   const std::vector<float> input{0, 0, 0, 4, 0, 0, 0, 4};
   const gaffa::FfaSearchPlan plan{
-      .tasks = {make_task(input.size(), 2.0, 4, 2, 2, 2)},
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {make_task(2.0, 4, 2, 2, 2)},
       .width_trials = {1},
   };
 
@@ -126,7 +147,8 @@ TEST(FfaSearchCpu, ReportsDownsampledTaskPeriod) {
 TEST(FfaSearchCpu, AllowsExternalPlan) {
   const std::vector<float> input{0, 0, 0, 5, 0, 0};
   const gaffa::FfaSearchPlan custom_plan{
-      .tasks = {make_task(input.size(), 1.0, input.size(), 3, 2, 2)},
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
+      .tasks = {make_task(1.0, input.size(), 3, 2, 2)},
       .width_trials = {1},
   };
 
@@ -144,9 +166,10 @@ TEST(FfaSearchCpu, MatchesMaterializedBlockReference) {
   const std::vector<float> input{0, 0, 3, 0, 1, 0, 3, 0,
                                  0, 4, 0, 1, 0, 4, 0, 1};
   const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = input.size(), .tsamp_seconds = 1.0},
       .tasks = {
-          make_task(input.size(), 1.0, input.size(), 4, 4, 4),
-          make_task(input.size(), 2.0, 8, 2, 2, 4),
+          make_task(1.0, input.size(), 4, 4, 4),
+          make_task(2.0, 8, 2, 2, 4),
       },
       .width_trials = {1, 2},
   };

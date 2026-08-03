@@ -195,10 +195,10 @@ gaffa::FfaSearchPlan make_single_task_plan(std::size_t rows,
   const std::size_t elements =
       checked_multiply(rows, bins, "single task element count overflow");
   return gaffa::FfaSearchPlan{
+      .observation = {.nsamples = elements, .tsamp_seconds = 1.0},
       .tasks = {gaffa::FfaSearchTask{
           .downsample_factor = 1.0,
           .effective_tsamp = 1.0,
-          .input_nsamples = elements,
           .prepared_nsamples = elements,
           .bins = bins,
           .rows = rows,

@@ -14,14 +14,20 @@ struct CudaFfaProgramImpl {
 };
 
 CudaFfaExecutionPlan::CudaFfaExecutionPlan(
+    FfaObservation observation,
     std::vector<CudaFfaPrepareGroup> groups,
     std::size_t max_prepared_nsamples,
     std::size_t max_transform_elements,
     std::size_t max_detection_slots_per_series)
-    : groups_(std::move(groups)),
+    : observation_(observation),
+      groups_(std::move(groups)),
       max_prepared_nsamples_(max_prepared_nsamples),
       max_transform_elements_(max_transform_elements),
       max_detection_slots_per_series_(max_detection_slots_per_series) {}
+
+const FfaObservation& CudaFfaExecutionPlan::observation() const noexcept {
+  return observation_;
+}
 
 std::span<const CudaFfaPrepareGroup> CudaFfaExecutionPlan::groups() const
     noexcept {
@@ -144,16 +150,12 @@ std::size_t CudaFfaProgram::device_metadata_bytes() const {
 CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
   validate_plan_for_workspace(plan);
 
-  const std::size_t input_nsamples = plan.tasks.front().input_nsamples;
+  const std::size_t input_nsamples = plan.observation.nsamples;
   std::vector<CudaFfaPrepareGroup> groups;
   std::size_t max_prepared_nsamples = 0;
   std::size_t max_transform_elements = 0;
   std::size_t max_detection_slots_per_series = 0;
   for (const auto& task : plan.tasks) {
-    if (task.input_nsamples != input_nsamples) {
-      throw std::invalid_argument(
-          "CUDA FFA plan tasks must share input_nsamples");
-    }
     const std::size_t transform_elements = checked_multiply(
         task.rows, task.bins, "CUDA FFA task layout size overflow");
     const FfaDetectionPlan detection_plan =
@@ -175,7 +177,7 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
     auto group = std::find_if(
         groups.begin(), groups.end(),
         [&](const CudaFfaPrepareGroup& candidate) {
-          return candidate.prepare_key.input_nsamples == task.input_nsamples &&
+          return candidate.prepare_key.input_nsamples == input_nsamples &&
                  candidate.prepare_key.downsample_factor ==
                      task.downsample_factor;
         });
@@ -184,7 +186,7 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
           groups.end(),
           CudaFfaPrepareGroup{
               .prepare_key = CudaFfaPrepareKey{
-                  .input_nsamples = task.input_nsamples,
+                  .input_nsamples = input_nsamples,
                   .downsample_factor = task.downsample_factor,
               },
               .prepared_nsamples = task.prepared_nsamples,
@@ -204,7 +206,7 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
         max_detection_slots_per_series, detection_slots_per_series);
   }
 
-  return CudaFfaExecutionPlan(std::move(groups), max_prepared_nsamples,
+  return CudaFfaExecutionPlan(plan.observation, std::move(groups), max_prepared_nsamples,
                               max_transform_elements,
                               max_detection_slots_per_series);
 }
@@ -577,7 +579,9 @@ class CudaFfaTileRunner {
           program_.impl_->ops.detection_trials.data() +
               program_task.detection_trial_offset,
           program_task.detection_trial_count, task.detection_plan.max_width,
-          ffa_task_stdnoise(task.task), search_options_.snr_threshold,
+          ffa_task_stdnoise(program_.execution_plan().observation(),
+                            task.task),
+          search_options_.snr_threshold,
           static_cast<std::uint32_t>(task_index),
           workspace_.detection_compact.data(),
           workspace_.detection_compact.size(),
@@ -590,7 +594,9 @@ class CudaFfaTileRunner {
           program_.impl_->ops.detection_trials.data() +
               program_task.detection_trial_offset,
           program_task.detection_trial_count, task.detection_plan.max_width,
-          ffa_task_stdnoise(task.task), search_options_.snr_threshold,
+          ffa_task_stdnoise(program_.execution_plan().observation(),
+                            task.task),
+          search_options_.snr_threshold,
           static_cast<std::uint32_t>(task_index),
           workspace_.detection_compact.data(),
           workspace_.detection_compact.size(),
@@ -722,4 +728,24 @@ FfaSearchResult search_ffa_cuda(
   }
   CudaFfaProgram program(plan, program_options, execution_options);
   return search_ffa_cuda(program, time_series, options);
+}
+
+std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+    CudaFfaProgram& program,
+    CudaSpan<const float> preprocessed_time_series,
+    const FfaSearchOptions& options) {
+  const FfaSearchResult raw =
+      search_ffa_cuda(program, preprocessed_time_series, options);
+  return periodic_peaks_from_ffa(
+      raw.peaks, program.execution_plan().observation());
+}
+
+std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+    CudaSpan<const float> preprocessed_time_series,
+    const FfaSearchPlan& plan,
+    const FfaSearchOptions& options,
+    const CudaFfaProgramOptions& program_options,
+    const CudaFfaExecutionOptions& execution_options) {
+  CudaFfaProgram program(plan, program_options, execution_options);
+  return search_ffa_periodic_cuda(program, preprocessed_time_series, options);
 }

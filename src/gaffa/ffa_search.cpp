@@ -15,6 +15,7 @@ void validate_search_inputs(const FfaSearchPlan& plan,
     throw std::invalid_argument(
         "FFA search S/N threshold must be finite");
   }
+  validate_ffa_search_plan(plan);
   if (plan.width_trials.empty()) {
     throw std::invalid_argument(
         "FFA search plan width_trials must not be empty");
@@ -58,6 +59,15 @@ FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
   return FfaSearchResult{
       .peaks = std::move(peaks),
   };
+}
+
+std::vector<PeriodicPeak> search_ffa_periodic_cpu(
+    std::span<const float> preprocessed_time_series,
+    const FfaSearchPlan& plan,
+    const FfaSearchOptions& options) {
+  const FfaSearchResult raw =
+      search_ffa_cpu(preprocessed_time_series, plan, options);
+  return periodic_peaks_from_ffa(raw.peaks, plan.observation);
 }
 
 }  // namespace gaffa

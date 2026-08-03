@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace gaffa {
@@ -35,6 +36,54 @@ void validate_riptide_options(std::size_t nsamples,
   check_arg(options.period_min >=
                 tsamp * static_cast<double>(options.bins_min),
             "FFA plan period_min must be >= tsamp * bins_min");
+}
+
+void validate_observation(const FfaObservation& observation) {
+  check_arg(observation.nsamples > 0,
+            "FFA plan observation nsamples must be > 0");
+  check_arg(observation.tsamp_seconds > 0.0 &&
+                std::isfinite(observation.tsamp_seconds),
+            "FFA plan observation tsamp_seconds must be finite and > 0");
+  check_arg(std::isfinite(observation.duration_seconds()) &&
+                observation.duration_seconds() > 0.0,
+            "FFA plan observation duration must be finite and > 0");
+}
+
+void validate_task(const FfaObservation& observation,
+                   const FfaSearchTask& task) {
+  check_arg(std::isfinite(task.downsample_factor) &&
+                task.downsample_factor >= 1.0,
+            "FFA plan task downsample_factor must be finite and >= 1");
+  check_arg(std::isfinite(task.effective_tsamp) && task.effective_tsamp > 0.0,
+            "FFA plan task effective_tsamp must be finite and > 0");
+  const double expected_tsamp =
+      task.downsample_factor * observation.tsamp_seconds;
+  const double tolerance =
+      32.0 * std::numeric_limits<double>::epsilon() *
+      std::max(std::abs(expected_tsamp), std::abs(task.effective_tsamp));
+  check_arg(std::abs(task.effective_tsamp - expected_tsamp) <= tolerance,
+            "FFA plan task effective_tsamp must match downsample_factor * "
+            "observation.tsamp_seconds");
+  check_arg(task.bins > 1, "FFA plan task bins must be > 1");
+  check_arg(task.rows > 0, "FFA plan task rows must be > 0");
+  check_arg(task.rows_eval > 0 && task.rows_eval <= task.rows,
+            "FFA plan task rows_eval must satisfy 0 < rows_eval <= rows");
+  check_arg(task.prepared_nsamples > 0,
+            "FFA plan task prepared_nsamples must be > 0");
+  check_arg(task.rows <= std::numeric_limits<std::size_t>::max() / task.bins &&
+                task.rows * task.bins <= task.prepared_nsamples,
+            "FFA plan task rows * bins must be <= prepared_nsamples");
+  const std::size_t expected_prepared =
+      task.downsample_factor == 1.0
+          ? observation.nsamples
+          : downsampled_size(observation.nsamples, task.downsample_factor);
+  check_arg(task.prepared_nsamples == expected_prepared,
+            "FFA plan task prepared_nsamples does not match observation and "
+            "downsample_factor");
+  check_arg(std::isfinite(task.period_begin) &&
+                std::isfinite(task.period_end) && task.period_begin > 0.0 &&
+                task.period_end >= task.period_begin,
+            "FFA plan task period range is invalid");
 }
 
 std::size_t prepared_sample_count(std::size_t nsamples, double factor) {
@@ -87,6 +136,22 @@ double evaluated_period_end(double effective_tsamp,
 
 }  // namespace
 
+double FfaObservation::duration_seconds() const noexcept {
+  return static_cast<double>(nsamples) * tsamp_seconds;
+}
+
+double FfaObservation::reference_time_seconds() const noexcept {
+  return 0.5 * duration_seconds();
+}
+
+void validate_ffa_search_plan(const FfaSearchPlan& plan) {
+  validate_observation(plan.observation);
+  check_arg(!plan.tasks.empty(), "FFA plan must contain at least one task");
+  for (const FfaSearchTask& task : plan.tasks) {
+    validate_task(plan.observation, task);
+  }
+}
+
 FfaSearchPlan make_riptide_ffa_plan(
     std::size_t nsamples,
     double tsamp,
@@ -102,7 +167,12 @@ FfaSearchPlan make_riptide_ffa_plan(
         "FFA search range is empty after min_periods cap");
   }
 
-  FfaSearchPlan plan;
+  FfaSearchPlan plan{
+      .observation = {
+          .nsamples = nsamples,
+          .tsamp_seconds = tsamp,
+      },
+  };
   plan.width_trials = generate_width_trials(
       options.bins_min, options.duty_cycle_max, options.width_trial_spacing);
 
@@ -154,7 +224,6 @@ FfaSearchPlan make_riptide_ffa_plan(
       plan.tasks.push_back(FfaSearchTask{
           .downsample_factor = factor,
           .effective_tsamp = effective_tsamp,
-          .input_nsamples = nsamples,
           .prepared_nsamples = prepared_nsamples,
           .bins = bins,
           .rows = rows,
@@ -166,6 +235,7 @@ FfaSearchPlan make_riptide_ffa_plan(
     }
   }
 
+  validate_ffa_search_plan(plan);
   return plan;
 }
 

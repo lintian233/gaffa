@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -98,4 +100,13 @@ TEST(CandidateAnalysis, AppliesSnrThresholdAfterHarmonicRemoval) {
       result.candidate_set.candidates[result.selected.front()]
           .best.peak.motion.frequency_hz,
       1.0);
+}
+
+TEST(CandidateAnalysis, RejectsNonFiniteSelectionThreshold) {
+  auto analysis_options = options();
+  analysis_options.selection.snr_min = NAN;
+
+  EXPECT_THROW(
+      (void)gaffa::make_candidates_cpu({}, context(), analysis_options),
+      std::invalid_argument);
 }

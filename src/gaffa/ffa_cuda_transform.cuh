@@ -247,10 +247,11 @@ std::size_t max_merge_rows(const FfaCudaTransformLevel& level) {
 }
 
 void validate_task_prepared_nsamples(const FfaSearchTask& task,
+                                     std::size_t input_nsamples,
                                      const char* prefix) {
-  if (task.input_nsamples == 0) {
+  if (input_nsamples == 0) {
     throw std::invalid_argument(std::string(prefix) +
-                                " task input_nsamples must be > 0");
+                                " input nsamples must be > 0");
   }
   if (task.prepared_nsamples == 0) {
     throw std::invalid_argument(std::string(prefix) +
@@ -258,7 +259,7 @@ void validate_task_prepared_nsamples(const FfaSearchTask& task,
   }
 
   if (is_no_downsample(task.downsample_factor)) {
-    if (task.prepared_nsamples != task.input_nsamples) {
+    if (task.prepared_nsamples != input_nsamples) {
       throw std::invalid_argument(
           std::string(prefix) +
           " no-downsample task prepared_nsamples must match input nsamples");
@@ -267,7 +268,7 @@ void validate_task_prepared_nsamples(const FfaSearchTask& task,
   }
 
   const std::size_t expected_prepared =
-      downsampled_size(task.input_nsamples, task.downsample_factor);
+      downsampled_size(input_nsamples, task.downsample_factor);
   if (task.prepared_nsamples != expected_prepared) {
     throw std::invalid_argument(
         std::string(prefix) +
@@ -276,43 +277,9 @@ void validate_task_prepared_nsamples(const FfaSearchTask& task,
 }
 
 void validate_plan_for_workspace(const FfaSearchPlan& plan) {
-  if (plan.tasks.empty()) {
-    throw std::invalid_argument("CUDA FFA plan must contain at least one task");
-  }
+  validate_ffa_search_plan(plan);
   if (plan.width_trials.empty()) {
     throw std::invalid_argument("CUDA FFA plan width_trials must not be empty");
-  }
-  for (const auto& task : plan.tasks) {
-    if (task.bins <= 1) {
-      throw std::invalid_argument("CUDA FFA task bins must be > 1");
-    }
-    if (task.rows == 0) {
-      throw std::invalid_argument("CUDA FFA task rows must be > 0");
-    }
-    if (task.rows_eval == 0 || task.rows_eval > task.rows) {
-      throw std::invalid_argument(
-          "CUDA FFA task rows_eval must satisfy 0 < rows_eval <= rows");
-    }
-    if (task.prepared_nsamples == 0) {
-      throw std::invalid_argument(
-          "CUDA FFA task prepared_nsamples must be > 0");
-    }
-    const std::size_t task_elements = checked_multiply(
-        task.rows, task.bins, "CUDA FFA task shape size overflow");
-    if (task_elements > task.prepared_nsamples) {
-      throw std::invalid_argument(
-          "CUDA FFA task rows * bins must be <= prepared_nsamples");
-    }
-    if (!(task.effective_tsamp > 0.0) || !std::isfinite(task.effective_tsamp)) {
-      throw std::invalid_argument(
-          "CUDA FFA task effective_tsamp must be finite and > 0");
-    }
-    if (!std::isfinite(task.downsample_factor) ||
-        task.downsample_factor < 1.0) {
-      throw std::invalid_argument(
-          "CUDA FFA task downsample_factor must be finite and >= 1");
-    }
-    validate_task_prepared_nsamples(task, "CUDA FFA");
   }
 }
 
@@ -344,16 +311,12 @@ void validate_prepare_arguments(CudaTimeSeriesBatchView input,
   if (output.data == nullptr) {
     throw std::invalid_argument("CUDA FFA prepare output data must not be null");
   }
-  if (task.input_nsamples != input.nsamples) {
-    throw std::invalid_argument(
-        "CUDA FFA prepare task input_nsamples must match input nsamples");
-  }
   if (!std::isfinite(task.downsample_factor) ||
       task.downsample_factor < 1.0) {
     throw std::invalid_argument(
         "CUDA FFA prepare downsample_factor must be finite and >= 1");
   }
-  validate_task_prepared_nsamples(task, "CUDA FFA prepare");
+  validate_task_prepared_nsamples(task, input.nsamples, "CUDA FFA prepare");
   const std::size_t expected_output = checked_multiply(
       input.nseries, task.prepared_nsamples,
       "CUDA FFA prepare output element count overflow");

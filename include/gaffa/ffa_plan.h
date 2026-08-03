@@ -5,14 +5,23 @@
 
 namespace gaffa {
 
+// Physical time coordinates of the complete input series searched by an FFA
+// plan. Every task in the plan is derived from this one observation.
+struct FfaObservation {
+  std::size_t nsamples = 0;
+  double tsamp_seconds = 0.0;
+
+  [[nodiscard]] double duration_seconds() const noexcept;
+  [[nodiscard]] double reference_time_seconds() const noexcept;
+};
+
 struct FfaSearchTask {
   double downsample_factor = 1.0;
   double effective_tsamp = 0.0;
 
-  // Number of samples in the original 1D time series passed to the executor.
-  std::size_t input_nsamples = 0;
   // Number of samples after preparing this task's input. This equals
-  // input_nsamples for downsample_factor == 1 and downsampled_size otherwise.
+  // observation.nsamples for downsample_factor == 1 and downsampled_size
+  // otherwise.
   std::size_t prepared_nsamples = 0;
 
   // FFA transform shape for the prepared samples.
@@ -27,6 +36,7 @@ struct FfaSearchTask {
 };
 
 struct FfaSearchPlan {
+  FfaObservation observation{};
   std::vector<FfaSearchTask> tasks;
   std::vector<std::size_t> width_trials;
 };
@@ -50,5 +60,10 @@ FfaSearchPlan make_riptide_ffa_plan(
     std::size_t nsamples,
     double tsamp,
     const RiptideFfaPlanOptions& options);
+
+// Validates the immutable-by-contract observation and all task-local values.
+// CPU and CUDA execution paths share this validation before allocating or
+// launching work.
+void validate_ffa_search_plan(const FfaSearchPlan& plan);
 
 }  // namespace gaffa

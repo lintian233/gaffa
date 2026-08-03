@@ -114,6 +114,7 @@ class CudaFfaExecutionPlan {
   CudaFfaExecutionPlan(CudaFfaExecutionPlan&&) noexcept = default;
   CudaFfaExecutionPlan& operator=(CudaFfaExecutionPlan&&) noexcept = default;
 
+  [[nodiscard]] const FfaObservation& observation() const noexcept;
   [[nodiscard]] std::span<const CudaFfaPrepareGroup> groups() const noexcept;
   [[nodiscard]] std::size_t max_prepared_nsamples() const noexcept;
   [[nodiscard]] std::size_t max_transform_elements() const noexcept;
@@ -123,11 +124,13 @@ class CudaFfaExecutionPlan {
   friend CudaFfaExecutionPlan make_ffa_cuda_execution_plan(
       const FfaSearchPlan& plan);
 
-  CudaFfaExecutionPlan(std::vector<CudaFfaPrepareGroup> groups,
+  CudaFfaExecutionPlan(FfaObservation observation,
+                       std::vector<CudaFfaPrepareGroup> groups,
                        std::size_t max_prepared_nsamples,
                        std::size_t max_transform_elements,
                        std::size_t max_detection_slots_per_series);
 
+  FfaObservation observation_{};
   std::vector<CudaFfaPrepareGroup> groups_;
   std::size_t max_prepared_nsamples_ = 0;
   std::size_t max_transform_elements_ = 0;
@@ -257,6 +260,7 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
 // Executes one already-preprocessed dense [series][sample] tile. The tile must
 // contain no more than program.tile_capacity() series. Returned series_index
 // values are local to this tile; no DM-specific semantics are assumed.
+// FfaSearchOptions::max_peaks is enforced independently for each series.
 FfaBatchSearchResult run_ffa_batch_cuda(
     CudaFfaProgram& program,
     CudaTimeSeriesBatchView batch,
@@ -273,6 +277,21 @@ FfaSearchResult search_ffa_cuda(
 // CudaFfaProgram and call run_ffa_batch_cuda() instead.
 FfaSearchResult search_ffa_cuda(
     CudaSpan<const float> time_series,
+    const FfaSearchPlan& plan,
+    const FfaSearchOptions& options = {},
+    const CudaFfaProgramOptions& program_options = {},
+    const CudaFfaExecutionOptions& execution_options = {});
+
+// CUDA counterpart to search_ffa_periodic_cpu(). The Program overload reuses
+// immutable device metadata and workspace; results are projected using the
+// execution plan observation midpoint.
+std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+    CudaFfaProgram& program,
+    CudaSpan<const float> preprocessed_time_series,
+    const FfaSearchOptions& options = {});
+
+std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+    CudaSpan<const float> preprocessed_time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options = {},
     const CudaFfaProgramOptions& program_options = {},

@@ -97,9 +97,12 @@ TEST(FfaPlan, MatchesSmallKnownPlan) {
   EXPECT_EQ(plan.width_trials, (std::vector<std::size_t>{1, 2}));
 
   const auto& first = plan.tasks.front();
+  EXPECT_EQ(plan.observation.nsamples, 64);
+  EXPECT_DOUBLE_EQ(plan.observation.tsamp_seconds, 0.25);
+  EXPECT_DOUBLE_EQ(plan.observation.duration_seconds(), 16.0);
+  EXPECT_DOUBLE_EQ(plan.observation.reference_time_seconds(), 8.0);
   EXPECT_DOUBLE_EQ(first.downsample_factor, 1.0);
   EXPECT_DOUBLE_EQ(first.effective_tsamp, 0.25);
-  EXPECT_EQ(first.input_nsamples, 64);
   EXPECT_EQ(first.prepared_nsamples, 64);
   EXPECT_EQ(first.bins, 4);
   EXPECT_EQ(first.rows, 16);
@@ -178,4 +181,28 @@ TEST(FfaPlan, RejectsEmptySearchRangeAfterMinPeriodsCap) {
 
   EXPECT_THROW((void)gaffa::make_riptide_ffa_plan(64, 0.25, options),
                std::invalid_argument);
+}
+
+TEST(FfaPlan, RejectsTaskInconsistentWithObservation) {
+  gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = 8, .tsamp_seconds = 0.25},
+      .tasks = {gaffa::FfaSearchTask{
+          .downsample_factor = 1.0,
+          .effective_tsamp = 0.25,
+          .prepared_nsamples = 8,
+          .bins = 2,
+          .rows = 4,
+          .rows_eval = 4,
+          .period_begin = 0.5,
+          .period_end = 0.75,
+      }},
+  };
+  EXPECT_NO_THROW(gaffa::validate_ffa_search_plan(plan));
+
+  plan.tasks.front().prepared_nsamples = 7;
+  EXPECT_THROW(gaffa::validate_ffa_search_plan(plan), std::invalid_argument);
+
+  plan.tasks.front().prepared_nsamples = 8;
+  plan.tasks.front().effective_tsamp = 1.0;
+  EXPECT_THROW(gaffa::validate_ffa_search_plan(plan), std::invalid_argument);
 }

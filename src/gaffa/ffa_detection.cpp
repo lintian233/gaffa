@@ -253,10 +253,11 @@ ScanBoxcarPeakFn select_scan_boxcar_peak_kernel() {
 
 }  // namespace
 
-float ffa_task_stdnoise(const FfaSearchTask& task) {
+float ffa_task_stdnoise(const FfaObservation& observation,
+                        const FfaSearchTask& task) {
   double variance = 1.0;
   if (task.downsample_factor != 1.0) {
-    variance = downsampled_variance(task.input_nsamples,
+    variance = downsampled_variance(observation.nsamples,
                                     task.downsample_factor);
   }
   return static_cast<float>(
