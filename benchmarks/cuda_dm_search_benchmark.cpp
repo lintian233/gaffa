@@ -253,7 +253,7 @@ std::vector<gaffa::DmPeak> run_typed(const gaffa::FilterbankData& filterbank,
   });
   gaffa::FfaBatchSearchResult ffa_result;
   timings.ffa = time_once([&] {
-    ffa_result = gaffa::run_ffa_batch_cuda(
+    ffa_result = gaffa::search_ffa_raw_batch_cuda(
         ffa_program, mutable_batch.as_const(),
         {.snr_threshold = args.snr_threshold, .max_peaks = args.max_peaks});
   });

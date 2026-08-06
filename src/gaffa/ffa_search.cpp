@@ -24,9 +24,9 @@ void validate_search_inputs(const FfaSearchPlan& plan,
 
 }  // namespace
 
-FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
-                               const FfaSearchPlan& plan,
-                               const FfaSearchOptions& options) {
+FfaSearchResult search_ffa_raw_cpu(std::span<const float> time_series,
+                                   const FfaSearchPlan& plan,
+                                   const FfaSearchOptions& options) {
   validate_search_inputs(plan, options);
 
   std::vector<FfaPeak> peaks;
@@ -61,12 +61,12 @@ FfaSearchResult search_ffa_cpu(std::span<const float> time_series,
   };
 }
 
-std::vector<PeriodicPeak> search_ffa_periodic_cpu(
+std::vector<PeriodicPeak> search_ffa_cpu(
     std::span<const float> preprocessed_time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options) {
   const FfaSearchResult raw =
-      search_ffa_cpu(preprocessed_time_series, plan, options);
+      search_ffa_raw_cpu(preprocessed_time_series, plan, options);
   return periodic_peaks_from_ffa(raw.peaks, plan.observation);
 }
 

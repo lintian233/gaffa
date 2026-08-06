@@ -65,6 +65,7 @@ class CudaPreprocessProgram {
   [[nodiscard]] int device_id() const;
   [[nodiscard]] std::size_t tile_capacity() const;
   [[nodiscard]] std::size_t max_nsamples() const;
+  [[nodiscard]] cudaStream_t stream() const;
   [[nodiscard]] const CudaPreprocessWorkspaceShape& workspace_shape() const;
 
   // Waits for the configured stream and reports deferred input/data errors.

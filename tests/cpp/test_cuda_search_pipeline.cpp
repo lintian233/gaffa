@@ -1,5 +1,6 @@
 #include "gaffa/dedispersion.h"
 #include "gaffa/dedispersion_cuda.h"
+#include "gaffa/dm_search_cuda.h"
 #include "gaffa/ffa_cuda.h"
 #include "gaffa/ffa_search.h"
 #include "gaffa/filterbank_view.h"
@@ -40,18 +41,18 @@ gaffa::FfaSearchPlan pipeline_ffa_plan(std::size_t nsamples) {
   };
 }
 
-bool by_peak_location(const gaffa::FfaBatchPeak& lhs,
-                      const gaffa::FfaBatchPeak& rhs) {
-  if (lhs.series_index != rhs.series_index) {
-    return lhs.series_index < rhs.series_index;
+bool by_peak_location(const gaffa::DmPeak& lhs,
+                      const gaffa::DmPeak& rhs) {
+  if (lhs.dm_index != rhs.dm_index) {
+    return lhs.dm_index < rhs.dm_index;
   }
-  if (lhs.peak.shift != rhs.peak.shift) {
-    return lhs.peak.shift < rhs.peak.shift;
+  if (lhs.peak.phase_bin != rhs.peak.phase_bin) {
+    return lhs.peak.phase_bin < rhs.peak.phase_bin;
   }
-  if (lhs.peak.width_index != rhs.peak.width_index) {
-    return lhs.peak.width_index < rhs.peak.width_index;
+  if (lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins) {
+    return lhs.peak.boxcar_width_bins < rhs.peak.boxcar_width_bins;
   }
-  return lhs.peak.phase < rhs.peak.phase;
+  return lhs.peak.motion.frequency_hz < rhs.peak.motion.frequency_hz;
 }
 
 }  // namespace
@@ -90,10 +91,11 @@ TEST(CudaSearchPipeline, DeviceDedispersionPreprocessAndFfaMatchCpu) {
   };
   const auto ffa_plan = pipeline_ffa_plan(nsamples);
   const gaffa::FfaSearchOptions search_options{.snr_threshold = -1000000.0F};
+  const std::vector<double> dms{0.0, 1.0};
 
   const auto cpu_dedispersed = gaffa::dedisperse_subband_cpu(
       input, frequency_mhz, dedispersion_plan, subband_options);
-  std::vector<gaffa::FfaBatchPeak> expected;
+  gaffa::DmPeaks expected;
   for (std::size_t dm_index = 0; dm_index < ndm; ++dm_index) {
     std::vector<float> series(nsamples);
     for (std::size_t sample = 0; sample < nsamples; ++sample) {
@@ -103,11 +105,13 @@ TEST(CudaSearchPipeline, DeviceDedispersionPreprocessAndFfaMatchCpu) {
     const auto preprocessed = gaffa::preprocess_time_series_cpu(
         gaffa::TimeSeries{.data = std::move(series), .tsamp = 0.001},
         preprocess_plan);
-    const auto cpu_peaks = gaffa::search_ffa_cpu(
+    const auto cpu_peaks = gaffa::search_ffa_raw_cpu(
         preprocessed.data, ffa_plan, search_options);
-    for (const auto& peak : cpu_peaks.peaks) {
-      expected.push_back({.series_index = dm_index, .peak = peak});
-    }
+    const auto periodic =
+        gaffa::periodic_peaks_from_ffa(cpu_peaks.peaks, ffa_plan.observation);
+    gaffa::DmPeaks dm_peaks =
+        gaffa::attach_dm_peaks(periodic, dms[dm_index], dm_index + 7);
+    expected.insert(expected.end(), dm_peaks.begin(), dm_peaks.end());
   }
 
   auto gpu_dedispersed = gaffa::dedisperse_subband_cuda_device(
@@ -130,26 +134,26 @@ TEST(CudaSearchPipeline, DeviceDedispersionPreprocessAndFfaMatchCpu) {
       .nsamples = nsamples,
       .device_id = gpu_dedispersed.device_id,
   };
-  gaffa::preprocess_time_series_batch_inplace_cuda(preprocess_program,
-                                                    mutable_batch);
-  preprocess_program.synchronize();
-
   gaffa::CudaFfaProgram ffa_program(
       ffa_plan, {.device_id = gpu_dedispersed.device_id},
       {.series_tile_size = ndm});
-  auto actual = gaffa::run_ffa_batch_cuda(
-      ffa_program, mutable_batch.as_const(), search_options).peaks;
+  auto actual = gaffa::search_dm_ffa_cuda(
+      preprocess_program, ffa_program, mutable_batch,
+      {.values = dms, .index_offset = 7}, search_options);
   std::sort(expected.begin(), expected.end(), by_peak_location);
   std::sort(actual.begin(), actual.end(), by_peak_location);
 
   ASSERT_EQ(actual.size(), expected.size());
   for (std::size_t index = 0; index < expected.size(); ++index) {
-    EXPECT_EQ(actual[index].series_index, expected[index].series_index);
-    EXPECT_EQ(actual[index].peak.shift, expected[index].peak.shift);
-    EXPECT_EQ(actual[index].peak.phase, expected[index].peak.phase);
-    EXPECT_EQ(actual[index].peak.width_index, expected[index].peak.width_index);
+    EXPECT_EQ(actual[index].dm_index, expected[index].dm_index);
+    EXPECT_DOUBLE_EQ(actual[index].dm, expected[index].dm);
+    EXPECT_EQ(actual[index].peak.phase_bin, expected[index].peak.phase_bin);
+    EXPECT_EQ(actual[index].peak.boxcar_width_bins,
+              expected[index].peak.boxcar_width_bins);
     EXPECT_FLOAT_EQ(actual[index].peak.snr, expected[index].peak.snr);
-    EXPECT_DOUBLE_EQ(actual[index].peak.period, expected[index].peak.period);
-    EXPECT_DOUBLE_EQ(actual[index].peak.frequency, expected[index].peak.frequency);
+    EXPECT_DOUBLE_EQ(actual[index].peak.period_seconds(),
+                     expected[index].peak.period_seconds());
+    EXPECT_DOUBLE_EQ(actual[index].peak.motion.frequency_hz,
+                     expected[index].peak.motion.frequency_hz);
   }
 }

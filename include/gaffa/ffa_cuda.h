@@ -143,7 +143,7 @@ struct CudaFfaBuffer;
 
 // Owns GPU-resident metadata and reusable workspace for one FFA plan on one
 // device. It is move-only, not thread-safe, and supports one active
-// run_ffa_batch_cuda() call at a time.
+// search_ffa_batch_cuda() call at a time.
 class CudaFfaProgram {
  public:
   explicit CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
@@ -164,12 +164,13 @@ class CudaFfaProgram {
   [[nodiscard]] const CudaFfaExecutionPlan& execution_plan() const;
   [[nodiscard]] int device_id() const;
   [[nodiscard]] std::size_t tile_capacity() const;
+  [[nodiscard]] cudaStream_t stream() const;
   [[nodiscard]] const CudaFfaWorkspaceShape& workspace_shape() const;
   [[nodiscard]] std::size_t device_metadata_bytes() const;
 
  private:
   friend class detail::CudaFfaTileRunner;
-  friend FfaBatchSearchResult run_ffa_batch_cuda(
+  friend FfaBatchSearchResult search_ffa_raw_batch_cuda(
       CudaFfaProgram& program,
       CudaTimeSeriesBatchView batch,
       const FfaSearchOptions& options);
@@ -257,41 +258,51 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
                               CudaFfaBuffer output,
                               const CudaLaunchOptions& options = {});
 
-// Executes one already-preprocessed dense [series][sample] tile. The tile must
-// contain no more than program.tile_capacity() series. Returned series_index
-// values are local to this tile; no DM-specific semantics are assumed.
-// FfaSearchOptions::max_peaks is enforced independently for each series.
-FfaBatchSearchResult run_ffa_batch_cuda(
+// Executes one already-preprocessed dense [series][sample] tile and returns
+// native FFA peaks. The tile must contain no more than
+// program.tile_capacity() series. Returned series_index values are local to
+// this tile; no DM-specific semantics are assumed. FfaSearchOptions::max_peaks
+// is enforced independently for each series.
+FfaBatchSearchResult search_ffa_raw_batch_cuda(
     CudaFfaProgram& program,
     CudaTimeSeriesBatchView batch,
     const FfaSearchOptions& options = {});
 
-// Single-series CUDA counterpart to search_ffa_cpu(). This is a thin wrapper
-// around run_ffa_batch_cuda() with one series and reuses program workspace.
-FfaSearchResult search_ffa_cuda(
+// Single-series raw CUDA search. This is a thin wrapper around
+// search_ffa_raw_batch_cuda() with one series and reuses program workspace.
+FfaSearchResult search_ffa_raw_cuda(
     CudaFfaProgram& program,
     CudaSpan<const float> time_series,
     const FfaSearchOptions& options = {});
 
-// One-shot convenience wrapper. Repeated tile execution should construct one
-// CudaFfaProgram and call run_ffa_batch_cuda() instead.
-FfaSearchResult search_ffa_cuda(
+// One-shot raw convenience wrapper. Repeated tile execution should construct
+// one CudaFfaProgram and call search_ffa_raw_batch_cuda() instead.
+FfaSearchResult search_ffa_raw_cuda(
     CudaSpan<const float> time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options = {},
     const CudaFfaProgramOptions& program_options = {},
     const CudaFfaExecutionOptions& execution_options = {});
 
-// CUDA counterpart to search_ffa_periodic_cpu(). The Program overload reuses
-// immutable device metadata and workspace; results are projected using the
-// execution plan observation midpoint.
-std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+// Executes one already-preprocessed dense [series][sample] tile and returns
+// backend-neutral periodic peaks. series_index values are local to the tile.
+SeriesPeaks search_ffa_batch_cuda(
+    CudaFfaProgram& program,
+    CudaTimeSeriesBatchView batch,
+    const FfaSearchOptions& options = {});
+
+// CUDA counterpart to search_ffa_cpu(). The Program overload reuses immutable
+// device metadata and workspace; results are projected using the execution
+// plan observation midpoint.
+std::vector<PeriodicPeak> search_ffa_cuda(
     CudaFfaProgram& program,
     CudaSpan<const float> preprocessed_time_series,
     const FfaSearchOptions& options = {});
 
-std::vector<PeriodicPeak> search_ffa_periodic_cuda(
-    CudaSpan<const float> preprocessed_time_series,
+// One-shot host convenience wrapper. It performs one H2D transfer and creates
+// a temporary Program; repeated execution should reuse CudaFfaProgram.
+std::vector<PeriodicPeak> search_ffa_cuda(
+    std::span<const float> preprocessed_time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options = {},
     const CudaFfaProgramOptions& program_options = {},

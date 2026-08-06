@@ -49,6 +49,21 @@ PreprocessPlan make_riptide_preprocess_plan(
     double tsamp,
     const RiptidePreprocessOptions& options = {});
 
+// Applies every step in plan to one host time series. input and output must
+// have equal non-zero length. Exact aliasing is allowed; partial overlap is
+// rejected. An empty plan is the identity transform.
+void preprocess_time_series_cpu(std::span<const float> input,
+                                std::span<float> output,
+                                const PreprocessPlan& plan);
+
+// Owning convenience overload of the span-based preprocessing primitive.
+std::vector<float> preprocess_time_series_cpu(std::span<const float> input,
+                                              const PreprocessPlan& plan);
+
+// In-place convenience overload of the span-based preprocessing primitive.
+void preprocess_time_series_inplace_cpu(std::span<float> data,
+                                        const PreprocessPlan& plan);
+
 // Subtracts a Riptide-style approximate running median from each sample. Large
 // windows are mean-scrunched, median filtered at low resolution, then linearly
 // interpolated back to the input length. The exact median path uses edge-value

@@ -117,3 +117,46 @@ TEST(PeriodicMotion, PhaseDerivativeMatchesInstantaneousFrequency) {
   EXPECT_NEAR(numerical_frequency,
               gaffa::periodic_frequency_hz_at(motion, dt), 1.0e-7);
 }
+
+TEST(DmTrialView, AttachesLocalSeriesToGlobalDmIdentity) {
+  const std::vector<double> dms{10.0, 20.0};
+  const std::vector<gaffa::SeriesPeak> peaks{
+      {.series_index = 1,
+       .peak = {.motion = {.frequency_hz = 2.0},
+                .phase_bins = 32,
+                .boxcar_width_bins = 2,
+                .duty_cycle = 0.0625,
+                .snr = 8.0F}},
+  };
+
+  const gaffa::DmPeaks attached = gaffa::attach_dm_trials(
+      peaks, {.values = dms, .index_offset = 40});
+
+  ASSERT_EQ(attached.size(), 1U);
+  EXPECT_DOUBLE_EQ(attached.front().dm, 20.0);
+  EXPECT_EQ(attached.front().dm_index, 41U);
+}
+
+TEST(DmTrialView, RejectsInvalidCoordinatesAndSeriesIndices) {
+  const std::vector<gaffa::SeriesPeak> peaks{
+      {.series_index = 1,
+       .peak = {.motion = {.frequency_hz = 2.0},
+                .duty_cycle = 0.1,
+                .snr = 8.0F}},
+  };
+  const std::vector<double> one_dm{10.0};
+  EXPECT_THROW((void)gaffa::attach_dm_trials(peaks, {.values = one_dm}),
+               std::out_of_range);
+
+  const std::vector<double> negative_dm{-1.0, 10.0};
+  EXPECT_THROW((void)gaffa::attach_dm_trials(peaks, {.values = negative_dm}),
+               std::invalid_argument);
+}
+
+TEST(DmTrialView, AcceptsMaximumGlobalIndexForSingleTrial) {
+  const std::vector<double> dms{10.0};
+  EXPECT_NO_THROW(gaffa::validate_dm_trials({
+      .values = dms,
+      .index_offset = std::numeric_limits<std::size_t>::max(),
+  }));
+}

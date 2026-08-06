@@ -116,6 +116,13 @@ std::size_t CudaFfaProgram::tile_capacity() const {
   return impl_->execution_options.series_tile_size;
 }
 
+cudaStream_t CudaFfaProgram::stream() const {
+  if (empty()) {
+    throw std::logic_error("CUDA FFA program must not be empty");
+  }
+  return impl_->execution_options.stream;
+}
+
 const CudaFfaWorkspaceShape& CudaFfaProgram::workspace_shape() const {
   if (empty()) {
     throw std::logic_error("CUDA FFA program must not be empty");
@@ -675,7 +682,7 @@ class CudaFfaTileRunner {
 
 }  // namespace detail
 
-FfaBatchSearchResult run_ffa_batch_cuda(
+FfaBatchSearchResult search_ffa_raw_batch_cuda(
     CudaFfaProgram& program,
     CudaTimeSeriesBatchView batch,
     const FfaSearchOptions& options) {
@@ -683,9 +690,10 @@ FfaBatchSearchResult run_ffa_batch_cuda(
   return runner.run_tile(batch);
 }
 
-FfaSearchResult search_ffa_cuda(CudaFfaProgram& program,
-                                 CudaSpan<const float> time_series,
-                                 const FfaSearchOptions& options) {
+FfaSearchResult search_ffa_raw_cuda(
+    CudaFfaProgram& program,
+    CudaSpan<const float> time_series,
+    const FfaSearchOptions& options) {
   if (time_series.data == nullptr || time_series.count == 0) {
     throw std::invalid_argument("CUDA FFA time series must not be empty");
   }
@@ -693,7 +701,7 @@ FfaSearchResult search_ffa_cuda(CudaFfaProgram& program,
     throw std::invalid_argument(
         "CUDA FFA time series device_id must match program device_id");
   }
-  const FfaBatchSearchResult batch = run_ffa_batch_cuda(
+  const FfaBatchSearchResult batch = search_ffa_raw_batch_cuda(
       program,
       CudaTimeSeriesBatchView{
           .data = time_series.data,
@@ -713,7 +721,7 @@ FfaSearchResult search_ffa_cuda(CudaFfaProgram& program,
   return result;
 }
 
-FfaSearchResult search_ffa_cuda(
+FfaSearchResult search_ffa_raw_cuda(
     CudaSpan<const float> time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options,
@@ -727,25 +735,69 @@ FfaSearchResult search_ffa_cuda(
         "CUDA FFA time series device_id must match program device_id");
   }
   CudaFfaProgram program(plan, program_options, execution_options);
-  return search_ffa_cuda(program, time_series, options);
+  return search_ffa_raw_cuda(program, time_series, options);
 }
 
-std::vector<PeriodicPeak> search_ffa_periodic_cuda(
+SeriesPeaks search_ffa_batch_cuda(
+    CudaFfaProgram& program,
+    CudaTimeSeriesBatchView batch,
+    const FfaSearchOptions& options) {
+  const FfaBatchSearchResult raw =
+      search_ffa_raw_batch_cuda(program, batch, options);
+
+  std::vector<FfaPeak> ffa_peaks;
+  ffa_peaks.reserve(raw.peaks.size());
+  for (const FfaBatchPeak& peak : raw.peaks) {
+    ffa_peaks.push_back(peak.peak);
+  }
+  const std::vector<PeriodicPeak> periodic = periodic_peaks_from_ffa(
+      ffa_peaks, program.execution_plan().observation());
+
+  SeriesPeaks result;
+  result.reserve(raw.peaks.size());
+  for (std::size_t index = 0; index < raw.peaks.size(); ++index) {
+    result.push_back(SeriesPeak{
+        .series_index = raw.peaks[index].series_index,
+        .peak = periodic[index],
+    });
+  }
+  return result;
+}
+
+std::vector<PeriodicPeak> search_ffa_cuda(
     CudaFfaProgram& program,
     CudaSpan<const float> preprocessed_time_series,
     const FfaSearchOptions& options) {
   const FfaSearchResult raw =
-      search_ffa_cuda(program, preprocessed_time_series, options);
+      search_ffa_raw_cuda(program, preprocessed_time_series, options);
   return periodic_peaks_from_ffa(
       raw.peaks, program.execution_plan().observation());
 }
 
-std::vector<PeriodicPeak> search_ffa_periodic_cuda(
-    CudaSpan<const float> preprocessed_time_series,
+std::vector<PeriodicPeak> search_ffa_cuda(
+    std::span<const float> preprocessed_time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options,
     const CudaFfaProgramOptions& program_options,
     const CudaFfaExecutionOptions& execution_options) {
+  if (preprocessed_time_series.empty()) {
+    throw std::invalid_argument("CUDA FFA time series must not be empty");
+  }
+  if (preprocessed_time_series.size() != plan.observation.nsamples) {
+    throw std::invalid_argument(
+        "CUDA FFA time series must match plan observation nsamples");
+  }
+
+  CudaDeviceScope device_scope(program_options.device_id);
   CudaFfaProgram program(plan, program_options, execution_options);
-  return search_ffa_periodic_cuda(program, preprocessed_time_series, options);
+  CudaDeviceBuffer<float> device_samples(preprocessed_time_series.size());
+  check_cuda(cudaMemcpy(device_samples.data(), preprocessed_time_series.data(),
+                        device_samples.bytes(), cudaMemcpyHostToDevice),
+             "CUDA FFA host input H2D");
+
+  return search_ffa_cuda(
+      program,
+      static_cast<const CudaDeviceBuffer<float>&>(device_samples)
+          .as_span(program_options.device_id),
+      options);
 }

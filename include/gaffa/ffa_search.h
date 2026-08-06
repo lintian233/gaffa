@@ -24,17 +24,19 @@ struct FfaSearchResult {
 };
 
 // Executes an already-built FFA search plan on a finite, preprocessed 1D float
-// time series. The input must be approximately zero-mean with unit sample
-// variance. This raw FFA API does not detrend, normalise, or attach DM
-// metadata; task-local weighted-sum downsampling is part of FFA execution.
-FfaSearchResult search_ffa_cpu(std::span<const float> preprocessed_time_series,
-                               const FfaSearchPlan& plan,
-                               const FfaSearchOptions& options = {});
+// time series and returns native FFA responses. The input must be
+// approximately zero-mean with unit sample variance. This raw API does not
+// detrend, normalise, or attach DM metadata; task-local weighted-sum
+// downsampling is part of FFA execution.
+FfaSearchResult search_ffa_raw_cpu(
+    std::span<const float> preprocessed_time_series,
+    const FfaSearchPlan& plan,
+    const FfaSearchOptions& options = {});
 
-// Convenience composition of raw FFA search and projection to the
-// backend-neutral periodic model. Every result uses the plan observation's
-// midpoint as its reference epoch.
-std::vector<PeriodicPeak> search_ffa_periodic_cpu(
+// Executes an already-built FFA search plan on a preprocessed 1D float time
+// series and returns backend-neutral periodic peaks. Every result uses the
+// plan observation's midpoint as its reference epoch.
+std::vector<PeriodicPeak> search_ffa_cpu(
     std::span<const float> preprocessed_time_series,
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options = {});

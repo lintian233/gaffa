@@ -7,6 +7,7 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 namespace gaffa {
@@ -25,14 +26,8 @@ std::size_t checked_size(DedispersedShape shape) {
   return shape.ndm * shape.nsamples;
 }
 
-void validate_tsamp(double tsamp) {
-  if (!(tsamp > 0.0) || !std::isfinite(tsamp)) {
-    throw std::invalid_argument("DM search tsamp must be finite and > 0");
-  }
-}
-
 template <typename T>
-void validate_dedispersed_result(const DedispersedResult<T>& input) {
+void validate_dedispersed_result(DedispersedResultView<T> input) {
   const std::size_t expected_size = checked_size(input.shape);
   if (input.data.size() != expected_size) {
     throw std::invalid_argument(
@@ -41,100 +36,72 @@ void validate_dedispersed_result(const DedispersedResult<T>& input) {
 }
 
 template <typename T>
-std::span<const T> dm_row(const DedispersedResult<T>& input,
+std::span<const T> dm_row(DedispersedResultView<T> input,
                           std::size_t dm_index) {
-  validate_dedispersed_result(input);
-  if (dm_index >= input.shape.ndm) {
-    throw std::out_of_range("DM search dm_index is out of range");
-  }
   const std::size_t offset = dm_index * input.shape.nsamples;
-  return std::span<const T>(input.data).subspan(offset, input.shape.nsamples);
-}
-
-template <typename T>
-TimeSeries dm_time_series_impl(const DedispersedResult<T>& input,
-                               std::size_t dm_index,
-                               double tsamp) {
-  validate_tsamp(tsamp);
-
-  const auto row = dm_row(input, dm_index);
-  std::vector<float> data(row.size());
-  for (std::size_t index = 0; index < row.size(); ++index) {
-    data[index] = static_cast<float>(row[index]);
-  }
-  return TimeSeries{
-      .data = std::move(data),
-      .tsamp = tsamp,
-  };
+  return input.data.subspan(offset, input.shape.nsamples);
 }
 
 void validate_dm_search_inputs(DedispersedShape shape,
-                               std::span<const double> dms,
-                               double tsamp,
-                               const DmSearchOptions& options) {
+                               DmTrialView trials,
+                               const FfaSearchPlan& plan,
+                               const DmFfaOptions& options) {
   (void)checked_size(shape);
-  validate_tsamp(tsamp);
-  if (dms.size() != shape.ndm) {
-    throw std::invalid_argument("DM search dms size must match ndm");
+  validate_ffa_search_plan(plan);
+  if (plan.observation.nsamples != shape.nsamples) {
+    throw std::invalid_argument(
+        "DM search plan observation must match dedispersed nsamples");
   }
-  for (const double dm : dms) {
-    if (!std::isfinite(dm)) {
-      throw std::invalid_argument("DM search dms must be finite");
-    }
+  if (trials.values.size() != shape.ndm) {
+    throw std::invalid_argument("DM trial count must match dedispersed ndm");
   }
-  if (!std::isfinite(options.snr_threshold)) {
+  validate_dm_trials(trials);
+  if (!std::isfinite(options.search.snr_threshold)) {
     throw std::invalid_argument("DM search S/N threshold must be finite");
-  }
-}
-
-TimeSeries maybe_preprocess(TimeSeries input, const PreprocessPlan& plan) {
-  if (plan.steps.empty()) {
-    return input;
-  }
-  return preprocess_time_series_cpu(input, plan);
-}
-
-void validate_preprocessed_time_series(const TimeSeries& time_series,
-                                       DedispersedShape shape,
-                                       double tsamp) {
-  if (time_series.data.size() != shape.nsamples ||
-      time_series.tsamp != tsamp) {
-    throw std::logic_error(
-        "DM search preprocessing must preserve time-series shape and tsamp");
   }
 }
 
 template <typename T>
 DmPeaks search_ffa_peaks_for_dm(
-    const DedispersedResult<T>& input,
-    std::span<const double> dms,
+    DedispersedResultView<T> input,
+    DmTrialView trials,
     std::size_t dm_index,
-    double tsamp,
     const PreprocessPlan& preprocess,
     const FfaSearchPlan& ffa_plan,
-    const FfaSearchOptions& ffa_options) {
-  TimeSeries time_series =
-      maybe_preprocess(dm_time_series_impl(input, dm_index, tsamp), preprocess);
-  validate_preprocessed_time_series(time_series, input.shape, tsamp);
-  const std::vector<PeriodicPeak> peaks = search_ffa_periodic_cpu(
-      time_series.data, ffa_plan, ffa_options);
-  return attach_dm_peaks(peaks, dms[dm_index], dm_index);
+    const FfaSearchOptions& ffa_options,
+    std::vector<float>& scratch) {
+  const std::span<const T> row = dm_row(input, dm_index);
+  std::span<const float> time_series;
+  if constexpr (std::is_same_v<T, float>) {
+    if (preprocess.steps.empty()) {
+      time_series = row;
+    } else {
+      scratch.assign(row.begin(), row.end());
+      preprocess_time_series_inplace_cpu(scratch, preprocess);
+      time_series = scratch;
+    }
+  } else {
+    scratch.resize(row.size());
+    for (std::size_t index = 0; index < row.size(); ++index) {
+      scratch[index] = static_cast<float>(row[index]);
+    }
+    preprocess_time_series_inplace_cpu(scratch, preprocess);
+    time_series = scratch;
+  }
+
+  const std::vector<PeriodicPeak> peaks = search_ffa_cpu(
+      time_series, ffa_plan, ffa_options);
+  return attach_dm_peaks(peaks, trials.values[dm_index],
+                         trials.index_offset + dm_index);
 }
 
 template <typename T>
-DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
-                                            std::span<const double> dms,
-                                            double tsamp,
-                                            const DmSearchOptions& options) {
+DmPeaks search_dm_ffa_impl(DedispersedResultView<T> input,
+                           DmTrialView trials,
+                           const FfaSearchPlan& ffa_plan,
+                           const DmFfaOptions& options) {
   validate_dedispersed_result(input);
-  validate_dm_search_inputs(input.shape, dms, tsamp, options);
-
-  const FfaSearchOptions ffa_options{
-      .snr_threshold = options.snr_threshold,
-      .max_peaks = options.max_peaks,
-  };
-  const FfaSearchPlan ffa_plan =
-      make_riptide_ffa_plan(input.shape.nsamples, tsamp, options.plan);
+  validate_dm_search_inputs(input.shape, trials, ffa_plan, options);
 
   DmPeaks global_peaks;
   std::exception_ptr error;
@@ -144,6 +111,7 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
 #pragma omp parallel if(parallel)
   {
     DmPeaks local_peaks;
+    std::vector<float> scratch;
 
 #pragma omp for schedule(dynamic, 1)
     for (std::size_t dm_index = 0; dm_index < input.shape.ndm; ++dm_index) {
@@ -152,8 +120,8 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
       }
       try {
         DmPeaks peaks = search_ffa_peaks_for_dm(
-            input, dms, dm_index, tsamp, options.preprocess, ffa_plan,
-            ffa_options);
+            input, trials, dm_index, options.preprocess, ffa_plan,
+            options.search, scratch);
         if (!peaks.empty()) {
           local_peaks.insert(local_peaks.end(),
                              std::make_move_iterator(peaks.begin()),
@@ -185,39 +153,41 @@ DmSearchResult search_dedispersed_ffa_impl(const DedispersedResult<T>& input,
                    [](const DmPeak& lhs, const DmPeak& rhs) {
                      return lhs.dm_index < rhs.dm_index;
                    });
-  return DmSearchResult{
-      .peaks = std::move(global_peaks),
-  };
+  return global_peaks;
 }
 
 }  // namespace
 
-TimeSeries dm_time_series_cpu(const DedispersedResult<std::uint32_t>& input,
-                              std::size_t dm_index,
-                              double tsamp) {
-  return dm_time_series_impl(input, dm_index, tsamp);
+DmPeaks search_dm_ffa_cpu(
+    DedispersedResultView<std::uint32_t> input,
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options) {
+  return search_dm_ffa_impl(input, trials, plan, options);
 }
 
-TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
-                              std::size_t dm_index,
-                              double tsamp) {
-  return dm_time_series_impl(input, dm_index, tsamp);
+DmPeaks search_dm_ffa_cpu(
+    DedispersedResultView<float> input,
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options) {
+  return search_dm_ffa_impl(input, trials, plan, options);
 }
 
-DmSearchResult search_dedispersed_ffa_cpu(
+DmPeaks search_dm_ffa_cpu(
     const DedispersedResult<std::uint32_t>& input,
-    std::span<const double> dms,
-    double tsamp,
-    const DmSearchOptions& options) {
-  return search_dedispersed_ffa_impl(input, dms, tsamp, options);
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options) {
+  return search_dm_ffa_cpu(input.view(), trials, plan, options);
 }
 
-DmSearchResult search_dedispersed_ffa_cpu(
+DmPeaks search_dm_ffa_cpu(
     const DedispersedResult<float>& input,
-    std::span<const double> dms,
-    double tsamp,
-    const DmSearchOptions& options) {
-  return search_dedispersed_ffa_impl(input, dms, tsamp, options);
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options) {
+  return search_dm_ffa_cpu(input.view(), trials, plan, options);
 }
 
 }  // namespace gaffa

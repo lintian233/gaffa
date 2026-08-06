@@ -5,7 +5,11 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 
-from ._bindings import FfaPeak as FfaPeak, FfaPlan as FfaPlan
+from ..dedispersion import DedispersedResult
+from ..peaks import DmPeak
+from ..preprocessing import PreprocessPlan
+from ._bindings import FfaPeak as FfaPeak
+from ._bindings import FfaPlan as FfaPlan
 
 
 def make_riptide_plan(
@@ -88,4 +92,50 @@ def ffa_search(
     ...
 
 
-__all__ = ["FfaPeak", "FfaPlan", "ffa_search", "make_riptide_plan"]
+def search_dms_cpu(
+    dedispersed: DedispersedResult,
+    plan: FfaPlan,
+    *,
+    preprocess: PreprocessPlan,
+    dm_index_offset: int = 0,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+) -> list[DmPeak]:
+    """Preprocess and search one host-resident block of DM time series.
+
+    Parameters
+    ----------
+    dedispersed
+        Host result with shape ``(ndm, nsamples)`` and dtype ``uint32`` or
+        ``float32``. Its data is read without copying the complete block.
+    plan
+        Native FFA plan matching ``dedispersed.nsamples`` and ``tsamp``.
+    preprocess
+        Plan applied independently to each DM row before FFA search.
+    dm_index_offset
+        Global DM-trial index assigned to the first row in this block.
+    snr_threshold
+        Finite raw boxcar signal-to-noise threshold.
+    max_peaks
+        Optional positive per-DM raw-peak safety limit.
+
+    Returns
+    -------
+    list[DmPeak]
+        Backend-neutral peaks carrying physical DM and global DM index.
+
+    Notes
+    -----
+    The function searches only the supplied block. It uses the optimized C++
+    OpenMP DM loop and does not perform cross-block candidate clustering.
+    """
+    ...
+
+
+__all__ = [
+    "FfaPeak",
+    "FfaPlan",
+    "ffa_search",
+    "make_riptide_plan",
+    "search_dms_cpu",
+]

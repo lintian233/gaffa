@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <stdexcept>
@@ -21,26 +22,19 @@ gaffa::RiptideFfaPlanOptions small_plan_options() {
   };
 }
 
-gaffa::DmSearchOptions small_search_options() {
-  return gaffa::DmSearchOptions{
-      .plan = small_plan_options(),
-      .snr_threshold = 0.0F,
+gaffa::FfaSearchPlan small_plan(std::size_t nsamples = 8,
+                                double tsamp = 1.0) {
+  return gaffa::make_riptide_ffa_plan(nsamples, tsamp,
+                                      small_plan_options());
+}
+
+gaffa::DmFfaOptions small_search_options() {
+  return gaffa::DmFfaOptions{
+      .search = {.snr_threshold = 0.0F},
   };
 }
 
 }  // namespace
-
-TEST(DmSearch, ExtractsDmTimeSeriesAsFloat) {
-  const gaffa::DedispersedResult<std::uint32_t> input{
-      .data = {1, 2, 3, 4, 10, 20, 30, 40},
-      .shape = {.ndm = 2, .nsamples = 4},
-  };
-
-  const auto time_series = gaffa::dm_time_series_cpu(input, 1, 0.001);
-
-  EXPECT_DOUBLE_EQ(time_series.tsamp, 0.001);
-  EXPECT_EQ(time_series.data, (std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F}));
-}
 
 TEST(DmSearch, FindsEveryDmPeakAndAttachesMetadata) {
   const gaffa::DedispersedResult<float> input{
@@ -52,15 +46,38 @@ TEST(DmSearch, FindsEveryDmPeakAndAttachesMetadata) {
   };
   const std::vector<double> dms{12.5, 20.0};
 
-  const auto result =
-      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
-                                         small_search_options());
+  const auto result = gaffa::search_dm_ffa_cpu(
+      input, {.values = dms, .index_offset = 10}, small_plan(),
+      small_search_options());
 
-  ASSERT_FALSE(result.peaks.empty());
-  EXPECT_EQ(result.peaks.front().dm_index, 0);
-  EXPECT_DOUBLE_EQ(result.peaks.back().dm, 20.0);
-  for (const auto& peak : result.peaks) {
+  ASSERT_FALSE(result.empty());
+  EXPECT_EQ(result.front().dm_index, 10);
+  EXPECT_DOUBLE_EQ(result.back().dm, 20.0);
+  for (const auto& peak : result) {
     EXPECT_DOUBLE_EQ(peak.peak.motion.reference_time_seconds, 4.0);
+  }
+}
+
+TEST(DmSearch, NonOwningViewMatchesOwningInput) {
+  const gaffa::DedispersedResult<float> input{
+      .data = {0.0F, 0.0F, 0.0F, 5.0F, 0.0F, 0.0F, 0.0F, 5.0F},
+      .shape = {.ndm = 1, .nsamples = 8},
+  };
+  const std::array<double, 1> dms{12.5};
+  const auto plan = small_plan(input.shape.nsamples, 1.0);
+
+  const auto owning = gaffa::search_dm_ffa_cpu(
+      input, gaffa::DmTrialView{.values = dms}, plan);
+  const auto viewing = gaffa::search_dm_ffa_cpu(
+      input.view(), gaffa::DmTrialView{.values = dms}, plan);
+
+  ASSERT_EQ(viewing.size(), owning.size());
+  for (std::size_t index = 0; index < owning.size(); ++index) {
+    EXPECT_EQ(viewing[index].dm, owning[index].dm);
+    EXPECT_EQ(viewing[index].dm_index, owning[index].dm_index);
+    EXPECT_EQ(viewing[index].peak.snr, owning[index].peak.snr);
+    EXPECT_EQ(viewing[index].peak.motion.frequency_hz,
+              owning[index].peak.motion.frequency_hz);
   }
 }
 
@@ -75,12 +92,73 @@ TEST(DmSearch, AppliesPreprocessPlanBeforeSearch) {
       .kind = gaffa::PreprocessStepKind::Normalise,
   });
 
-  const auto result = gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
-                                                         options);
+  const auto result = gaffa::search_dm_ffa_cpu(
+      input, {.values = dms}, small_plan(), options);
 
-  ASSERT_FALSE(result.peaks.empty());
-  EXPECT_EQ(result.peaks.front().dm_index, 0);
-  EXPECT_DOUBLE_EQ(result.peaks.front().dm, 30.0);
+  ASSERT_FALSE(result.empty());
+  EXPECT_EQ(result.front().dm_index, 0);
+  EXPECT_DOUBLE_EQ(result.front().dm, 30.0);
+}
+
+TEST(DmSearch, FloatEmptyPreprocessMatchesDirectFfa) {
+  const gaffa::DedispersedResult<float> input{
+      .data = {0.0F, 0.0F, 0.0F, 5.0F, 0.0F, 0.0F, 0.0F, 5.0F},
+      .shape = {.ndm = 1, .nsamples = 8},
+  };
+  const std::array<double, 1> dms{12.5};
+  const auto plan = small_plan(input.shape.nsamples, 1.0);
+  const auto options = small_search_options();
+
+  const auto actual = gaffa::search_dm_ffa_cpu(
+      input.view(), {.values = dms, .index_offset = 3}, plan, options);
+  const auto periodic = gaffa::search_ffa_cpu(
+      input.view().dm_series(0), plan, options.search);
+  const auto expected = gaffa::attach_dm_peaks(periodic, dms[0], 3);
+
+  ASSERT_EQ(actual.size(), expected.size());
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    EXPECT_EQ(actual[index].dm, expected[index].dm);
+    EXPECT_EQ(actual[index].dm_index, expected[index].dm_index);
+    EXPECT_EQ(actual[index].peak.snr, expected[index].peak.snr);
+    EXPECT_EQ(actual[index].peak.motion.frequency_hz,
+              expected[index].peak.motion.frequency_hz);
+    EXPECT_EQ(actual[index].peak.phase_bin, expected[index].peak.phase_bin);
+  }
+}
+
+TEST(DmSearch, Uint32PreprocessMatchesFloatReference) {
+  const std::vector<std::uint32_t> samples{
+      2U, 2U, 2U, 8U, 2U, 2U, 2U, 8U,
+  };
+  const gaffa::DedispersedResult<std::uint32_t> integer_input{
+      .data = samples,
+      .shape = {.ndm = 1, .nsamples = samples.size()},
+  };
+  const gaffa::DedispersedResult<float> float_input{
+      .data = {2.0F, 2.0F, 2.0F, 8.0F, 2.0F, 2.0F, 2.0F, 8.0F},
+      .shape = integer_input.shape,
+  };
+  const std::array<double, 1> dms{30.0};
+  auto options = small_search_options();
+  options.preprocess.steps.push_back(gaffa::PreprocessStep{
+      .kind = gaffa::PreprocessStepKind::Normalise,
+  });
+  const auto plan = small_plan(integer_input.shape.nsamples, 1.0);
+
+  const auto actual = gaffa::search_dm_ffa_cpu(
+      integer_input.view(), {.values = dms}, plan, options);
+  const auto expected = gaffa::search_dm_ffa_cpu(
+      float_input.view(), {.values = dms}, plan, options);
+
+  ASSERT_EQ(actual.size(), expected.size());
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    EXPECT_EQ(actual[index].dm, expected[index].dm);
+    EXPECT_EQ(actual[index].dm_index, expected[index].dm_index);
+    EXPECT_EQ(actual[index].peak.snr, expected[index].peak.snr);
+    EXPECT_EQ(actual[index].peak.motion.frequency_hz,
+              expected[index].peak.motion.frequency_hz);
+    EXPECT_EQ(actual[index].peak.phase_bin, expected[index].peak.phase_bin);
+  }
 }
 
 TEST(DmSearch, KeepsAllSignificantPeaksInsteadOfTopK) {
@@ -93,11 +171,10 @@ TEST(DmSearch, KeepsAllSignificantPeaksInsteadOfTopK) {
   };
   const std::vector<double> dms{10.0, 20.0};
 
-  const auto result =
-      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
-                                         small_search_options());
+  const auto result = gaffa::search_dm_ffa_cpu(
+      input, {.values = dms}, small_plan(), small_search_options());
 
-  EXPECT_GE(result.peaks.size(), 2);
+  EXPECT_GE(result.size(), 2);
 }
 
 TEST(DmSearch, ParallelPathMergesPeaks) {
@@ -113,13 +190,12 @@ TEST(DmSearch, ParallelPathMergesPeaks) {
   };
   const std::vector<double> dms{10.0, 20.0, 30.0, 40.0, 50.0};
 
-  const auto result =
-      gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
-                                         small_search_options());
+  const auto result = gaffa::search_dm_ffa_cpu(
+      input, {.values = dms}, small_plan(), small_search_options());
 
-  ASSERT_FALSE(result.peaks.empty());
-  EXPECT_EQ(result.peaks.front().dm_index, 0);
-  EXPECT_DOUBLE_EQ(result.peaks.back().dm, 50.0);
+  ASSERT_FALSE(result.empty());
+  EXPECT_EQ(result.front().dm_index, 0);
+  EXPECT_DOUBLE_EQ(result.back().dm, 50.0);
 }
 
 TEST(DmSearch, RejectsInvalidInputs) {
@@ -130,26 +206,27 @@ TEST(DmSearch, RejectsInvalidInputs) {
   const std::vector<double> dms{10.0};
   const auto options = small_search_options();
 
-  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(
+  EXPECT_THROW((void)gaffa::search_dm_ffa_cpu(
                    gaffa::DedispersedResult<float>{
                        .data = {},
                        .shape = {.ndm = 0, .nsamples = 4},
                    },
-                   dms, 1.0, options),
+                   {.values = dms}, small_plan(4), options),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(
-                   input, std::vector<double>{}, 1.0, options),
+  EXPECT_THROW((void)gaffa::search_dm_ffa_cpu(
+                   input, {.values = std::span<const double>{}},
+                   small_plan(4), options),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(input, dms, 0.0,
-                                                        options),
+
+  auto bad_plan = small_plan(4);
+  bad_plan.observation.tsamp_seconds = 0.0;
+  EXPECT_THROW((void)gaffa::search_dm_ffa_cpu(
+                   input, {.values = dms}, bad_plan, options),
                std::invalid_argument);
 
   auto bad_options = options;
-  bad_options.snr_threshold = INFINITY;
-  EXPECT_THROW((void)gaffa::search_dedispersed_ffa_cpu(input, dms, 1.0,
-                                                        bad_options),
+  bad_options.search.snr_threshold = INFINITY;
+  EXPECT_THROW((void)gaffa::search_dm_ffa_cpu(
+                   input, {.values = dms}, small_plan(4), bad_options),
                std::invalid_argument);
-
-  EXPECT_THROW((void)gaffa::dm_time_series_cpu(input, 1, 1.0),
-               std::out_of_range);
 }

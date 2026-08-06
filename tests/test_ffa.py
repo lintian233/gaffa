@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 import gaffa
-from gaffa import ffa
+from gaffa import dedispersion, ffa, peaks, preprocessing
 
 
 def make_plan(nsamples: int) -> ffa.FfaPlan:
@@ -97,3 +97,70 @@ def test_ffa_search_cuda_matches_cpu() -> None:
         assert cuda_peak.phase == cpu_peak.phase
         assert cuda_peak.shift == cpu_peak.shift
         assert cuda_peak.bins == cpu_peak.bins
+
+
+def test_search_dms_cpu_returns_physical_peaks_for_one_block() -> None:
+    data = np.array(
+        [
+            [0, 0, 0, 5, 0, 0, 0, 5],
+            [0, 0, 0, 7, 0, 0, 0, 7],
+        ],
+        dtype=np.float32,
+    )
+    block = dedispersion.DedispersedResult(
+        data, tsamp=1.0, dm_low=10.0, dm_step=0.5
+    )
+    preprocess_plan = preprocessing.make_riptide_plan(
+        tsamp=1.0,
+        running_median_width_seconds=3.0,
+        running_median_min_points=3,
+    )
+
+    result = ffa.search_dms_cpu(
+        block,
+        make_plan(block.nsamples),
+        preprocess=preprocess_plan,
+        dm_index_offset=20,
+        snr_threshold=0.0,
+    )
+
+    assert result
+    assert all(isinstance(peak, peaks.DmPeak) for peak in result)
+    assert {peak.dm for peak in result} == {10.0, 10.5}
+    assert {peak.dm_index for peak in result} == {20, 21}
+    assert all(peak.peak.motion.reference_time_seconds == 4.0 for peak in result)
+
+
+def test_search_dms_cpu_rejects_mismatched_contracts() -> None:
+    block = dedispersion.DedispersedResult(
+        np.ones((2, 8), dtype=np.float32),
+        tsamp=1.0,
+        dm_low=10.0,
+        dm_step=0.5,
+    )
+    preprocess_plan = preprocessing.make_riptide_plan(
+        tsamp=1.0,
+        running_median_width_seconds=3.0,
+        running_median_min_points=3,
+    )
+
+    with pytest.raises(ValueError, match="tsamp"):
+        ffa.search_dms_cpu(
+            block,
+            ffa.make_riptide_plan(
+                nsamples=8,
+                tsamp=0.5,
+                period_min=2.0,
+                period_max=4.0,
+                bins_min=2,
+                bins_max=2,
+            ),
+            preprocess=preprocess_plan,
+        )
+    with pytest.raises(ValueError, match="non-negative"):
+        ffa.search_dms_cpu(
+            block,
+            make_plan(8),
+            preprocess=preprocess_plan,
+            dm_index_offset=-1,
+        )

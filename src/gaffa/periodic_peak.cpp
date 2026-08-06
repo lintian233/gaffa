@@ -1,6 +1,7 @@
 #include "gaffa/periodic_peak.h"
 
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace gaffa {
@@ -79,8 +80,8 @@ double periodic_frequency_hz_at(const PeriodicMotion& motion,
 DmPeaks attach_dm_peaks(std::span<const PeriodicPeak> peaks,
                         double dm,
                         std::size_t dm_index) {
-  if (!std::isfinite(dm)) {
-    throw std::invalid_argument("DM peak dm must be finite");
+  if (!std::isfinite(dm) || dm < 0.0) {
+    throw std::invalid_argument("DM peak dm must be finite and non-negative");
   }
   DmPeaks result;
   result.reserve(peaks.size());
@@ -94,6 +95,45 @@ DmPeaks attach_dm_peaks(std::span<const PeriodicPeak> peaks,
         .dm = dm,
         .dm_index = dm_index,
         .peak = peak,
+    });
+  }
+  return result;
+}
+
+void validate_dm_trials(DmTrialView trials) {
+  if (!trials.values.empty() &&
+      trials.index_offset > std::numeric_limits<std::size_t>::max() -
+                                  (trials.values.size() - 1)) {
+    throw std::overflow_error("DM trial index range overflows size_t");
+  }
+  for (const double dm : trials.values) {
+    if (!std::isfinite(dm) || dm < 0.0) {
+      throw std::invalid_argument(
+          "DM trial values must be finite and non-negative");
+    }
+  }
+}
+
+DmPeaks attach_dm_trials(std::span<const SeriesPeak> peaks,
+                         DmTrialView trials) {
+  validate_dm_trials(trials);
+
+  DmPeaks result;
+  result.reserve(peaks.size());
+  for (const SeriesPeak& source : peaks) {
+    if (source.series_index >= trials.values.size()) {
+      throw std::out_of_range("series peak index is outside DM trial view");
+    }
+    validate_periodic_motion(source.peak.motion);
+    if (!std::isfinite(source.peak.duty_cycle) ||
+        !std::isfinite(source.peak.snr)) {
+      throw std::invalid_argument(
+          "Periodic peak values must be finite before attaching DM");
+    }
+    result.push_back(DmPeak{
+        .dm = trials.values[source.series_index],
+        .dm_index = trials.index_offset + source.series_index,
+        .peak = source.peak,
     });
   }
   return result;

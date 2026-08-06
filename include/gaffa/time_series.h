@@ -9,6 +9,10 @@ namespace gaffa {
 struct TimeSeries {
   std::vector<float> data;
   double tsamp = 0.0;
+
+  [[nodiscard]] std::span<const float> view() const noexcept { return data; }
+
+  [[nodiscard]] std::span<float> mutable_view() noexcept { return data; }
 };
 
 struct TimeSeriesStats {

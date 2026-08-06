@@ -28,6 +28,17 @@ from .ffa._bindings import (
     _ffa_search_cpu as _ffa_search_cpu,
     _ffa_search_cuda_host as _ffa_search_cuda_host,
     _make_riptide_ffa_plan as _make_riptide_ffa_plan,
+    _search_dms_cpu as _search_dms_cpu,
+)
+from .peaks._bindings import (
+    DmPeak as DmPeak,
+    MotionOrder as MotionOrder,
+    PeriodicMotion as PeriodicMotion,
+    PeriodicPeak as PeriodicPeak,
+)
+from .preprocessing._bindings import (
+    PreprocessPlan as PreprocessPlan,
+    _make_riptide_preprocess_plan as _make_riptide_preprocess_plan,
 )
 from .io._bindings import (
     ChannelOrder as ChannelOrder,
@@ -56,6 +67,7 @@ __all__ = [
     "DedispersedResult",
     "DedispersedSpectrum",
     "DedispersedSpectrumArray",
+    "DmPeak",
     "FfaPeak",
     "FfaPlan",
     "Filterbank",
@@ -65,7 +77,11 @@ __all__ = [
     "FoldExposureArray",
     "FoldResult",
     "FoldedProfile",
+    "MotionOrder",
     "PathLikeStr",
+    "PeriodicMotion",
+    "PeriodicPeak",
+    "PreprocessPlan",
     "ReverseBackend",
     "ReverseBackendName",
     "_ffa_search_cpu",
@@ -73,6 +89,8 @@ __all__ = [
     "_fold_dedispersed_profile",
     "_fold_dedispersed_spectrum",
     "_make_riptide_ffa_plan",
+    "_make_riptide_preprocess_plan",
+    "_search_dms_cpu",
     "cuda_device_count",
     "cuda_runtime_version",
     "dedisperse_multi_dm",

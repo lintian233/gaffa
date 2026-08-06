@@ -770,6 +770,13 @@ std::size_t CudaPreprocessProgram::max_nsamples() const {
   return impl_->execution_options.max_nsamples;
 }
 
+cudaStream_t CudaPreprocessProgram::stream() const {
+  if (empty()) {
+    throw std::logic_error("CUDA preprocessing program must not be empty");
+  }
+  return impl_->execution_options.stream;
+}
+
 const CudaPreprocessWorkspaceShape& CudaPreprocessProgram::workspace_shape()
     const {
   if (empty()) {

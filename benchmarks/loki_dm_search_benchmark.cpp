@@ -3,6 +3,7 @@
 #include "gaffa/filterbank.h"
 #include "gaffa/filterbank_view.h"
 #include "gaffa/harmonic.h"
+#include "gaffa/loki_dm_search.h"
 #include "gaffa/loki_pffa.h"
 #include "gaffa/preprocessing.h"
 #include "gaffa/preprocessing_cuda.h"
@@ -429,21 +430,21 @@ std::vector<LokiDmPeak> run_typed(const gaffa::FilterbankData& filterbank,
       loki_plan, {.device_id = device_id});
 
   std::vector<LokiDmPeak> peaks;
+  std::vector<double> dms(args.ndm);
+  for (std::size_t dm_index = 0; dm_index < args.ndm; ++dm_index) {
+    dms[dm_index] =
+        args.dm_low + static_cast<double>(dm_index) * args.dm_step;
+  }
   timings.loki_search = time_once([&] {
-    for (std::size_t dm_index = 0; dm_index < args.ndm; ++dm_index) {
-      const auto loki_peaks = program.search({
-          .data = search_float.data() + dm_index * window.search_nsamples,
-          .count = window.search_nsamples,
-          .device_id = device_id,
-      });
-      peaks.reserve(peaks.size() + loki_peaks.size());
-      for (const auto& peak : loki_peaks) {
-        peaks.push_back({.dm = args.dm_low +
-                                 static_cast<double>(dm_index) * args.dm_step,
-                         .dm_index = dm_index,
-                         .peak = peak});
-      }
-    }
+    peaks = gaffa::search_dm_pffa_cuda(
+        program,
+        {
+            .data = search_float.data(),
+            .nseries = args.ndm,
+            .nsamples = window.search_nsamples,
+            .device_id = device_id,
+        },
+        {.values = dms});
   });
   return peaks;
 }

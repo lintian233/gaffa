@@ -1,5 +1,6 @@
 #include "gaffa/loki_pffa.h"
 #include "gaffa/cuda_memory.h"
+#include "gaffa/loki_dm_search.h"
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -177,6 +178,45 @@ TEST(LokiPffaProgram, SearchesOneNormalisedDeviceSeries) {
     EXPECT_DOUBLE_EQ(peak.motion.jerk_m_per_s3, 0.0);
     EXPECT_DOUBLE_EQ(peak.motion.snap_m_per_s4, 0.0);
   }
+}
+
+TEST(LokiPffaProgram, SearchesBatchAndAttachesDmIdentity) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+
+  const auto plan = gaffa::make_loki_pffa_plan(
+      kNsamples, kTsampSeconds,
+      {.frequency_hz = {.minimum = 100.0, .maximum = 110.0}},
+      test_plan_options());
+  gaffa::LokiPffaProgram program(plan);
+  const std::vector<float> signal = make_sinusoid();
+  std::vector<float> batch(signal);
+  batch.insert(batch.end(), signal.begin(), signal.end());
+  gaffa::CudaDeviceBuffer<float> device_batch(batch.size());
+  ASSERT_EQ(cudaMemcpy(device_batch.data(), batch.data(), device_batch.bytes(),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  const std::vector<double> dms{100.0, 100.5};
+  const gaffa::DmPeaks peaks = gaffa::search_dm_pffa_cuda(
+      program,
+      {
+          .data = device_batch.data(),
+          .nseries = 2,
+          .nsamples = kNsamples,
+          .device_id = 0,
+      },
+      {.values = dms, .index_offset = 20});
+
+  ASSERT_FALSE(peaks.empty());
+  EXPECT_TRUE(std::any_of(peaks.begin(), peaks.end(), [](const auto& peak) {
+    return peak.dm_index == 20 && peak.dm == 100.0;
+  }));
+  EXPECT_TRUE(std::any_of(peaks.begin(), peaks.end(), [](const auto& peak) {
+    return peak.dm_index == 21 && peak.dm == 100.5;
+  }));
 }
 
 TEST(LokiPffaProgram, MapsAccelerationCellToPeriodicMotion) {

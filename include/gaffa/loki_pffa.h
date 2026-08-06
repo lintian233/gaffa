@@ -2,6 +2,7 @@
 
 #include "gaffa/cuda_memory.h"
 #include "gaffa/periodic_peak.h"
+#include "gaffa/time_series_cuda.h"
 
 #include <cuda_runtime_api.h>
 
@@ -83,9 +84,9 @@ struct LokiPffaExecutionOptions {
   // must belong to that device. search() synchronizes before returning because
   // Loki's compact candidate count is host-visible.
   cudaStream_t stream = nullptr;
-  // Total compact peaks returned across every Loki execution region. Exceeding
-  // this limit fails rather than silently truncating candidates.
-  std::size_t max_compact_peaks_total = 1'000'000;
+  // Compact peak limit for one input series across every Loki execution
+  // region. Exceeding it fails rather than silently truncating candidates.
+  std::size_t max_peaks_per_series = 1'000'000;
 };
 
 // Reusable, device-affine time-domain Loki P-FFA executor. It accepts one
@@ -108,6 +109,13 @@ class LokiPffaProgram {
 
   std::vector<PeriodicPeak> search(
       CudaSpan<const float> normalised_time_series,
+      LokiPffaExecutionOptions options = {});
+
+  // Searches a dense batch by reusing this Program for every series. Returned
+  // indices are local to the input batch. The first implementation schedules
+  // series sequentially while retaining all Program metadata and workspace.
+  SeriesPeaks search_batch(
+      CudaTimeSeriesBatchView normalised_batch,
       LokiPffaExecutionOptions options = {});
 
  private:

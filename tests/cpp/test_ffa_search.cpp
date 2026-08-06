@@ -42,7 +42,7 @@ TEST(FfaSearchCpu, RejectsInvalidOptions) {
   const std::vector<float> input{1, 0, 2, 0, 3, 0, 4, 0};
   const auto plan = single_task_plan(input.size());
 
-  EXPECT_THROW((void)gaffa::search_ffa_cpu(
+  EXPECT_THROW((void)gaffa::search_ffa_raw_cpu(
                    input, plan,
                    gaffa::FfaSearchOptions{
                        .snr_threshold = INFINITY,
@@ -51,7 +51,7 @@ TEST(FfaSearchCpu, RejectsInvalidOptions) {
 
   auto empty_widths = plan;
   empty_widths.width_trials.clear();
-  EXPECT_THROW((void)gaffa::search_ffa_cpu(input, empty_widths),
+  EXPECT_THROW((void)gaffa::search_ffa_raw_cpu(input, empty_widths),
                std::invalid_argument);
 }
 
@@ -59,7 +59,7 @@ TEST(FfaSearchCpu, ReturnsEmptyWhenNoPeakPassesThreshold) {
   const std::vector<float> input{1, 0, 2, 0, 3, 0, 4, 0};
   const auto plan = single_task_plan(input.size());
 
-  const auto result = gaffa::search_ffa_cpu(
+  const auto result = gaffa::search_ffa_raw_cpu(
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 1000.0F,
@@ -72,7 +72,7 @@ TEST(FfaSearchCpu, FindsPeaksThroughExecutorAndDetection) {
   const std::vector<float> input{0, 0, 0, 5, 0, 0, 0, 5};
   const auto plan = single_task_plan(input.size());
 
-  const auto result = gaffa::search_ffa_cpu(
+  const auto result = gaffa::search_ffa_raw_cpu(
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
@@ -92,8 +92,8 @@ TEST(FfaSearchCpu, PeriodicConvenienceUsesPlanObservationMidpoint) {
   plan.tasks.front().period_end = 0.75;
   const gaffa::FfaSearchOptions options{.snr_threshold = 0.0F};
 
-  const auto raw = gaffa::search_ffa_cpu(input, plan, options);
-  const auto periodic = gaffa::search_ffa_periodic_cpu(input, plan, options);
+  const auto raw = gaffa::search_ffa_raw_cpu(input, plan, options);
+  const auto periodic = gaffa::search_ffa_cpu(input, plan, options);
 
   ASSERT_EQ(periodic.size(), raw.peaks.size());
   ASSERT_FALSE(periodic.empty());
@@ -114,7 +114,7 @@ TEST(FfaSearchCpu, CollectsPeaksAcrossBlocks) {
       .width_trials = {1},
   };
 
-  const auto result = gaffa::search_ffa_cpu(
+  const auto result = gaffa::search_ffa_raw_cpu(
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
@@ -132,7 +132,7 @@ TEST(FfaSearchCpu, ReportsDownsampledTaskPeriod) {
       .width_trials = {1},
   };
 
-  const auto result = gaffa::search_ffa_cpu(
+  const auto result = gaffa::search_ffa_raw_cpu(
       input, plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
@@ -152,7 +152,7 @@ TEST(FfaSearchCpu, AllowsExternalPlan) {
       .width_trials = {1},
   };
 
-  const auto result = gaffa::search_ffa_cpu(
+  const auto result = gaffa::search_ffa_raw_cpu(
       input, custom_plan,
       gaffa::FfaSearchOptions{
           .snr_threshold = 0.0F,
@@ -177,7 +177,8 @@ TEST(FfaSearchCpu, MatchesMaterializedBlockReference) {
       .snr_threshold = 0.0F,
   };
 
-  const auto result = gaffa::search_ffa_cpu(input, plan, search_options);
+  const auto result =
+      gaffa::search_ffa_raw_cpu(input, plan, search_options);
 
   std::vector<gaffa::FfaPeak> reference;
   const gaffa::FfaDetectionOptions detection_options{

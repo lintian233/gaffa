@@ -482,8 +482,8 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
   if (normalised_time_series.device_id != impl_->options.device_id) {
     throw std::invalid_argument("Loki P-FFA input belongs to another CUDA device");
   }
-  if (execution_options.max_compact_peaks_total == 0) {
-    throw std::invalid_argument("Loki P-FFA max_compact_peaks_total must be > 0");
+  if (execution_options.max_peaks_per_series == 0) {
+    throw std::invalid_argument("Loki P-FFA max_peaks_per_series must be > 0");
   }
 
   ActiveSearchGuard active_search(impl_->search_active);
@@ -522,9 +522,9 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
         impl_->plan.options().snr_threshold,
         region.plan->get_ncoords().back(), region.config.get_nbins(),
         execution_options.stream, *impl_->counter);
-    if (passing > execution_options.max_compact_peaks_total - peaks.size()) {
+    if (passing > execution_options.max_peaks_per_series - peaks.size()) {
       throw std::runtime_error(
-          "Loki P-FFA compact peak limit exceeded; raise max_compact_peaks_total "
+          "Loki P-FFA compact peak limit exceeded; raise max_peaks_per_series "
           "or increase the SNR threshold");
     }
     if (passing == 0) {
@@ -553,6 +553,40 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
     ffa.reset();
   }
   return peaks;
+}
+
+SeriesPeaks LokiPffaProgram::search_batch(
+    CudaTimeSeriesBatchView normalised_batch,
+    LokiPffaExecutionOptions options) {
+  if (normalised_batch.data == nullptr || normalised_batch.nseries == 0 ||
+      normalised_batch.nsamples != plan().input_nsamples()) {
+    throw std::invalid_argument(
+        "Loki P-FFA batch must be non-empty and match the plan length");
+  }
+  if (normalised_batch.device_id != device_id()) {
+    throw std::invalid_argument(
+        "Loki P-FFA batch belongs to another CUDA device");
+  }
+
+  SeriesPeaks result;
+  for (std::size_t series_index = 0;
+       series_index < normalised_batch.nseries; ++series_index) {
+    const CudaSpan<const float> series{
+        .data = normalised_batch.data +
+                series_index * normalised_batch.nsamples,
+        .count = normalised_batch.nsamples,
+        .device_id = normalised_batch.device_id,
+    };
+    std::vector<PeriodicPeak> peaks = search(series, options);
+    result.reserve(result.size() + peaks.size());
+    for (PeriodicPeak& peak : peaks) {
+      result.push_back(SeriesPeak{
+          .series_index = series_index,
+          .peak = std::move(peak),
+      });
+    }
+  }
+  return result;
 }
 
 }  // namespace gaffa

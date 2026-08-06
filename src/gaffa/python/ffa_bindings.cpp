@@ -4,10 +4,14 @@
 #include "gaffa/ffa_cuda.h"
 #include "gaffa/ffa_plan.h"
 #include "gaffa/ffa_search.h"
+#include "gaffa/dm_search.h"
+#include "gaffa/preprocessing.h"
 
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <cmath>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -70,6 +74,41 @@ void validate_time_series_array(const py::buffer_info& info) {
   }
 }
 
+std::size_t parse_peak_limit(const py::object& max_peaks) {
+  if (max_peaks.is_none()) {
+    return 0;
+  }
+  const std::size_t peak_limit = max_peaks.cast<std::size_t>();
+  if (peak_limit == 0) {
+    throw py::value_error("max_peaks must be positive or None");
+  }
+  return peak_limit;
+}
+
+void validate_dm_array(const py::buffer_info& info) {
+  if (info.ndim != 2) {
+    throw py::value_error("DM series data must be a 2D array");
+  }
+  if (info.shape[0] <= 0 || info.shape[1] <= 0) {
+    throw py::value_error("DM series data must not be empty");
+  }
+  if (info.strides[1] != info.itemsize ||
+      info.strides[0] != info.shape[1] * info.itemsize) {
+    throw py::value_error(
+        "DM series data must be C-contiguous; use "
+        "numpy.ascontiguousarray explicitly if a copy is intended");
+  }
+  const bool is_uint32 =
+      info.itemsize == static_cast<py::ssize_t>(sizeof(std::uint32_t)) &&
+      info.format == py::format_descriptor<std::uint32_t>::format();
+  const bool is_float =
+      info.itemsize == static_cast<py::ssize_t>(sizeof(float)) &&
+      info.format == py::format_descriptor<float>::format();
+  if (!is_uint32 && !is_float) {
+    throw py::type_error("DM series data must have dtype uint32 or float32");
+  }
+}
+
 gaffa::FfaSearchPlan make_riptide_plan_for_python(
     std::size_t nsamples, double tsamp, double period_min, double period_max,
     std::size_t bins_min, std::size_t bins_max, std::size_t min_periods,
@@ -99,20 +138,18 @@ std::vector<gaffa::FfaPeak> ffa_search_cpu_for_python(
   const py::buffer_info info = time_series.request();
   validate_time_series_array(info);
 
-  std::size_t peak_limit = 0;
-  if (!max_peaks.is_none()) {
-    peak_limit = max_peaks.cast<std::size_t>();
-    if (peak_limit == 0) {
-      throw py::value_error("max_peaks must be positive or None");
-    }
-  }
+  const std::size_t peak_limit = parse_peak_limit(max_peaks);
 
   const auto nsamples = static_cast<std::size_t>(info.shape[0]);
+  if (nsamples != plan.observation.nsamples) {
+    throw py::value_error(
+        "FFA input_nsamples must match plan observation nsamples");
+  }
   const auto samples = std::span<const float>(
       static_cast<const float*>(info.ptr), nsamples);
 
   py::gil_scoped_release release;
-  return gaffa::search_ffa_cpu(
+  return gaffa::search_ffa_raw_cpu(
              samples, plan,
              gaffa::FfaSearchOptions{
                  .snr_threshold = snr_threshold,
@@ -132,15 +169,13 @@ std::vector<gaffa::FfaPeak> ffa_search_cuda_host_for_python(
   const py::buffer_info info = time_series.request();
   validate_time_series_array(info);
 
-  std::size_t peak_limit = 0;
-  if (!max_peaks.is_none()) {
-    peak_limit = max_peaks.cast<std::size_t>();
-    if (peak_limit == 0) {
-      throw py::value_error("max_peaks must be positive or None");
-    }
-  }
+  const std::size_t peak_limit = parse_peak_limit(max_peaks);
 
   const auto nsamples = static_cast<std::size_t>(info.shape[0]);
+  if (nsamples != plan.observation.nsamples) {
+    throw py::value_error(
+        "FFA input_nsamples must match plan observation nsamples");
+  }
   const auto samples = static_cast<const float*>(info.ptr);
 
   py::gil_scoped_release release;
@@ -150,7 +185,7 @@ std::vector<gaffa::FfaPeak> ffa_search_cuda_host_for_python(
                         cudaMemcpyHostToDevice),
              "cudaMemcpy host-to-device FFA input");
 
-  return gaffa::search_ffa_cuda(
+  return gaffa::search_ffa_raw_cuda(
              static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_samples)
                  .as_span(device_id),
              plan,
@@ -162,12 +197,74 @@ std::vector<gaffa::FfaPeak> ffa_search_cuda_host_for_python(
       .peaks;
 }
 
+std::vector<gaffa::DmPeak> search_dms_cpu_for_python(
+    const py::object& data_object, double tsamp, double dm_low, double dm_step,
+    std::size_t dm_index_offset, const gaffa::FfaSearchPlan& plan,
+    const gaffa::PreprocessPlan& preprocess, float snr_threshold,
+    const py::object& max_peaks) {
+  if (!py::isinstance<py::array>(data_object)) {
+    throw py::type_error("DM series data must be a numpy.ndarray");
+  }
+  const py::array data = py::reinterpret_borrow<py::array>(data_object);
+  const py::buffer_info info = data.request();
+  validate_dm_array(info);
+  if (!std::isfinite(tsamp) || !(tsamp > 0.0)) {
+    throw py::value_error("DM series tsamp must be finite and positive");
+  }
+  if (tsamp != plan.observation.tsamp_seconds) {
+    throw py::value_error("DM series tsamp must match FFA plan tsamp");
+  }
+
+  const auto ndm = static_cast<std::size_t>(info.shape[0]);
+  const auto nsamples = static_cast<std::size_t>(info.shape[1]);
+  std::vector<double> dm_values(ndm);
+  for (std::size_t index = 0; index < ndm; ++index) {
+    dm_values[index] = dm_low + static_cast<double>(index) * dm_step;
+  }
+
+  const gaffa::DmTrialView trials{
+      .values = dm_values,
+      .index_offset = dm_index_offset,
+  };
+  const gaffa::DmFfaOptions options{
+      .preprocess = preprocess,
+      .search = {.snr_threshold = snr_threshold,
+                 .max_peaks = parse_peak_limit(max_peaks)},
+  };
+  const gaffa::DedispersedShape shape{.ndm = ndm, .nsamples = nsamples};
+  const std::size_t element_count = gaffa::dedispersed_element_count(shape);
+
+  py::gil_scoped_release release;
+  if (info.format == py::format_descriptor<std::uint32_t>::format()) {
+    return gaffa::search_dm_ffa_cpu(
+        gaffa::DedispersedResultView<std::uint32_t>{
+            .data = std::span<const std::uint32_t>(
+                static_cast<const std::uint32_t*>(info.ptr), element_count),
+            .shape = shape,
+        },
+        trials, plan, options);
+  }
+  return gaffa::search_dm_ffa_cpu(
+      gaffa::DedispersedResultView<float>{
+          .data = std::span<const float>(static_cast<const float*>(info.ptr),
+                                         element_count),
+          .shape = shape,
+      },
+      trials, plan, options);
+}
+
 }  // namespace
 
 namespace gaffa::python {
 
 void bind_ffa(py::module_& module) {
   py::class_<gaffa::FfaSearchPlan>(module, "FfaPlan")
+      .def_property_readonly("nsamples", [](const gaffa::FfaSearchPlan& plan) {
+        return plan.observation.nsamples;
+      })
+      .def_property_readonly("tsamp", [](const gaffa::FfaSearchPlan& plan) {
+        return plan.observation.tsamp_seconds;
+      })
       .def_property_readonly("task_count", [](const gaffa::FfaSearchPlan& plan) {
         return plan.tasks.size();
       })
@@ -214,6 +311,13 @@ void bind_ffa(py::module_& module) {
   module.def("_ffa_search_cuda_host", &ffa_search_cuda_host_for_python,
              py::arg("time_series"), py::arg("plan"), py::kw_only(),
              py::arg("device_id") = 0, py::arg("snr_threshold") = 6.0F,
+             py::arg("max_peaks") = py::none());
+
+  module.def("_search_dms_cpu", &search_dms_cpu_for_python,
+             py::arg("data"), py::kw_only(), py::arg("tsamp"),
+             py::arg("dm_low"), py::arg("dm_step"),
+             py::arg("dm_index_offset"), py::arg("plan"),
+             py::arg("preprocess"), py::arg("snr_threshold") = 6.0F,
              py::arg("max_peaks") = py::none());
 }
 

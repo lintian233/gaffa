@@ -10,43 +10,39 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <vector>
 
 namespace gaffa {
 
-struct DmSearchOptions {
-  RiptideFfaPlanOptions plan{};
+struct DmFfaOptions {
   PreprocessPlan preprocess{};
-  float snr_threshold = 6.0F;
-  // 0 means unbounded. Applied per DM and per FFA block as a raw peak guard.
-  std::size_t max_peaks = 0;
+  FfaSearchOptions search{};
 };
-
-struct DmSearchResult {
-  DmPeaks peaks;
-};
-
-TimeSeries dm_time_series_cpu(const DedispersedResult<std::uint32_t>& input,
-                              std::size_t dm_index,
-                              double tsamp);
-
-TimeSeries dm_time_series_cpu(const DedispersedResult<float>& input,
-                              std::size_t dm_index,
-                              double tsamp);
 
 // Runs preprocessing and FFA peak search for every DM row in an eager host
 // dedispersion result. The result contains raw DmPeak responses; grouping,
 // cross-DM clustering, and candidate filtering belong downstream.
-DmSearchResult search_dedispersed_ffa_cpu(
-    const DedispersedResult<std::uint32_t>& input,
-    std::span<const double> dms,
-    double tsamp,
-    const DmSearchOptions& options);
+DmPeaks search_dm_ffa_cpu(
+    DedispersedResultView<std::uint32_t> input,
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options = {});
 
-DmSearchResult search_dedispersed_ffa_cpu(
+DmPeaks search_dm_ffa_cpu(
+    DedispersedResultView<float> input,
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options = {});
+
+DmPeaks search_dm_ffa_cpu(
+    const DedispersedResult<std::uint32_t>& input,
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options = {});
+
+DmPeaks search_dm_ffa_cpu(
     const DedispersedResult<float>& input,
-    std::span<const double> dms,
-    double tsamp,
-    const DmSearchOptions& options);
+    DmTrialView trials,
+    const FfaSearchPlan& plan,
+    const DmFfaOptions& options = {});
 
 }  // namespace gaffa

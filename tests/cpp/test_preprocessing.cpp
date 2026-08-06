@@ -226,7 +226,92 @@ TEST(Preprocessing, InplaceApiMutatesDataAndPreservesTsamp) {
   EXPECT_NEAR(stats.stddev, 1.0, 1.0e-6);
 }
 
-TEST(Preprocessing, RejectsInvalidTimeSeriesAndEmptyPlan) {
+TEST(Preprocessing, SpanOutOfPlaceMatchesTimeSeriesApi) {
+  const gaffa::TimeSeries input{
+      .data = {10.0F, 10.0F, 20.0F, 10.0F, 10.0F},
+      .tsamp = 0.001,
+  };
+  const gaffa::PreprocessPlan plan{
+      .steps = {
+          gaffa::PreprocessStep{
+              .kind = gaffa::PreprocessStepKind::DetrendRunningMedian,
+              .detrend_running_median = {.window_samples = 3},
+          },
+          gaffa::PreprocessStep{.kind = gaffa::PreprocessStepKind::Normalise},
+      },
+  };
+
+  std::vector<float> output(input.data.size());
+  gaffa::preprocess_time_series_cpu(input.view(), output, plan);
+  const auto expected = gaffa::preprocess_time_series_cpu(input, plan);
+
+  EXPECT_EQ(output, expected.data);
+}
+
+TEST(Preprocessing, SpanInplaceMatchesOutOfPlace) {
+  const std::vector<float> source{10.0F, 10.0F, 20.0F, 10.0F, 10.0F};
+  const gaffa::PreprocessPlan plan{
+      .steps = {
+          gaffa::PreprocessStep{
+              .kind = gaffa::PreprocessStepKind::DetrendRunningMedian,
+              .detrend_running_median = {.window_samples = 3},
+          },
+          gaffa::PreprocessStep{.kind = gaffa::PreprocessStepKind::Normalise},
+      },
+  };
+
+  const auto expected = gaffa::preprocess_time_series_cpu(source, plan);
+  auto actual = source;
+  gaffa::preprocess_time_series_inplace_cpu(actual, plan);
+
+  EXPECT_EQ(actual, expected);
+}
+
+TEST(Preprocessing, EmptyPlanIsIdentity) {
+  const gaffa::PreprocessPlan plan{};
+  const std::vector<float> source{1.0F, 2.0F, 3.0F};
+  std::vector<float> output(source.size());
+
+  gaffa::preprocess_time_series_cpu(source, output, plan);
+  EXPECT_EQ(output, source);
+
+  auto inplace = source;
+  gaffa::preprocess_time_series_inplace_cpu(inplace, plan);
+  EXPECT_EQ(inplace, source);
+
+  const gaffa::TimeSeries series{.data = source, .tsamp = 0.001};
+  const auto owning = gaffa::preprocess_time_series_cpu(series, plan);
+  EXPECT_EQ(owning.data, source);
+  EXPECT_DOUBLE_EQ(owning.tsamp, series.tsamp);
+}
+
+TEST(Preprocessing, AllowsExactAlias) {
+  const std::vector<float> source{1.0F, 2.0F, 3.0F};
+  const gaffa::PreprocessPlan plan{
+      .steps = {
+          gaffa::PreprocessStep{.kind = gaffa::PreprocessStepKind::Normalise},
+      },
+  };
+  const auto expected = gaffa::preprocess_time_series_cpu(source, plan);
+
+  auto actual = source;
+  gaffa::preprocess_time_series_cpu(
+      std::span<const float>(actual), std::span<float>(actual), plan);
+  EXPECT_EQ(actual, expected);
+}
+
+TEST(Preprocessing, RejectsPartialOverlap) {
+  std::vector<float> storage{1.0F, 2.0F, 3.0F, 4.0F};
+  const gaffa::PreprocessPlan plan{};
+
+  EXPECT_THROW(
+      gaffa::preprocess_time_series_cpu(
+          std::span<const float>(storage.data(), 3),
+          std::span<float>(storage.data() + 1, 3), plan),
+      std::invalid_argument);
+}
+
+TEST(Preprocessing, RejectsInvalidTimeSeries) {
   const gaffa::PreprocessPlan empty_plan{};
   const gaffa::PreprocessPlan normalise_plan{
       .steps = {
@@ -238,8 +323,6 @@ TEST(Preprocessing, RejectsInvalidTimeSeriesAndEmptyPlan) {
                    gaffa::TimeSeries{.data = {1.0F}, .tsamp = 0.0},
                    normalise_plan),
                std::invalid_argument);
-  EXPECT_THROW(gaffa::preprocess_time_series_cpu(
-                   gaffa::TimeSeries{.data = {1.0F}, .tsamp = 0.001},
-                   empty_plan),
-               std::invalid_argument);
+  EXPECT_NO_THROW(gaffa::preprocess_time_series_cpu(
+      gaffa::TimeSeries{.data = {1.0F}, .tsamp = 0.001}, empty_plan));
 }

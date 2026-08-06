@@ -9,9 +9,18 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
+from ..peaks._bindings import DmPeak
+from ..preprocessing._bindings import PreprocessPlan
+
 
 class FfaPlan:
     """Immutable reusable plan for one FFA period search."""
+
+    nsamples: int
+    """Number of input samples accepted by the plan."""
+
+    tsamp: float
+    """Sampling interval in seconds."""
 
     task_count: int
     """Number of FFA transform tasks in this plan."""
@@ -77,3 +86,17 @@ def _ffa_search_cuda_host(
 ) -> list[FfaPeak]:
     """Private host-input CUDA binding used by :func:`gaffa.ffa.ffa_search`."""
     ...
+
+
+def _search_dms_cpu(
+    data: NDArray[np.uint32] | NDArray[np.float32],
+    *,
+    tsamp: float,
+    dm_low: float,
+    dm_step: float,
+    dm_index_offset: int,
+    plan: FfaPlan,
+    preprocess: PreprocessPlan,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+) -> list[DmPeak]: ...

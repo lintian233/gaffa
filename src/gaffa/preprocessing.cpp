@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <vector>
@@ -20,9 +21,31 @@ void validate_running_median_options(DetrendRunningMedianOptions options) {
   }
 }
 
-void validate_preprocess_plan(const PreprocessPlan& plan) {
-  if (plan.steps.empty()) {
-    throw std::invalid_argument("preprocess plan must contain at least one step");
+void validate_preprocess_input(std::span<const float> input) {
+  if (input.empty()) {
+    throw std::invalid_argument("preprocess input must not be empty");
+  }
+}
+
+bool spans_overlap(std::span<const float> input, std::span<float> output) {
+  const float* const input_begin = input.data();
+  const float* const input_end = input_begin + input.size();
+  const float* const output_begin = output.data();
+  const float* const output_end = output_begin + output.size();
+  const std::less<const float*> less;
+  return less(input_begin, output_end) && less(output_begin, input_end);
+}
+
+void validate_preprocess_buffers(std::span<const float> input,
+                                 std::span<float> output) {
+  validate_preprocess_input(input);
+  if (output.size() != input.size()) {
+    throw std::invalid_argument(
+        "preprocess output size must match input size");
+  }
+  if (input.data() != output.data() && spans_overlap(input, output)) {
+    throw std::invalid_argument(
+        "preprocess input and output must not partially overlap");
   }
 }
 
@@ -146,8 +169,7 @@ void fast_running_median_cpu(std::span<const float> input,
 
 void apply_preprocess_step(const PreprocessStep& step,
                            std::span<const float> input,
-                           std::vector<float>& output) {
-  output.resize(input.size());
+                           std::span<float> output) {
   switch (step.kind) {
     case PreprocessStepKind::DetrendRunningMedian:
       detrend_running_median_cpu(input, step.detrend_running_median, output);
@@ -238,27 +260,67 @@ std::vector<float> detrend_running_median_cpu(
   return output;
 }
 
+void preprocess_time_series_cpu(std::span<const float> input,
+                                std::span<float> output,
+                                const PreprocessPlan& plan) {
+  validate_preprocess_buffers(input, output);
+  if (plan.steps.empty()) {
+    if (input.data() != output.data()) {
+      std::copy(input.begin(), input.end(), output.begin());
+    }
+    return;
+  }
+
+  std::vector<float> scratch(input.size());
+  std::span<const float> current = input;
+  for (std::size_t index = 0; index < plan.steps.size(); ++index) {
+    const bool final_step = index + 1 == plan.steps.size();
+    std::span<float> target;
+    if (final_step && current.data() != output.data()) {
+      target = output;
+    } else if (current.data() != scratch.data()) {
+      target = scratch;
+    } else {
+      target = output;
+    }
+    apply_preprocess_step(plan.steps[index], current, target);
+    current = target;
+  }
+
+  if (current.data() != output.data()) {
+    std::copy(current.begin(), current.end(), output.begin());
+  }
+}
+
+std::vector<float> preprocess_time_series_cpu(std::span<const float> input,
+                                              const PreprocessPlan& plan) {
+  std::vector<float> output(input.size());
+  preprocess_time_series_cpu(input, output, plan);
+  return output;
+}
+
+void preprocess_time_series_inplace_cpu(std::span<float> data,
+                                        const PreprocessPlan& plan) {
+  preprocess_time_series_cpu(
+      std::span<const float>(data.data(), data.size()), data, plan);
+}
+
 TimeSeries preprocess_time_series_cpu(const TimeSeries& input,
                                       const PreprocessPlan& plan) {
   validate_time_series(input);
-  validate_preprocess_plan(plan);
 
-  std::vector<float> current = input.data;
-  std::vector<float> next;
-  for (const auto& step : plan.steps) {
-    apply_preprocess_step(step, current, next);
-    current.swap(next);
-  }
-
-  return TimeSeries{
-      .data = std::move(current),
+  TimeSeries output{
+      .data = std::vector<float>(input.data.size()),
       .tsamp = input.tsamp,
   };
+  preprocess_time_series_cpu(input.view(), output.mutable_view(), plan);
+  return output;
 }
 
 void preprocess_time_series_inplace_cpu(TimeSeries& input,
                                         const PreprocessPlan& plan) {
-  input = preprocess_time_series_cpu(input, plan);
+  validate_time_series(input);
+  preprocess_time_series_inplace_cpu(input.mutable_view(), plan);
 }
 
 }  // namespace gaffa

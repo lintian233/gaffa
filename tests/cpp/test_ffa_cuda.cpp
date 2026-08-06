@@ -766,7 +766,7 @@ TEST(FfaCuda, EnforcesWorkspaceByteLimit) {
 TEST(FfaCuda, SingleSearchRejectsInvalidInputsBeforeCudaAllocation) {
   float fake_data = 0.0F;
   const auto plan = valid_plan();
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(
+  EXPECT_THROW((void)gaffa::search_ffa_raw_cuda(
                    gaffa::CudaSpan<const float>{
                        .data = nullptr,
                        .count = 2048,
@@ -774,7 +774,7 @@ TEST(FfaCuda, SingleSearchRejectsInvalidInputsBeforeCudaAllocation) {
                    },
                    plan),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(
+  EXPECT_THROW((void)gaffa::search_ffa_raw_cuda(
                    gaffa::CudaSpan<const float>{
                        .data = &fake_data,
                        .count = 0,
@@ -782,7 +782,7 @@ TEST(FfaCuda, SingleSearchRejectsInvalidInputsBeforeCudaAllocation) {
                    },
                    plan),
                std::invalid_argument);
-  EXPECT_THROW((void)gaffa::search_ffa_cuda(
+  EXPECT_THROW((void)gaffa::search_ffa_raw_cuda(
                    gaffa::CudaSpan<const float>{
                        .data = &fake_data,
                        .count = 2048,
@@ -821,14 +821,14 @@ TEST(FfaCuda, BatchSearchMatchesCpuAndReusesProgram) {
       .device_id = 0,
   };
   const auto cuda_result =
-      gaffa::run_ffa_batch_cuda(program, batch, search_options);
+      gaffa::search_ffa_raw_batch_cuda(program, batch, search_options);
   const auto repeated_result =
-      gaffa::run_ffa_batch_cuda(program, batch, search_options);
+      gaffa::search_ffa_raw_batch_cuda(program, batch, search_options);
   EXPECT_EQ(repeated_result.peaks.size(), cuda_result.peaks.size());
 
   std::vector<gaffa::FfaBatchPeak> expected;
   for (std::size_t series = 0; series < nseries; ++series) {
-    const auto cpu_result = gaffa::search_ffa_cpu(
+    const auto cpu_result = gaffa::search_ffa_raw_cpu(
         std::span<const float>(host_input).subspan(series * 2048, 2048),
         plan, search_options);
     for (const auto& peak : cpu_result.peaks) {
@@ -900,15 +900,18 @@ TEST(FfaCuda, BatchSearchGrowsPeakBufferAndRetriesPrepareGroup) {
       .nsamples = host_input.size(),
       .device_id = 0,
   };
-  const auto actual = gaffa::run_ffa_batch_cuda(program, input, options);
+  const auto actual =
+      gaffa::search_ffa_raw_batch_cuda(program, input, options);
   const auto expected =
-      gaffa::search_ffa_cpu(std::span<const float>(host_input), plan, options);
+      gaffa::search_ffa_raw_cpu(std::span<const float>(host_input), plan,
+                                options);
   ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
   EXPECT_GT(program.workspace_shape().detection_compact_bytes, initial_bytes);
 
   const std::size_t grown_bytes =
       program.workspace_shape().detection_compact_bytes;
-  const auto repeated = gaffa::run_ffa_batch_cuda(program, input, options);
+  const auto repeated =
+      gaffa::search_ffa_raw_batch_cuda(program, input, options);
   EXPECT_EQ(repeated.peaks.size(), expected.peaks.size());
   EXPECT_EQ(program.workspace_shape().detection_compact_bytes, grown_bytes);
 }
@@ -940,7 +943,7 @@ TEST(FfaCuda, BatchSearchRejectsPeakBufferGrowthPastCap) {
       .device_id = 0,
   };
   EXPECT_THROW(
-      (void)gaffa::run_ffa_batch_cuda(
+      (void)gaffa::search_ffa_raw_batch_cuda(
           program, input, gaffa::FfaSearchOptions{.snr_threshold = -1000000.0F}),
       std::runtime_error);
 }
@@ -971,13 +974,14 @@ TEST(FfaCuda, BatchSearchMatchesCpuForNonWarpAlignedBins) {
 
   const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
   gaffa::CudaFfaProgram program(plan);
-  const auto actual = gaffa::search_ffa_cuda(
+  const auto actual = gaffa::search_ffa_raw_cuda(
       program,
       static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
           .as_span(0),
       options);
   const auto expected =
-      gaffa::search_ffa_cpu(std::span<const float>(host_input), plan, options);
+      gaffa::search_ffa_raw_cpu(std::span<const float>(host_input), plan,
+                                options);
 
   ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
   for (std::size_t index = 0; index < expected.peaks.size(); ++index) {
@@ -1026,7 +1030,7 @@ TEST(FfaCuda, PeriodicConvenienceUsesProgramObservationMidpoint) {
 
   const gaffa::FfaSearchOptions options{.snr_threshold = 0.0F};
   gaffa::CudaFfaProgram program(plan);
-  const auto periodic = gaffa::search_ffa_periodic_cuda(
+  const auto periodic = gaffa::search_ffa_cuda(
       program,
       static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
           .as_span(0),
@@ -1061,13 +1065,14 @@ TEST(FfaCuda, BatchSearchTerminalMergeFusionMatchesCpu) {
 
   const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
   gaffa::CudaFfaProgram program(plan);
-  const auto actual = gaffa::search_ffa_cuda(
+  const auto actual = gaffa::search_ffa_raw_cuda(
       program,
       static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
           .as_span(0),
       options);
   const auto expected =
-      gaffa::search_ffa_cpu(std::span<const float>(host_input), plan, options);
+      gaffa::search_ffa_raw_cpu(std::span<const float>(host_input), plan,
+                                options);
 
   ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
   for (std::size_t index = 0; index < expected.peaks.size(); ++index) {
@@ -1104,13 +1109,14 @@ TEST(FfaCuda, BatchSearchTerminalMergeFusionMatchesCpuAcrossPrefixTiles) {
 
   const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
   gaffa::CudaFfaProgram program(plan);
-  const auto actual = gaffa::search_ffa_cuda(
+  const auto actual = gaffa::search_ffa_raw_cuda(
       program,
       static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
           .as_span(0),
       options);
   const auto expected =
-      gaffa::search_ffa_cpu(std::span<const float>(host_input), plan, options);
+      gaffa::search_ffa_raw_cpu(std::span<const float>(host_input), plan,
+                                options);
 
   ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
   for (std::size_t index = 0; index < expected.peaks.size(); ++index) {
@@ -1142,13 +1148,18 @@ TEST(FfaCuda, SingleSearchMatchesCpu) {
   const auto device_input_view =
       static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
           .as_span(0);
-  const auto cuda_result = gaffa::search_ffa_cuda(
+  const auto cuda_result = gaffa::search_ffa_raw_cuda(
       program, device_input_view, options);
-  const auto one_shot_result = gaffa::search_ffa_cuda(
+  const auto one_shot_result = gaffa::search_ffa_raw_cuda(
       device_input_view, plan, options);
-  const auto cpu_result = gaffa::search_ffa_cpu(host_input, plan, options);
+  const auto cpu_result = gaffa::search_ffa_raw_cpu(host_input, plan, options);
+  const auto host_periodic = gaffa::search_ffa_cuda(
+      std::span<const float>(host_input), plan, options);
+  const auto expected_periodic = gaffa::periodic_peaks_from_ffa(
+      cpu_result.peaks, plan.observation);
   ASSERT_EQ(cuda_result.peaks.size(), cpu_result.peaks.size());
   ASSERT_EQ(one_shot_result.peaks.size(), cpu_result.peaks.size());
+  ASSERT_EQ(host_periodic.size(), expected_periodic.size());
   for (std::size_t index = 0; index < cpu_result.peaks.size(); ++index) {
     EXPECT_EQ(cuda_result.peaks[index].shift, cpu_result.peaks[index].shift);
     EXPECT_EQ(cuda_result.peaks[index].phase, cpu_result.peaks[index].phase);
@@ -1168,7 +1179,7 @@ TEST(FfaCuda, BatchSearchRejectsTileLargerThanProgramCapacity) {
       plan, {}, gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
   gaffa::CudaDeviceBuffer<float> device_input(2 * 2048);
   EXPECT_THROW(
-      (void)gaffa::run_ffa_batch_cuda(
+      (void)gaffa::search_ffa_raw_batch_cuda(
           program,
           gaffa::CudaTimeSeriesBatchView{
               .data = device_input.data(),

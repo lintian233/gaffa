@@ -31,8 +31,8 @@ find_package(pybind11 CONFIG REQUIRED)
 find_package(OpenMP)
 include(CTest)
 
-# Loki is an optional periodic-search backend.  Keep its dependency graph out
-# of the core library until the dedicated adapter target is introduced.
+# Loki is an optional periodic-search backend. Core never depends on it; the
+# optional gaffa_loki target builds on the stable core API.
 if(GAFFA_ENABLE_LOKI)
   set(GAFFA_LOKI_HINTS)
   if(DEFINED ENV{LOKI_ROOT} AND NOT "$ENV{LOKI_ROOT}" STREQUAL "")
@@ -78,7 +78,7 @@ file(GLOB_RECURSE GAFFA_PYTHON_BINDING_SOURCES CONFIGURE_DEPENDS
 )
 
 # CUDA memory is shared infrastructure. Keep it separate from the core object
-# collection so optional backends can link it without pulling in gaffa_core.
+# collection so device allocation ownership has one reusable implementation.
 add_library(gaffa_cuda_memory STATIC src/gaffa/cuda_memory.cu)
 target_link_libraries(gaffa_cuda_memory PUBLIC CUDA::cudart)
 target_include_directories(gaffa_cuda_memory PUBLIC include)
@@ -100,16 +100,31 @@ set_target_properties(gaffa_core_objects PROPERTIES
   LINKER_LANGUAGE CUDA
 )
 
+add_library(gaffa_core STATIC $<TARGET_OBJECTS:gaffa_core_objects>)
+target_link_libraries(gaffa_core PUBLIC
+  gaffa_cuda_memory
+  CUDA::cudart
+  CUDA::cuda_driver
+)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(gaffa_core PUBLIC OpenMP::OpenMP_CXX)
+endif()
+target_include_directories(gaffa_core PUBLIC include)
+set_target_properties(gaffa_core PROPERTIES
+  CUDA_SEPARABLE_COMPILATION ON
+  CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  LINKER_LANGUAGE CUDA
+)
+
 if(GAFFA_ENABLE_LOKI)
   add_library(gaffa_loki STATIC
     src/gaffa/loki/loki_pffa_plan.cpp
     src/gaffa/loki/loki_pffa.cu
+    src/gaffa/loki/loki_dm_search.cu
   )
   target_link_libraries(gaffa_loki PUBLIC
-    gaffa_cuda_memory
+    gaffa_core
     loki::loki
-    CUDA::cudart
-    CUDA::cuda_driver
   )
   target_include_directories(gaffa_loki PUBLIC include)
   set_target_properties(gaffa_loki PROPERTIES
@@ -123,12 +138,8 @@ endif()
 pybind11_add_module(_core NO_EXTRAS
   src/gaffa/bindings.cpp
   ${GAFFA_PYTHON_BINDING_SOURCES}
-  $<TARGET_OBJECTS:gaffa_core_objects>
 )
-target_link_libraries(_core PRIVATE gaffa_cuda_memory CUDA::cudart CUDA::cuda_driver)
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(_core PRIVATE OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(_core PRIVATE gaffa_core)
 target_include_directories(_core PRIVATE include)
 set_target_properties(_core PROPERTIES
   CUDA_RESOLVE_DEVICE_SYMBOLS ON
@@ -145,12 +156,8 @@ if(BUILD_TESTING)
   add_executable(gaffa_cpp_tests
     src/gaffa/io/filterbank_legacy.cpp
     ${GAFFA_CPP_TEST_SOURCES}
-    $<TARGET_OBJECTS:gaffa_core_objects>
   )
-  target_link_libraries(gaffa_cpp_tests PRIVATE GTest::gtest_main gaffa_cuda_memory CUDA::cudart CUDA::cuda_driver)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(gaffa_cpp_tests PRIVATE OpenMP::OpenMP_CXX)
-  endif()
+  target_link_libraries(gaffa_cpp_tests PRIVATE GTest::gtest_main gaffa_core)
   target_compile_definitions(gaffa_cpp_tests
     PRIVATE
       GAFFA_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/tests/data"
@@ -168,18 +175,11 @@ if(BUILD_TESTING)
   if(GAFFA_ENABLE_LOKI)
     add_executable(gaffa_loki_smoke_tests
       tests/loki/test_loki_smoke.cpp
-      $<TARGET_OBJECTS:gaffa_core_objects>
     )
     target_link_libraries(gaffa_loki_smoke_tests PRIVATE
       GTest::gtest_main
       gaffa_loki
-      gaffa_cuda_memory
-      CUDA::cudart
-      CUDA::cuda_driver
     )
-    if(OpenMP_CXX_FOUND)
-      target_link_libraries(gaffa_loki_smoke_tests PRIVATE OpenMP::OpenMP_CXX)
-    endif()
     target_include_directories(gaffa_loki_smoke_tests PRIVATE
       include
       include/gaffa
@@ -192,8 +192,7 @@ if(BUILD_TESTING)
     )
     gtest_discover_tests(gaffa_loki_smoke_tests)
 
-    # This target intentionally does not include gaffa_core_objects. It proves
-    # that gaffa_loki carries every implementation dependency of its public API.
+    # gaffa_loki carries its core dependency transitively.
     add_executable(gaffa_loki_pffa_tests tests/loki/test_loki_pffa.cpp)
     target_link_libraries(gaffa_loki_pffa_tests PRIVATE
       GTest::gtest_main
@@ -226,12 +225,8 @@ foreach(benchmark_source IN LISTS GAFFA_BENCHMARK_SOURCES)
   add_executable(${benchmark_target} EXCLUDE_FROM_ALL
     ${benchmark_source}
     src/gaffa/io/filterbank_legacy.cpp
-    $<TARGET_OBJECTS:gaffa_core_objects>
   )
-  target_link_libraries(${benchmark_target} PRIVATE gaffa_cuda_memory CUDA::cudart CUDA::cuda_driver)
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(${benchmark_target} PRIVATE OpenMP::OpenMP_CXX)
-  endif()
+  target_link_libraries(${benchmark_target} PRIVATE gaffa_core)
   target_include_directories(${benchmark_target} PRIVATE include include/gaffa)
   target_compile_definitions(${benchmark_target}
     PRIVATE GAFFA_ENABLE_LEGACY_FILTERBANK_REFERENCE
@@ -247,17 +242,10 @@ if(GAFFA_ENABLE_LOKI)
   add_executable(gaffa_loki_dm_search_benchmark EXCLUDE_FROM_ALL
     benchmarks/loki_dm_search_benchmark.cpp
     src/gaffa/io/filterbank_legacy.cpp
-    $<TARGET_OBJECTS:gaffa_core_objects>
   )
   target_link_libraries(gaffa_loki_dm_search_benchmark PRIVATE
     gaffa_loki
-    gaffa_cuda_memory
-    CUDA::cudart
-    CUDA::cuda_driver
   )
-  if(OpenMP_CXX_FOUND)
-    target_link_libraries(gaffa_loki_dm_search_benchmark PRIVATE OpenMP::OpenMP_CXX)
-  endif()
   target_include_directories(gaffa_loki_dm_search_benchmark PRIVATE
     include
     include/gaffa

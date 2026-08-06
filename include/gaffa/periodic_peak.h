@@ -81,11 +81,33 @@ struct DmPeak {
 // Raw periodic-search responses from one backend or a batch of DM trials.
 using DmPeaks = std::vector<DmPeak>;
 
+// Identity of one series within a backend batch. The index is local to the
+// current batch and carries no DM semantics until attach_dm_trials() is used.
+struct SeriesPeak {
+  std::size_t series_index = 0;
+  PeriodicPeak peak{};
+};
+
+using SeriesPeaks = std::vector<SeriesPeak>;
+
+// Non-owning DM coordinates for one series batch. values[i] belongs to local
+// series i; index_offset + i is its global DM-trial index.
+struct DmTrialView {
+  std::span<const double> values;
+  std::size_t index_offset = 0;
+};
+
+void validate_dm_trials(DmTrialView trials);
+
 // Attaches one dedispersion-trial identity to backend-neutral periodic peaks.
 // The source peaks are copied because DmPeaks owns its values independently.
 DmPeaks attach_dm_peaks(std::span<const PeriodicPeak> peaks,
                         double dm,
                         std::size_t dm_index);
+
+// Attaches tile-local series peaks to their physical and global DM identities.
+DmPeaks attach_dm_trials(std::span<const SeriesPeak> peaks,
+                         DmTrialView trials);
 
 struct MotionRange {
   ValueRange acceleration_m_per_s2{};

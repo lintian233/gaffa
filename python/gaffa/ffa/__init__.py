@@ -1,12 +1,16 @@
 """Fast-folding-algorithm search primitives for preprocessed time series."""
 
 from .._core import (
+    DmPeak,
     FfaPeak,
     FfaPlan,
     _ffa_search_cpu,
     _ffa_search_cuda_host,
     _make_riptide_ffa_plan,
+    _search_dms_cpu,
 )
+from ..dedispersion import DedispersedResult
+from ..preprocessing import PreprocessPlan
 
 
 def make_riptide_plan(
@@ -71,4 +75,38 @@ def ffa_search(
     raise ValueError("backend must be 'cpu' or 'cuda'")
 
 
-__all__ = ["FfaPeak", "FfaPlan", "ffa_search", "make_riptide_plan"]
+def search_dms_cpu(
+    dedispersed: DedispersedResult,
+    plan: FfaPlan,
+    *,
+    preprocess: PreprocessPlan,
+    dm_index_offset: int = 0,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+) -> list[DmPeak]:
+    """Preprocess and search one host-resident block of DM time series."""
+
+    if not isinstance(dedispersed, DedispersedResult):
+        raise TypeError("dedispersed must be a DedispersedResult")
+    if dm_index_offset < 0:
+        raise ValueError("dm_index_offset must be non-negative")
+    return _search_dms_cpu(
+        dedispersed.data,
+        tsamp=dedispersed.tsamp,
+        dm_low=dedispersed.dm_low,
+        dm_step=dedispersed.dm_step,
+        dm_index_offset=dm_index_offset,
+        plan=plan,
+        preprocess=preprocess,
+        snr_threshold=snr_threshold,
+        max_peaks=max_peaks,
+    )
+
+
+__all__ = [
+    "FfaPeak",
+    "FfaPlan",
+    "ffa_search",
+    "make_riptide_plan",
+    "search_dms_cpu",
+]
