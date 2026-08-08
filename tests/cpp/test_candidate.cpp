@@ -53,11 +53,25 @@ TEST(CandidateClustering, RejectsInvalidInputs) {
                    {peaks},
                    {.max_phase_distance_cycles = -1.0}),
                std::invalid_argument);
+  EXPECT_THROW((void)cluster(
+                   {peaks},
+                   {.max_dm_distance = -1.0}),
+               std::invalid_argument);
 
   auto bad = peaks;
   bad.members.front().peak.motion.frequency_hz = INFINITY;
   EXPECT_THROW((void)cluster(std::vector<gaffa::DmPeakGroups>{bad}),
                std::invalid_argument);
+
+  EXPECT_THROW(
+      (void)cluster(std::vector<gaffa::DmPeakGroups>{
+          gaffa::DmPeakGroups{.members = {},
+                              .groups = {gaffa::DmPeakGroup{
+                                  .best_index = 0,
+                                  .member_begin = 0,
+                                  .member_count = 1,
+                              }}}}),
+      std::invalid_argument);
 }
 
 TEST(CandidateClustering, ClustersNearbyTrajectoryAcrossDmTrials) {
@@ -86,6 +100,32 @@ TEST(CandidateClustering, PreservesEveryRawMemberOfLinkedGroups) {
   ASSERT_EQ(result.candidates.size(), 1);
   EXPECT_EQ(result.candidates.front().member_count, 3);
   EXPECT_EQ(result.members.size(), 3);
+}
+
+TEST(CandidateClustering, UsesPhysicalDmDistanceForNonUniformTrials) {
+  const auto result = cluster(
+      {group({dm_peak(100.0, 0, 1.0000, 2, 7.0F)}),
+       group({dm_peak(100.5, 1, 1.0001, 2, 8.0F)}),
+       group({dm_peak(101.5, 2, 1.0002, 2, 6.0F)})},
+      {.max_phase_distance_cycles = 0.01, .max_dm_distance = 0.5});
+
+  // The first two trials are within the physical radius. The third trial is
+  // one DM unit from the second one even though its trial index is adjacent.
+  EXPECT_EQ(result.candidates.size(), 2U);
+  EXPECT_EQ(result.candidates.front().member_count, 2U);
+}
+
+TEST(CandidateClustering, PhysicalDmWindowIsIndependentOfInputOrder) {
+  const auto result = cluster(
+      {group({dm_peak(102.0, 4, 1.0003, 2, 6.0F)}),
+       group({dm_peak(100.5, 1, 1.0001, 2, 8.0F)}),
+       group({dm_peak(100.0, 0, 1.0000, 2, 7.0F)}),
+       group({dm_peak(101.0, 3, 1.0002, 2, 9.0F)})},
+      {.max_phase_distance_cycles = 0.02, .max_dm_distance = 0.5});
+
+  ASSERT_EQ(result.candidates.size(), 2U);
+  EXPECT_EQ(result.candidates[0].member_count, 3U);
+  EXPECT_EQ(result.candidates[1].member_count, 1U);
 }
 
 TEST(CandidateClustering, SeparatesOutsideTrajectoryOrDmRadius) {

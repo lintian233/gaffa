@@ -1,5 +1,7 @@
 #include "gaffa/periodic_match.h"
 
+#include "detail/phase_match.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -7,14 +9,19 @@
 #include <limits>
 #include <numeric>
 #include <stdexcept>
-#include <vector>
 
 namespace gaffa {
 namespace {
 
 constexpr long double kSpeedOfLightMPerS = 299792458.0L;
 constexpr std::size_t kPolynomialOrder = 4;
-using Polynomial = std::array<long double, kPolynomialOrder + 1>;
+constexpr std::size_t kRootCapacity = kPolynomialOrder + 1;
+using Polynomial = detail::PhasePolynomial;
+
+struct RootSet {
+  std::array<long double, kRootCapacity> values{};
+  std::size_t count = 0;
+};
 
 long double evaluate(const Polynomial& coefficients,
                      std::size_t degree,
@@ -42,28 +49,33 @@ std::size_t effective_degree(const Polynomial& coefficients,
   return degree;
 }
 
-void append_unique_root(std::vector<long double>& roots, long double root) {
+void append_unique_root(RootSet& roots, long double root) {
   root = std::clamp(root, 0.0L, 1.0L);
-  constexpr long double kRootTolerance = 256.0L *
-                                          std::numeric_limits<long double>::epsilon();
-  if (!roots.empty() && std::abs(roots.back() - root) <= kRootTolerance) {
+  constexpr long double kRootTolerance =
+      256.0L * std::numeric_limits<long double>::epsilon();
+  if (roots.count != 0 &&
+      std::abs(roots.values[roots.count - 1] - root) <= kRootTolerance) {
     return;
   }
-  roots.push_back(root);
+  if (roots.count >= roots.values.size()) {
+    throw std::logic_error("Polynomial root capacity exceeded");
+  }
+  roots.values[roots.count++] = root;
 }
 
-std::vector<long double> roots_on_unit_interval(const Polynomial& input,
-                                                std::size_t input_degree) {
+RootSet roots_on_unit_interval(const Polynomial& input,
+                               std::size_t input_degree) {
   const std::size_t degree = effective_degree(input, input_degree);
+  RootSet roots;
   if (degree == 0) {
-    return {};
+    return roots;
   }
   if (degree == 1) {
     const long double root = -input[0] / input[1];
     if (root >= 0.0L && root <= 1.0L) {
-      return {root};
+      append_unique_root(roots, root);
     }
-    return {};
+    return roots;
   }
 
   Polynomial derivative{};
@@ -71,14 +83,15 @@ std::vector<long double> roots_on_unit_interval(const Polynomial& input,
     derivative[index - 1] =
         static_cast<long double>(index) * input[index];
   }
-  std::vector<long double> critical =
-      roots_on_unit_interval(derivative, degree - 1);
+  const RootSet critical = roots_on_unit_interval(derivative, degree - 1);
 
-  std::vector<long double> boundaries;
-  boundaries.reserve(critical.size() + 2);
-  boundaries.push_back(0.0L);
-  boundaries.insert(boundaries.end(), critical.begin(), critical.end());
-  boundaries.push_back(1.0L);
+  std::array<long double, kRootCapacity + 2> boundaries{};
+  std::size_t boundary_count = 0;
+  boundaries[boundary_count++] = 0.0L;
+  for (std::size_t index = 0; index < critical.count; ++index) {
+    boundaries[boundary_count++] = critical.values[index];
+  }
+  boundaries[boundary_count++] = 1.0L;
 
   long double scale = 0.0L;
   for (std::size_t index = 0; index <= degree; ++index) {
@@ -88,13 +101,12 @@ std::vector<long double> roots_on_unit_interval(const Polynomial& input,
       128.0L * std::numeric_limits<long double>::epsilon() *
       std::max(1.0L, scale);
 
-  std::vector<long double> roots;
-  for (std::size_t index = 0; index < boundaries.size(); ++index) {
+  for (std::size_t index = 0; index < boundary_count; ++index) {
     const long double point = boundaries[index];
     if (std::abs(evaluate(input, degree, point)) <= value_tolerance) {
       append_unique_root(roots, point);
     }
-    if (index + 1 == boundaries.size()) {
+    if (index + 1 == boundary_count) {
       continue;
     }
 
@@ -124,36 +136,8 @@ std::vector<long double> roots_on_unit_interval(const Polynomial& input,
     }
     append_unique_root(roots, std::midpoint(left, right));
   }
-  std::sort(roots.begin(), roots.end());
+  std::sort(roots.values.begin(), roots.values.begin() + roots.count);
   return roots;
-}
-
-Polynomial anchored_phase_polynomial(const PeriodicMotion& motion,
-                                     long double observation_seconds) {
-  const long double frequency = motion.frequency_hz;
-  const long double acceleration = motion.acceleration_m_per_s2;
-  const long double jerk = motion.jerk_m_per_s3;
-  const long double snap = motion.snap_m_per_s4;
-  const long double epoch_offset = -motion.reference_time_seconds;
-  const long double t = observation_seconds;
-
-  Polynomial result{};
-  result[1] = frequency * t *
-              (1.0L - acceleration * epoch_offset / kSpeedOfLightMPerS -
-               jerk * epoch_offset * epoch_offset /
-                   (2.0L * kSpeedOfLightMPerS) -
-               snap * epoch_offset * epoch_offset * epoch_offset /
-                   (6.0L * kSpeedOfLightMPerS));
-  result[2] = -frequency * t * t *
-              (acceleration / 2.0L + jerk * epoch_offset / 2.0L +
-               snap * epoch_offset * epoch_offset / 4.0L) /
-              kSpeedOfLightMPerS;
-  result[3] = -frequency * t * t * t *
-              (jerk / 6.0L + snap * epoch_offset / 6.0L) /
-              kSpeedOfLightMPerS;
-  result[4] = -frequency * t * t * t * t * snap /
-              (24.0L * kSpeedOfLightMPerS);
-  return result;
 }
 
 PhaseDrift maximum_phase_drift(const Polynomial& residual,
@@ -163,12 +147,12 @@ PhaseDrift maximum_phase_drift(const Polynomial& residual,
     derivative[index - 1] =
         static_cast<long double>(index) * residual[index];
   }
-  const std::vector<long double> stationary =
+  const RootSet stationary =
       roots_on_unit_interval(derivative, kPolynomialOrder - 1);
 
   long double best_x = 0.0L;
   long double best_value = std::abs(evaluate(residual, kPolynomialOrder, 0.0L));
-  auto consider = [&](long double x) {
+  const auto consider = [&](long double x) {
     const long double value =
         std::abs(evaluate(residual, kPolynomialOrder, x));
     if (value > best_value) {
@@ -176,8 +160,8 @@ PhaseDrift maximum_phase_drift(const Polynomial& residual,
       best_x = x;
     }
   };
-  for (const long double root : stationary) {
-    consider(root);
+  for (std::size_t index = 0; index < stationary.count; ++index) {
+    consider(stationary.values[index]);
   }
   consider(1.0L);
   return PhaseDrift{
@@ -198,37 +182,82 @@ void validate_match_arguments(const PeriodicMotion& lhs,
   }
 }
 
-PhaseDrift scaled_phase_drift(const PeriodicMotion& lhs,
-                              long double lhs_scale,
-                              const PeriodicMotion& rhs,
-                              long double rhs_scale,
-                              double observation_seconds) {
-  const Polynomial lhs_phase = anchored_phase_polynomial(
-      lhs, static_cast<long double>(observation_seconds));
-  const Polynomial rhs_phase = anchored_phase_polynomial(
-      rhs, static_cast<long double>(observation_seconds));
+}  // namespace
+
+namespace detail {
+
+PhasePolynomial make_phase_polynomial(
+    const PeriodicMotion& motion,
+    double observation_seconds) noexcept {
+  const long double frequency = motion.frequency_hz;
+  const long double acceleration = motion.acceleration_m_per_s2;
+  const long double jerk = motion.jerk_m_per_s3;
+  const long double snap = motion.snap_m_per_s4;
+  const long double epoch_offset = -motion.reference_time_seconds;
+  const long double t = observation_seconds;
+
+  PhasePolynomial result{};
+  result[1] = frequency * t *
+              (1.0L - acceleration * epoch_offset / kSpeedOfLightMPerS -
+               jerk * epoch_offset * epoch_offset /
+                   (2.0L * kSpeedOfLightMPerS) -
+               snap * epoch_offset * epoch_offset * epoch_offset /
+                   (6.0L * kSpeedOfLightMPerS));
+  result[2] = -frequency * t * t *
+              (acceleration / 2.0L + jerk * epoch_offset / 2.0L +
+               snap * epoch_offset * epoch_offset / 4.0L) /
+              kSpeedOfLightMPerS;
+  result[3] = -frequency * t * t * t *
+              (jerk / 6.0L + snap * epoch_offset / 6.0L) /
+              kSpeedOfLightMPerS;
+  result[4] = -frequency * t * t * t * t * snap /
+              (24.0L * kSpeedOfLightMPerS);
+  return result;
+}
+
+PhaseDrift phase_drift(const PhasePolynomial& lhs,
+                       long double lhs_scale,
+                       const PhasePolynomial& rhs,
+                       long double rhs_scale,
+                       double observation_seconds) {
   Polynomial residual{};
   for (std::size_t index = 0; index <= kPolynomialOrder; ++index) {
-    residual[index] = lhs_scale * lhs_phase[index] -
-                      rhs_scale * rhs_phase[index];
+    residual[index] = lhs_scale * lhs[index] - rhs_scale * rhs[index];
   }
   return maximum_phase_drift(residual, observation_seconds);
 }
 
-FrequencyDrift scaled_frequency_drift(const PeriodicMotion& lhs,
-                                      long double lhs_scale,
-                                      const PeriodicMotion& rhs,
-                                      long double rhs_scale,
-                                      double observation_seconds) {
-  const Polynomial lhs_phase = anchored_phase_polynomial(
-      lhs, static_cast<long double>(observation_seconds));
-  const Polynomial rhs_phase = anchored_phase_polynomial(
-      rhs, static_cast<long double>(observation_seconds));
+bool sampled_phase_within(const PhasePolynomial& lhs,
+                          const PhasePolynomial& rhs,
+                          double maximum_cycles) noexcept {
+  Polynomial residual{};
+  for (std::size_t index = 0; index <= kPolynomialOrder; ++index) {
+    residual[index] = lhs[index] - rhs[index];
+  }
+  constexpr std::array<long double, 4> kSamples{0.25L, 0.5L, 0.75L, 1.0L};
+  for (const long double sample : kSamples) {
+    const long double value =
+        std::abs(evaluate(residual, kPolynomialOrder, sample));
+    const long double tolerance =
+        64.0L * std::numeric_limits<long double>::epsilon() *
+        std::max(1.0L, value);
+    if (value > static_cast<long double>(maximum_cycles) + tolerance) {
+      return false;
+    }
+  }
+  return true;
+}
+
+FrequencyDrift frequency_drift(const PhasePolynomial& lhs,
+                               long double lhs_scale,
+                               const PhasePolynomial& rhs,
+                               long double rhs_scale,
+                               double observation_seconds) {
   Polynomial frequency{};
   for (std::size_t index = 1; index <= kPolynomialOrder; ++index) {
     frequency[index - 1] =
         static_cast<long double>(index) *
-        (lhs_scale * lhs_phase[index] - rhs_scale * rhs_phase[index]) /
+        (lhs_scale * lhs[index] - rhs_scale * rhs[index]) /
         static_cast<long double>(observation_seconds);
   }
 
@@ -237,19 +266,19 @@ FrequencyDrift scaled_frequency_drift(const PeriodicMotion& lhs,
     derivative[index - 1] =
         static_cast<long double>(index) * frequency[index];
   }
-  const std::vector<long double> stationary =
+  const RootSet stationary =
       roots_on_unit_interval(derivative, kPolynomialOrder - 2);
   long double best_x = 0.0L;
   long double best_value = std::abs(evaluate(frequency, 3, 0.0L));
-  auto consider = [&](long double x) {
+  const auto consider = [&](long double x) {
     const long double value = std::abs(evaluate(frequency, 3, x));
     if (value > best_value) {
       best_value = value;
       best_x = x;
     }
   };
-  for (const long double root : stationary) {
-    consider(root);
+  for (std::size_t index = 0; index < stationary.count; ++index) {
+    consider(stationary.values[index]);
   }
   consider(1.0L);
   return FrequencyDrift{
@@ -259,13 +288,16 @@ FrequencyDrift scaled_frequency_drift(const PeriodicMotion& lhs,
   };
 }
 
-}  // namespace
+}  // namespace detail
 
 PhaseDrift periodic_phase_drift(const PeriodicMotion& lhs,
                                 const PeriodicMotion& rhs,
                                 double observation_seconds) {
   validate_match_arguments(lhs, rhs, observation_seconds);
-  return scaled_phase_drift(lhs, 1.0L, rhs, 1.0L, observation_seconds);
+  return detail::phase_drift(
+      detail::make_phase_polynomial(lhs, observation_seconds), 1.0L,
+      detail::make_phase_polynomial(rhs, observation_seconds), 1.0L,
+      observation_seconds);
 }
 
 PhaseDrift harmonic_phase_drift(const PeriodicMotion& parent,
@@ -277,9 +309,10 @@ PhaseDrift harmonic_phase_drift(const PeriodicMotion& parent,
     throw std::invalid_argument(
         "Harmonic phase ratio must be finite and > 0");
   }
-  return scaled_phase_drift(child, 1.0L, parent,
-                            static_cast<long double>(ratio),
-                            observation_seconds);
+  return detail::phase_drift(
+      detail::make_phase_polynomial(child, observation_seconds), 1.0L,
+      detail::make_phase_polynomial(parent, observation_seconds),
+      static_cast<long double>(ratio), observation_seconds);
 }
 
 FrequencyDrift harmonic_frequency_drift(const PeriodicMotion& parent,
@@ -291,9 +324,10 @@ FrequencyDrift harmonic_frequency_drift(const PeriodicMotion& parent,
     throw std::invalid_argument(
         "Harmonic frequency ratio must be finite and > 0");
   }
-  return scaled_frequency_drift(child, 1.0L, parent,
-                                static_cast<long double>(ratio),
-                                observation_seconds);
+  return detail::frequency_drift(
+      detail::make_phase_polynomial(child, observation_seconds), 1.0L,
+      detail::make_phase_polynomial(parent, observation_seconds),
+      static_cast<long double>(ratio), observation_seconds);
 }
 
 }  // namespace gaffa

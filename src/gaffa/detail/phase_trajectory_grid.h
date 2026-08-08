@@ -67,6 +67,36 @@ inline bool make_phase_trajectory_cell(const PhaseTrajectory& trajectory,
   return true;
 }
 
+inline bool make_phase_coordinate_cell(double coordinate,
+                                       double cell_width,
+                                       std::int64_t& cell) {
+  const long double lower =
+      static_cast<long double>(std::numeric_limits<std::int64_t>::min() + 1);
+  const long double upper =
+      static_cast<long double>(std::numeric_limits<std::int64_t>::max() - 1);
+  const long double scaled =
+      std::floor(static_cast<long double>(coordinate) / cell_width);
+  if (!std::isfinite(scaled) || scaled < lower || scaled > upper) {
+    return false;
+  }
+  cell = static_cast<std::int64_t>(scaled);
+  return true;
+}
+
+template <typename Callback>
+inline void for_each_neighbor_phase_coordinate_cell(std::int64_t center,
+                                                    Callback&& callback) {
+  for (int offset = -1; offset <= 1; ++offset) {
+    if ((offset > 0 &&
+         center > std::numeric_limits<std::int64_t>::max() - offset) ||
+        (offset < 0 &&
+         center < std::numeric_limits<std::int64_t>::min() - offset)) {
+      continue;
+    }
+    callback(center + offset);
+  }
+}
+
 inline bool offset_phase_trajectory_cell(const PhaseTrajectoryCell& cell,
                                          int offset0,
                                          int offset1,

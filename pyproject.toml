@@ -17,7 +17,7 @@ readme = "README.md"
 authors = [{ name = "lintian233" }]
 description = "CUDA/C++ and Python hybrid project scaffold."
 dependencies = [
-  "numpy>=2.4.0",
+  "numpy>=1.26,<2.5",
 ]
 
 [project.optional-dependencies]

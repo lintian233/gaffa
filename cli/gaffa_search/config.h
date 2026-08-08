@@ -72,7 +72,8 @@ struct Config {
   std::size_t max_total_raw_peaks = 0;
   std::size_t max_candidates = 0;
   std::size_t print_candidates = 64;
-  std::size_t candidate_dm_index_radius = 50;
+  // Physical DM distance in pc cm^-3 used for candidate clustering.
+  double candidate_dm_radius = 25.0;
 
   // When set, this is an output prefix for a single input file, or an output
   // directory for directory input. The CLI writes both .cand and .out.

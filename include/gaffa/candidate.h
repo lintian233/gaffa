@@ -29,8 +29,9 @@ struct CandidateSet {
 struct CandidateClusteringOptions {
   // Maximum phase-trajectory separation over the observation, in cycles.
   double max_phase_distance_cycles = 0.1;
-  // DM graph-edge radius in trial-index units, not physical DM units.
-  std::size_t max_dm_index_distance = 1;
+  // Maximum physical DM separation for a graph edge, in pc cm^-3.
+  // dm_index remains the trial identity and is not used as a distance.
+  double max_dm_distance = 1.0;
   bool cluster_across_widths = true;
 };
 

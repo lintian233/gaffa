@@ -32,7 +32,7 @@ gaffa::CandidateSet candidate_set(std::vector<gaffa::DmPeak> peaks) {
       groups, 100.0,
       gaffa::CandidateClusteringOptions{
           .max_phase_distance_cycles = 0.0,
-          .max_dm_index_distance = 1,
+          .max_dm_distance = 1.0,
       });
 }
 

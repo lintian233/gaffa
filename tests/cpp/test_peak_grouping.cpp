@@ -100,3 +100,37 @@ TEST(DmPeakGrouping, BatchRejectsInconsistentDmForOneDmIndex) {
                    std::vector<gaffa::DmPeak>{first, second}, 100.0),
                std::invalid_argument);
 }
+
+TEST(DmPeakGrouping, BatchResultIsIndependentOfInterDmInputOrder) {
+  auto dm1_best = peak(1.0, 2, 10.0F);
+  dm1_best.dm = 10.0;
+  dm1_best.dm_index = 1;
+  auto dm1_member = dm1_best;
+  dm1_member.peak.motion.frequency_hz = 1.0001;
+  dm1_member.peak.snr = 8.0F;
+  auto dm2_best = peak(2.0, 2, 9.0F);
+  dm2_best.dm = 20.0;
+  dm2_best.dm_index = 2;
+  auto dm2_member = dm2_best;
+  dm2_member.peak.motion.frequency_hz = 2.0001;
+  dm2_member.peak.snr = 7.0F;
+
+  const auto interleaved = gaffa::group_dm_peak_batch_cpu(
+      std::vector<gaffa::DmPeak>{dm2_best, dm1_best, dm2_member, dm1_member},
+      100.0);
+  const auto ordered = gaffa::group_dm_peak_batch_cpu(
+      std::vector<gaffa::DmPeak>{dm1_best, dm1_member, dm2_best, dm2_member},
+      100.0);
+
+  ASSERT_EQ(interleaved.size(), ordered.size());
+  for (std::size_t dm = 0; dm < ordered.size(); ++dm) {
+    ASSERT_EQ(interleaved[dm].groups.size(), ordered[dm].groups.size());
+    ASSERT_EQ(interleaved[dm].members.size(), ordered[dm].members.size());
+    for (std::size_t member = 0; member < ordered[dm].members.size(); ++member) {
+      EXPECT_EQ(interleaved[dm].members[member].dm_index,
+                ordered[dm].members[member].dm_index);
+      EXPECT_FLOAT_EQ(interleaved[dm].members[member].peak.snr,
+                      ordered[dm].members[member].peak.snr);
+    }
+  }
+}

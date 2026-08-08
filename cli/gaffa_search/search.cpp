@@ -69,14 +69,10 @@ std::size_t checked_multiply(std::size_t lhs, std::size_t rhs,
 std::vector<DmRangeRuntime> make_dm_ranges(const Config& config) {
   std::vector<DmRangeRuntime> result;
   result.reserve(config.dm_ranges.size());
-  const double global_low = config.dm_ranges.front().dm_low;
-  const double dm_step = config.dm_ranges.front().dm_step;
+  std::size_t global_index_begin = 0;
   for (std::size_t range_index = 0; range_index < config.dm_ranges.size();
        ++range_index) {
     const DmRangeConfig& range = config.dm_ranges[range_index];
-    const double global_index = (range.dm_low - global_low) / dm_step;
-    const std::size_t global_begin =
-        static_cast<std::size_t>(std::llround(global_index));
     std::vector<double> values(range.ndm);
     for (std::size_t index = 0; index < range.ndm; ++index) {
       values[index] = range.dm_low +
@@ -85,9 +81,10 @@ std::vector<DmRangeRuntime> make_dm_ranges(const Config& config) {
     result.push_back(DmRangeRuntime{
         .id = range_index,
         .config = range,
-        .global_dm_index_begin = global_begin,
+        .global_dm_index_begin = global_index_begin,
         .dm_values = std::move(values),
     });
+    global_index_begin += range.ndm;
   }
   return result;
 }
@@ -193,8 +190,7 @@ std::size_t prepared_length(const SearchRangeConfig& search,
 
 gaffa::CandidateOptions make_candidate_options(const Config& config) {
   gaffa::CandidateOptions options;
-  options.clustering.max_dm_index_distance =
-      config.candidate_dm_index_radius;
+  options.clustering.max_dm_distance = config.candidate_dm_radius;
   options.selection.snr_min = 0.0F;
   options.selection.max_candidates = config.max_candidates;
   return options;

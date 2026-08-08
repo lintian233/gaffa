@@ -152,12 +152,22 @@ TEST(GaffaSearchConfig, RejectsNegativeDm) {
       std::invalid_argument);
 }
 
-TEST(GaffaSearchConfig, RejectsDifferentDmSteps) {
-  EXPECT_THROW(
-      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
-             "0:1:4", "--dm-range", "4:0.5:4", "--search",
-             "native-cpu:0.018:1:180:256"}),
-      std::invalid_argument);
+TEST(GaffaSearchConfig, AcceptsDifferentDmSteps) {
+  const auto config = parse(
+      {"gaffa_search", "--input", "observation.fil", "--dm-range",
+       "0:1:4", "--dm-range", "4:0.5:4", "--search",
+       "native-cpu:0.018:1:180:256"});
+  ASSERT_EQ(config.dm_ranges.size(), 2U);
+  EXPECT_DOUBLE_EQ(config.dm_ranges[0].dm_step, 1.0);
+  EXPECT_DOUBLE_EQ(config.dm_ranges[1].dm_step, 0.5);
+}
+
+TEST(GaffaSearchConfig, ParsesPhysicalCandidateDmRadius) {
+  const auto config = parse(
+      {"gaffa_search", "--input", "observation.fil", "--dm-range",
+       "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+       "--candidate-dm-radius", "2.5"});
+  EXPECT_DOUBLE_EQ(config.candidate_dm_radius, 2.5);
 }
 
 TEST(GaffaSearchConfig, ParsesOutputControls) {
@@ -221,7 +231,7 @@ candidate:
   max_peaks: 12
   max_total_raw_peaks: 100
   max_candidates: 4
-  dm_index_radius: 10
+  dm_radius: 2.5
 output:
   prefix: results/candidates
   print_candidates: 7
@@ -257,7 +267,7 @@ output:
   EXPECT_EQ(config.max_peaks, 12U);
   EXPECT_EQ(config.max_total_raw_peaks, 100U);
   EXPECT_EQ(config.max_candidates, 4U);
-  EXPECT_EQ(config.candidate_dm_index_radius, 10U);
+  EXPECT_DOUBLE_EQ(config.candidate_dm_radius, 2.5);
   EXPECT_EQ(config.print_candidates, 7U);
   ASSERT_TRUE(config.candidate_output.has_value());
   EXPECT_EQ(*config.candidate_output,

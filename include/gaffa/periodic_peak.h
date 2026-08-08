@@ -73,7 +73,9 @@ struct PeriodicPeak {
 
 // A periodic peak associated with one dedispersion trial.
 struct DmPeak {
+  // Physical dispersion measure in pc cm^-3.
   double dm = 0.0;
+  // Stable identity of the source DM trial. This is not a physical distance.
   std::size_t dm_index = 0;
   PeriodicPeak peak{};
 };
@@ -91,7 +93,8 @@ struct SeriesPeak {
 using SeriesPeaks = std::vector<SeriesPeak>;
 
 // Non-owning DM coordinates for one series batch. values[i] belongs to local
-// series i; index_offset + i is its global DM-trial index.
+// series i; index_offset + i is its unique trial identity. The index is not a
+// physical DM coordinate or a distance measure.
 struct DmTrialView {
   std::span<const double> values;
   std::size_t index_offset = 0;

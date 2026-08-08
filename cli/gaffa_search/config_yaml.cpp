@@ -348,7 +348,7 @@ void parse_candidate(const YAML::Node& root, Config& config) {
   require_map(node, "candidate");
   reject_unknown_keys(node,
                       {"snr_threshold", "max_peaks", "max_total_raw_peaks",
-                       "max_candidates", "dm_index_radius"},
+                       "max_candidates", "dm_radius"},
                       "candidate");
   config.snr_threshold = optional_scalar<float>(
       node, "snr_threshold", config.snr_threshold,
@@ -365,9 +365,9 @@ void parse_candidate(const YAML::Node& root, Config& config) {
     config.max_candidates =
         nonnegative_size(node["max_candidates"], "candidate.max_candidates");
   }
-  if (node["dm_index_radius"]) {
-    config.candidate_dm_index_radius = nonnegative_size(
-        node["dm_index_radius"], "candidate.dm_index_radius");
+  if (node["dm_radius"]) {
+    config.candidate_dm_radius =
+        scalar<double>(node["dm_radius"], "candidate.dm_radius");
   }
 }
 

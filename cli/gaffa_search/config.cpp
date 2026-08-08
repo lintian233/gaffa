@@ -218,37 +218,34 @@ void validate_config_impl(const Config& config) {
         "running median seconds must be finite and > 0");
   }
 
-  const double dm_step = config.dm_ranges.front().dm_step;
   double previous_end = -std::numeric_limits<double>::infinity();
   std::size_t previous_global_end = 0;
   for (std::size_t index = 0; index < config.dm_ranges.size(); ++index) {
     const auto& range = config.dm_ranges[index];
     if (range.ndm == 0 || range.dm_low < 0.0 || !(range.dm_step > 0.0) ||
-        !std::isfinite(range.dm_low) || !std::isfinite(range.dm_step) ||
-        std::abs(range.dm_step - dm_step) >
-            std::numeric_limits<double>::epsilon() *
-                std::max({1.0, std::abs(range.dm_step), std::abs(dm_step)}) *
-                16.0) {
+        !std::isfinite(range.dm_low) || !std::isfinite(range.dm_step)) {
       throw std::invalid_argument(
-          "DM ranges must have finite positive values and the same dm_step");
+          "DM ranges must have finite non-negative lows and positive steps");
+    }
+    const double range_end =
+        range.dm_low + static_cast<double>(range.ndm) * range.dm_step;
+    if (!std::isfinite(range_end)) {
+      throw std::invalid_argument("DM range endpoint must be finite");
     }
     if (index != 0 && range.dm_low < previous_end) {
       throw std::invalid_argument("DM ranges must not overlap");
     }
-    const double global_index_value =
-        (range.dm_low - config.dm_ranges.front().dm_low) / dm_step;
-    const double rounded = std::round(global_index_value);
-    if (std::abs(global_index_value - rounded) > 1e-8) {
-      throw std::invalid_argument(
-          "DM ranges must lie on one common global DM grid");
+    if (previous_global_end >
+        std::numeric_limits<std::size_t>::max() - range.ndm) {
+      throw std::overflow_error("DM trial index range overflows size_t");
     }
-    const auto global_begin = static_cast<std::size_t>(rounded);
-    if (index != 0 && global_begin < previous_global_end) {
-      throw std::invalid_argument("DM ranges have overlapping global indices");
-    }
-    previous_global_end = global_begin + range.ndm;
-    previous_end = range.dm_low +
-                   static_cast<double>(range.ndm) * range.dm_step;
+    previous_global_end += range.ndm;
+    previous_end = range_end;
+  }
+  if (!std::isfinite(config.candidate_dm_radius) ||
+      config.candidate_dm_radius < 0.0) {
+    throw std::invalid_argument(
+        "candidate DM radius must be finite and non-negative");
   }
 
   for (const auto& search : config.search_ranges) {
@@ -317,7 +314,7 @@ void print_usage(const char* program) {
       << "  --print-candidates N      Number shown on stdout; 0 prints all\n"
       << "  --cand PATH               Output prefix/directory for .cand and .out\n"
       << "  --overwrite               Allow replacing existing output files\n"
-      << "  --candidate-dm-radius N   Cross-DM radius in global index units\n"
+      << "  --candidate-dm-radius N   Cross-DM radius in pc cm^-3\n"
       << "  --help                    Show this message\n";
 }
 
@@ -449,9 +446,9 @@ Config parse_arguments(int argc, char** argv) {
     } else if (argument == "--overwrite") {
       config.overwrite_output = true;
     } else if (argument == "--candidate-dm-radius") {
-      config.candidate_dm_index_radius =
-          parse_number<std::size_t>(require_value("--candidate-dm-radius"),
-                                    "candidate DM radius");
+      config.candidate_dm_radius =
+          parse_number<double>(require_value("--candidate-dm-radius"),
+                               "candidate DM radius");
     } else {
       throw std::invalid_argument("unknown option: " + std::string(argument));
     }

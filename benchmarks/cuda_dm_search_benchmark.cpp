@@ -105,10 +105,10 @@ Args parse_args(int argc, char** argv) {
   return args;
 }
 
-gaffa::CandidateClusteringOptions candidate_options() {
+gaffa::CandidateClusteringOptions candidate_options(double dm_step) {
   return gaffa::CandidateClusteringOptions{
       .max_phase_distance_cycles = 0.1,
-      .max_dm_index_distance = 50,
+      .max_dm_distance = 50.0 * dm_step,
       .cluster_across_widths = true,
   };
 }
@@ -302,7 +302,8 @@ int main(int argc, char** argv) {
     gaffa::CandidateSet candidates;
     timings.clustering = time_once([&] {
       candidates = gaffa::cluster_dm_peak_groups_cpu(
-          peak_groups, observation_seconds, candidate_options());
+          peak_groups, observation_seconds,
+          candidate_options(args.dm_step));
     });
     std::vector<gaffa::HarmonicRelation> flagged_candidates;
     std::vector<std::size_t> filtered_candidates;
@@ -327,11 +328,11 @@ int main(int argc, char** argv) {
               << " max_peaks=" << args.max_peaks
               << " max_candidates=" << args.max_candidates
               << " candidate_max_phase_distance_cycles="
-              << candidate_options().max_phase_distance_cycles
-              << " candidate_max_dm_index_distance="
-              << candidate_options().max_dm_index_distance
+              << candidate_options(args.dm_step).max_phase_distance_cycles
+              << " candidate_max_dm_distance="
+              << candidate_options(args.dm_step).max_dm_distance
               << " candidate_cluster_across_widths="
-              << candidate_options().cluster_across_widths
+              << candidate_options(args.dm_step).cluster_across_widths
               << " harmonic_max_harmonic=" << harmonic_options().max_harmonic
               << " harmonic_denominator_max="
               << harmonic_options().denominator_max

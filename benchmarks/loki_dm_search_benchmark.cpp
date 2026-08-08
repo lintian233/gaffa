@@ -167,10 +167,10 @@ PrefixWindow make_prefix_window(std::size_t source_nsamples, WindowMode mode) {
   };
 }
 
-gaffa::CandidateClusteringOptions candidate_options() {
+gaffa::CandidateClusteringOptions candidate_options(double dm_step) {
   return gaffa::CandidateClusteringOptions{
       .max_phase_distance_cycles = 0.1,
-      .max_dm_index_distance = 50,
+      .max_dm_distance = 50.0 * dm_step,
       .cluster_across_widths = true,
   };
 }
@@ -488,7 +488,7 @@ int main(int argc, char** argv) {
     timings.clustering = time_once([&] {
       candidates = gaffa::cluster_dm_peak_groups_cpu(
           peak_groups, searched_duration_seconds,
-          candidate_options());
+          candidate_options(args.dm_step));
     });
     std::vector<gaffa::HarmonicRelation> harmonic_candidates;
     std::vector<std::size_t> filtered_candidates;

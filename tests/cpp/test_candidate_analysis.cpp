@@ -39,13 +39,42 @@ gaffa::CandidateOptions options() {
       .grouping = {.max_phase_distance_cycles = 0.0},
       .clustering = {
           .max_phase_distance_cycles = 0.0,
-          .max_dm_index_distance = 1,
+          .max_dm_distance = 1.0,
       },
       .selection = {
           .snr_min = 10.0F,
           .max_candidates = 2,
       },
   };
+}
+
+void expect_same_candidate_set(const gaffa::CandidateSet& lhs,
+                               const gaffa::CandidateSet& rhs) {
+  ASSERT_EQ(lhs.members.size(), rhs.members.size());
+  ASSERT_EQ(lhs.candidates.size(), rhs.candidates.size());
+  for (std::size_t index = 0; index < lhs.members.size(); ++index) {
+    EXPECT_DOUBLE_EQ(lhs.members[index].dm, rhs.members[index].dm);
+    EXPECT_EQ(lhs.members[index].dm_index, rhs.members[index].dm_index);
+    EXPECT_DOUBLE_EQ(lhs.members[index].peak.motion.frequency_hz,
+                     rhs.members[index].peak.motion.frequency_hz);
+    EXPECT_FLOAT_EQ(lhs.members[index].peak.snr, rhs.members[index].peak.snr);
+  }
+  for (std::size_t index = 0; index < lhs.candidates.size(); ++index) {
+    EXPECT_EQ(lhs.candidates[index].member_begin,
+              rhs.candidates[index].member_begin);
+    EXPECT_EQ(lhs.candidates[index].member_count,
+              rhs.candidates[index].member_count);
+    EXPECT_DOUBLE_EQ(lhs.candidates[index].best.dm,
+                     rhs.candidates[index].best.dm);
+    EXPECT_EQ(lhs.candidates[index].best.dm_index,
+              rhs.candidates[index].best.dm_index);
+    EXPECT_FLOAT_EQ(lhs.candidates[index].best.peak.snr,
+                    rhs.candidates[index].best.peak.snr);
+    EXPECT_EQ(lhs.candidates[index].extent.dm_index_min,
+              rhs.candidates[index].extent.dm_index_min);
+    EXPECT_EQ(lhs.candidates[index].extent.dm_index_max,
+              rhs.candidates[index].extent.dm_index_max);
+  }
 }
 
 }  // namespace
@@ -69,7 +98,7 @@ TEST(CandidateAnalysis, MatchesTheAtomicPipelineAndPreservesDiagnostics) {
   const auto non_harmonic =
       gaffa::remove_harmonics_cpu(candidates, relations);
 
-  ASSERT_EQ(result.candidate_set.candidates.size(), candidates.candidates.size());
+  expect_same_candidate_set(result.candidate_set, candidates);
   ASSERT_EQ(result.candidate_set.members.size(), peaks.size());
   ASSERT_EQ(result.harmonic_relations.size(), relations.size());
   ASSERT_EQ(result.selected.size(), 2);
@@ -118,7 +147,7 @@ TEST(CandidateAnalysis, MergesPeaksFromMultipleSearchRuns) {
   auto analysis_options = options();
   analysis_options.selection.snr_min = 0.0F;
   analysis_options.selection.max_candidates = 0;
-  analysis_options.clustering.max_dm_index_distance = 1;
+  analysis_options.clustering.max_dm_distance = 0.5;
   analysis_options.clustering.cluster_across_widths = true;
 
   const std::vector<gaffa::DmPeak> peaks{
@@ -143,4 +172,31 @@ TEST(CandidateAnalysis, RejectsNonFiniteSelectionThreshold) {
   EXPECT_THROW(
       (void)gaffa::make_candidates_cpu({}, context(), analysis_options),
       std::invalid_argument);
+}
+
+TEST(CandidateAnalysis, ParallelGroupingIsDeterministic) {
+  std::vector<gaffa::DmPeak> peaks;
+  for (std::size_t dm_index = 0; dm_index < 32; ++dm_index) {
+    for (std::size_t trial = 0; trial < 8; ++trial) {
+      peaks.push_back(peak(100.0 + static_cast<double>(dm_index) * 0.5,
+                           dm_index,
+                           2.0 + static_cast<double>(trial) * 1.0e-4,
+                           20.0F - static_cast<float>(trial)));
+    }
+  }
+  auto analysis_options = options();
+  analysis_options.grouping.max_phase_distance_cycles = 0.05;
+  analysis_options.clustering.max_phase_distance_cycles = 0.1;
+  analysis_options.clustering.max_dm_distance = 0.5;
+  analysis_options.selection.snr_min = 0.0F;
+  analysis_options.selection.max_candidates = 0;
+
+  const auto reference =
+      gaffa::make_candidates_cpu(peaks, context(), analysis_options);
+  for (int iteration = 0; iteration < 4; ++iteration) {
+    const auto repeated =
+        gaffa::make_candidates_cpu(peaks, context(), analysis_options);
+    expect_same_candidate_set(reference.candidate_set,
+                              repeated.candidate_set);
+  }
 }

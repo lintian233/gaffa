@@ -41,7 +41,8 @@ DmPeakGroups group_dm_peaks_cpu(
 
 // Partitions raw peaks by their source DM trial, then groups each trial
 // independently. Returned entries are ordered by dm_index and retain every
-// input peak exactly once.
+// input peak exactly once. dm_index identifies a trial; physical DM distance
+// is handled later by candidate clustering.
 std::vector<DmPeakGroups> group_dm_peak_batch_cpu(
     std::span<const DmPeak> peaks,
     double searched_duration_seconds,
