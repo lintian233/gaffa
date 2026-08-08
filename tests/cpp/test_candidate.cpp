@@ -1,9 +1,13 @@
 #include "gaffa/candidate.h"
+#include "gaffa/periodic_match.h"
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -34,6 +38,68 @@ gaffa::DmPeakGroups group(std::vector<gaffa::DmPeak> peaks) {
 gaffa::CandidateSet cluster(std::vector<gaffa::DmPeakGroups> groups,
                             gaffa::CandidateClusteringOptions options = {}) {
   return gaffa::cluster_dm_peak_groups_cpu(groups, 100.0, options);
+}
+
+std::vector<std::size_t> brute_force_component_sizes(
+    const std::vector<gaffa::DmPeakGroups>& sources,
+    const gaffa::CandidateClusteringOptions& options) {
+  struct LocalGroup {
+    const gaffa::DmPeak* best = nullptr;
+    std::size_t member_count = 0;
+  };
+  std::vector<LocalGroup> groups;
+  for (const gaffa::DmPeakGroups& source : sources) {
+    for (const gaffa::DmPeakGroup& group : source.groups) {
+      groups.push_back({.best = &source.members[group.best_index],
+                        .member_count = group.member_count});
+    }
+  }
+
+  std::vector<std::size_t> labels(groups.size());
+  std::iota(labels.begin(), labels.end(), std::size_t{0});
+  const auto unite = [&](std::size_t lhs, std::size_t rhs) {
+    const std::size_t replacement = std::min(labels[lhs], labels[rhs]);
+    const std::size_t removed = std::max(labels[lhs], labels[rhs]);
+    if (replacement == removed) {
+      return;
+    }
+    for (std::size_t& label : labels) {
+      if (label == removed) {
+        label = replacement;
+      }
+    }
+  };
+
+  for (std::size_t current = 0; current < groups.size(); ++current) {
+    for (std::size_t previous = 0; previous < current; ++previous) {
+      const gaffa::DmPeak& lhs = *groups[current].best;
+      const gaffa::DmPeak& rhs = *groups[previous].best;
+      if (lhs.dm_index == rhs.dm_index ||
+          std::abs(lhs.dm - rhs.dm) > options.max_dm_distance ||
+          (!options.cluster_across_widths &&
+           (lhs.peak.phase_bins != rhs.peak.phase_bins ||
+            lhs.peak.boxcar_width_bins != rhs.peak.boxcar_width_bins))) {
+        continue;
+      }
+      if (gaffa::periodic_phase_drift(lhs.peak.motion, rhs.peak.motion, 100.0)
+              .maximum_cycles <= options.max_phase_distance_cycles) {
+        unite(current, previous);
+      }
+    }
+  }
+
+  std::unordered_map<std::size_t, std::size_t> counts;
+  for (std::size_t index = 0; index < groups.size(); ++index) {
+    counts[labels[index]] += groups[index].member_count;
+  }
+  std::vector<std::size_t> result;
+  result.reserve(counts.size());
+  for (const auto& [label, count] : counts) {
+    (void)label;
+    result.push_back(count);
+  }
+  std::sort(result.begin(), result.end());
+  return result;
 }
 
 }  // namespace
@@ -188,6 +254,69 @@ TEST(CandidateClustering, SupportsTaylorMotion) {
   const auto result = cluster({group({first}), group({second})});
   ASSERT_EQ(result.candidates.size(), 1);
   EXPECT_EQ(result.members.size(), 2);
+}
+
+TEST(CandidateClustering, ZeroPhaseRadiusLinksIdenticalTrajectories) {
+  const auto result = cluster(
+      {group({dm_peak(10.0, 0, 1.0, 2, 7.0F)}),
+       group({dm_peak(11.0, 1, 1.0, 2, 9.0F)})},
+      {.max_phase_distance_cycles = 0.0, .max_dm_distance = 1.0});
+
+  ASSERT_EQ(result.candidates.size(), 1U);
+  EXPECT_EQ(result.candidates.front().member_count, 2U);
+}
+
+TEST(CandidateClustering, IndexedGraphMatchesBruteForceTaylorGraph) {
+  std::vector<gaffa::DmPeakGroups> sources;
+  for (std::size_t dm_index = 0; dm_index < 40; ++dm_index) {
+    const double dm = 100.0 + 0.5 * static_cast<double>(dm_index);
+    std::vector<gaffa::DmPeak> peaks;
+
+    peaks.push_back(dm_peak(dm, dm_index,
+                            1.0 + 0.0002 * static_cast<double>(dm_index),
+                            2, 20.0F));
+    peaks.push_back(dm_peak(dm, dm_index,
+                            2.0 + 0.0015 * static_cast<double>(dm_index),
+                            2, 15.0F));
+
+    auto acceleration = dm_peak(dm, dm_index, 3.0, 4, 18.0F);
+    acceleration.peak.motion = {
+        .order = gaffa::MotionOrder::Acceleration,
+        .reference_time_seconds = 50.0,
+        .frequency_hz = 3.0,
+        .acceleration_m_per_s2 =
+            1.0 + 0.01 * static_cast<double>(dm_index),
+    };
+    peaks.push_back(acceleration);
+
+    auto jerk = dm_peak(dm, dm_index, 4.0, 4, 16.0F);
+    jerk.peak.motion = {
+        .order = gaffa::MotionOrder::Jerk,
+        .reference_time_seconds = 50.0,
+        .frequency_hz = 4.0,
+        .acceleration_m_per_s2 = 2.0,
+        .jerk_m_per_s3 = 0.02 * static_cast<double>(dm_index),
+    };
+    peaks.push_back(jerk);
+    sources.push_back(gaffa::group_dm_peaks_cpu(
+        peaks, 100.0,
+        {.max_phase_distance_cycles = 0.01, .merge_widths = true}));
+  }
+
+  const gaffa::CandidateClusteringOptions options{
+      .max_phase_distance_cycles = 0.1,
+      .max_dm_distance = 0.5,
+      .cluster_across_widths = true,
+  };
+  const auto actual = cluster(sources, options);
+  std::vector<std::size_t> actual_sizes;
+  actual_sizes.reserve(actual.candidates.size());
+  for (const gaffa::Candidate& candidate : actual.candidates) {
+    actual_sizes.push_back(candidate.member_count);
+  }
+  std::sort(actual_sizes.begin(), actual_sizes.end());
+
+  EXPECT_EQ(actual_sizes, brute_force_component_sizes(sources, options));
 }
 
 TEST(CandidateSelection, AppliesThresholdAndFinalCapWithoutCopying) {
