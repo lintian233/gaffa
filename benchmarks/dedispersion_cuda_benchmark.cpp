@@ -38,7 +38,8 @@ struct Args {
   double dm_step = 1.0;
   std::size_t subband_channels = 32;
   std::size_t ndm_per_nominal = 32;
-  std::size_t time_tile_samples = 81920;
+  // Zero lets the CUDA host wrapper choose the largest safe tile.
+  std::size_t time_tile_samples = 0;
   bool checksum_enabled = false;
 };
 
@@ -124,9 +125,6 @@ Args parse_args(int argc, char** argv) {
   }
   if (args.ndm_per_nominal == 0) {
     throw std::invalid_argument("ndm_per_nominal must be positive");
-  }
-  if (args.time_tile_samples == 0) {
-    throw std::invalid_argument("time_tile_samples must be positive");
   }
   return args;
 }

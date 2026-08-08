@@ -138,56 +138,6 @@ void validate_subband_options(const SubbandDedispersionOptions& options) {
   }
 }
 
-std::vector<std::int32_t> make_subband_coarse_delay_table(
-    std::span<const double> frequency_mhz,
-    const MultiDmDedispersionPlan& plan,
-    const SubbandDedispersionOptions& options,
-    std::size_t nominal_dm_count) {
-  const std::size_t channel_count = plan.chan_end - plan.chan_begin;
-  std::vector<std::int32_t> delays(
-      checked_output_size(nominal_dm_count, channel_count));
-  for (std::size_t nominal_index = 0; nominal_index < nominal_dm_count;
-       ++nominal_index) {
-    const double nominal_dm =
-        plan.dm_low +
-        static_cast<double>(nominal_index * options.ndm_per_nominal) *
-            plan.dm_step;
-    for (std::size_t offset = 0; offset < channel_count; ++offset) {
-      const std::size_t channel = plan.chan_begin + offset;
-      delays[nominal_index * channel_count + offset] =
-          internal::dedispersion_delay_bins(
-              nominal_dm, frequency_mhz[channel], plan.ref_frequency_mhz,
-              plan.tsamp);
-    }
-  }
-  return delays;
-}
-
-std::vector<std::int32_t> make_subband_residual_delay_table(
-    std::span<const double> subband_frequency,
-    const MultiDmDedispersionPlan& plan,
-    const SubbandDedispersionOptions& options) {
-  std::vector<std::int32_t> delays(
-      checked_output_size(plan.ndm, subband_frequency.size()));
-  for (std::size_t dm_index = 0; dm_index < plan.ndm; ++dm_index) {
-    const std::size_t nominal_index = dm_index / options.ndm_per_nominal;
-    const double nominal_dm =
-        plan.dm_low +
-        static_cast<double>(nominal_index * options.ndm_per_nominal) *
-            plan.dm_step;
-    const double final_dm =
-        plan.dm_low + static_cast<double>(dm_index) * plan.dm_step;
-    for (std::size_t subband = 0; subband < subband_frequency.size();
-         ++subband) {
-      delays[dm_index * subband_frequency.size() + subband] =
-          internal::dedispersion_delay_bins(
-              final_dm - nominal_dm, subband_frequency[subband],
-              plan.ref_frequency_mhz, plan.tsamp);
-    }
-  }
-  return delays;
-}
-
 template <typename T>
 const T& sample_at(HostSampleView<T> samples, std::size_t time,
                    std::size_t channel) {
@@ -377,10 +327,10 @@ DedispersedResult<DedispersedValueT<T>> dedisperse_subband_cpu_impl(
   }
 
   const std::vector<std::int32_t> coarse_delays =
-      make_subband_coarse_delay_table(frequency_mhz, plan, options,
-                                      nominal_dm_count);
+      internal::make_subband_coarse_delay_table(frequency_mhz, plan, options,
+                                                nominal_dm_count);
   const std::vector<std::int32_t> residual_delays =
-      make_subband_residual_delay_table(
+      internal::make_subband_residual_delay_table(
           std::span<const double>(subband_frequency), plan, options);
   const std::size_t output_nsamples =
       internal::valid_output_nsamples(

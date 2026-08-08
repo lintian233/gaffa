@@ -367,10 +367,9 @@ void launch_program_transform_before_terminal(
 }
 
 struct CudaFfaWorkspace {
-  CudaFfaWorkspace(const CudaFfaExecutionPlan& plan,
-                   const CudaFfaExecutionOptions& options,
+  CudaFfaWorkspace(const CudaFfaWorkspaceShape& workspace_shape,
                    int device_id)
-      : shape(estimate_ffa_cuda_workspace(plan, options)) {
+      : shape(workspace_shape) {
     check_cuda(cudaSetDevice(device_id), "cudaSetDevice");
     prepared = CudaDeviceBuffer<float>(shape.prepared_bytes / sizeof(float));
     scratch = CudaDeviceBuffer<float>(shape.scratch_bytes / sizeof(float));
@@ -379,6 +378,25 @@ struct CudaFfaWorkspace {
         shape.detection_compact_bytes / sizeof(FfaCudaPeak));
     detection_peak_count = CudaDeviceBuffer<unsigned long long>(1);
     detection_peak_overflow = CudaDeviceBuffer<unsigned int>(1);
+  }
+
+  CudaFfaWorkspace(const CudaFfaExecutionPlan& plan,
+                   const CudaFfaExecutionOptions& options,
+                   int device_id)
+      : CudaFfaWorkspace(estimate_ffa_cuda_workspace(plan, options),
+                         device_id) {}
+
+  [[nodiscard]] bool can_hold(const CudaFfaWorkspaceShape& required) const
+      noexcept {
+    return shape.series_tile_size >= required.series_tile_size &&
+           shape.max_prepared_nsamples >= required.max_prepared_nsamples &&
+           shape.max_task_elements >= required.max_task_elements &&
+           shape.max_detection_slots_per_series >=
+               required.max_detection_slots_per_series &&
+           shape.prepared_bytes >= required.prepared_bytes &&
+           shape.scratch_bytes >= required.scratch_bytes &&
+           shape.output_bytes >= required.output_bytes &&
+           shape.detection_compact_bytes >= required.detection_compact_bytes;
   }
 
   CudaSpan<float> prepared_span(std::size_t nseries,

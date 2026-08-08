@@ -79,6 +79,55 @@ inline std::vector<std::int32_t> make_multi_dm_delay_table(
   return delays;
 }
 
+inline std::vector<std::int32_t> make_subband_coarse_delay_table(
+    std::span<const double> frequency_mhz,
+    const MultiDmDedispersionPlan& plan,
+    const SubbandDedispersionOptions& options,
+    std::size_t nominal_dm_count) {
+  const std::size_t channel_count = plan.chan_end - plan.chan_begin;
+  std::vector<std::int32_t> delays(
+      checked_delay_table_size(nominal_dm_count, channel_count));
+  for (std::size_t nominal_index = 0; nominal_index < nominal_dm_count;
+       ++nominal_index) {
+    const double nominal_dm =
+        plan.dm_low +
+        static_cast<double>(nominal_index * options.ndm_per_nominal) *
+            plan.dm_step;
+    for (std::size_t offset = 0; offset < channel_count; ++offset) {
+      const std::size_t channel = plan.chan_begin + offset;
+      delays[nominal_index * channel_count + offset] =
+          dedispersion_delay_bins(nominal_dm, frequency_mhz[channel],
+                                  plan.ref_frequency_mhz, plan.tsamp);
+    }
+  }
+  return delays;
+}
+
+inline std::vector<std::int32_t> make_subband_residual_delay_table(
+    std::span<const double> subband_frequency,
+    const MultiDmDedispersionPlan& plan,
+    const SubbandDedispersionOptions& options) {
+  std::vector<std::int32_t> delays(
+      checked_delay_table_size(plan.ndm, subband_frequency.size()));
+  for (std::size_t dm_index = 0; dm_index < plan.ndm; ++dm_index) {
+    const std::size_t nominal_index = dm_index / options.ndm_per_nominal;
+    const double nominal_dm =
+        plan.dm_low +
+        static_cast<double>(nominal_index * options.ndm_per_nominal) *
+            plan.dm_step;
+    const double final_dm =
+        plan.dm_low + static_cast<double>(dm_index) * plan.dm_step;
+    for (std::size_t subband = 0; subband < subband_frequency.size();
+         ++subband) {
+      delays[dm_index * subband_frequency.size() + subband] =
+          dedispersion_delay_bins(final_dm - nominal_dm,
+                                  subband_frequency[subband],
+                                  plan.ref_frequency_mhz, plan.tsamp);
+    }
+  }
+  return delays;
+}
+
 inline std::int32_t max_nonnegative_delay(
     std::span<const std::int32_t> delays) {
   if (delays.empty()) {

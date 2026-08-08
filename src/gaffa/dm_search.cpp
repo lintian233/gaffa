@@ -76,8 +76,8 @@ DmPeaks search_ffa_peaks_for_dm(
     if (preprocess.steps.empty()) {
       time_series = row;
     } else {
-      scratch.assign(row.begin(), row.end());
-      preprocess_time_series_inplace_cpu(scratch, preprocess);
+      scratch.resize(row.size());
+      preprocess_time_series_cpu(row, scratch, preprocess);
       time_series = scratch;
     }
   } else {

@@ -12,10 +12,16 @@ namespace gaffa {
 struct CudaDedispersionOptions {
   int device_id = 0;
   std::size_t threads_per_block = 256;
-  // Used by tiled CUDA algorithms such as subband dedispersion. Full-output
-  // single-DM spectrum APIs currently materialize the complete aligned
-  // spectrum and do not use this value to reduce output memory.
-  std::size_t time_tile_samples = 81920;
+  // Maximum number of output samples processed by one CUDA time tile for
+  // host-returning time-series APIs. A value of zero selects the largest tile
+  // that fits the available device memory. The input tile also contains the
+  // plan's delay halo. Full-output spectrum and device-result APIs ignore this
+  // value because they materialize their complete output.
+  std::size_t time_tile_samples = 0;
+  // Additional device workspace budget for tiled host-output APIs. A value of
+  // zero uses a conservative fraction of the currently free device memory.
+  // Full-output device APIs still materialize their complete device result.
+  std::size_t memory_budget_bytes = 0;
 };
 
 template <typename T>

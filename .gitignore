@@ -11,6 +11,9 @@ reports/
 
 # Test and coverage
 tests/data/
+!tests/data/
+tests/data/*
+!tests/data/example.yaml
 .pytest_cache/
 .coverage
 .coverage.*

@@ -1,17 +1,69 @@
 // Public CUDA FFA objects and the stateful tile executor.
+struct CudaFfaProgramState {
+  CudaFfaExecutionPlan execution_plan;
+  FfaCudaProgramLayout layout;
+  FfaCudaProgramOps ops;
+};
+
 struct CudaFfaProgramImpl {
-  explicit CudaFfaProgramImpl(CudaFfaExecutionPlan execution_plan,
+  explicit CudaFfaProgramImpl(int device_id,
                               CudaFfaExecutionOptions execution_options)
-      : execution_plan(std::move(execution_plan)),
-        execution_options(std::move(execution_options)) {}
+      : device_id(device_id), execution_options(std::move(execution_options)) {}
 
   int device_id = 0;
-  CudaFfaExecutionPlan execution_plan;
   CudaFfaExecutionOptions execution_options;
+  std::optional<CudaFfaExecutionPlan> execution_plan;
+  std::optional<FfaSearchPlan> source_plan;
   FfaCudaProgramLayout layout;
   FfaCudaProgramOps ops;
   std::unique_ptr<CudaFfaWorkspace> workspace;
 };
+
+bool same_ffa_search_plan(const FfaSearchPlan& lhs,
+                          const FfaSearchPlan& rhs) {
+  if (lhs.observation.nsamples != rhs.observation.nsamples ||
+      lhs.observation.tsamp_seconds != rhs.observation.tsamp_seconds ||
+      lhs.width_trials != rhs.width_trials ||
+      lhs.tasks.size() != rhs.tasks.size()) {
+    return false;
+  }
+
+  for (std::size_t index = 0; index < lhs.tasks.size(); ++index) {
+    const FfaSearchTask& left = lhs.tasks[index];
+    const FfaSearchTask& right = rhs.tasks[index];
+    if (left.downsample_factor != right.downsample_factor ||
+        left.effective_tsamp != right.effective_tsamp ||
+        left.prepared_nsamples != right.prepared_nsamples ||
+        left.bins != right.bins || left.rows != right.rows ||
+        left.rows_eval != right.rows_eval ||
+        left.period_begin != right.period_begin ||
+        left.period_end != right.period_end) {
+      return false;
+    }
+  }
+  return true;
+}
+
+CudaFfaProgramState build_cuda_ffa_program_state(
+    CudaFfaExecutionPlan execution_plan,
+    int device_id) {
+  CudaFfaProgramState state{.execution_plan = std::move(execution_plan)};
+  FfaCudaProgramBuildState build_state;
+  build_state.layout.groups.reserve(state.execution_plan.groups().size());
+
+  for (const auto& group : state.execution_plan.groups()) {
+    FfaCudaProgramGroup program_group;
+    program_group.tasks.reserve(group.tasks.size());
+    for (const auto& task : group.tasks) {
+      append_program_task_layout(task, build_state, program_group, device_id);
+    }
+    build_state.layout.groups.push_back(std::move(program_group));
+  }
+  configure_subtree_dynamic_shared_memory(build_state.max_subtree_shared_bytes);
+  state.ops = materialize_program_ops(build_state);
+  state.layout = std::move(build_state.layout);
+  return state;
+}
 
 CudaFfaExecutionPlan::CudaFfaExecutionPlan(
     FfaObservation observation,
@@ -48,41 +100,38 @@ std::size_t CudaFfaExecutionPlan::max_detection_slots_per_series() const
 }
 
 CudaFfaProgram::CudaFfaProgram(
-    CudaFfaExecutionPlan execution_plan,
     const CudaFfaProgramOptions& program_options,
     const CudaFfaExecutionOptions& execution_options)
-    : impl_(std::make_unique<CudaFfaProgramImpl>(
-          std::move(execution_plan), execution_options)) {
+    : impl_(nullptr) {
   validate_program_options(program_options);
   validate_execution_options(execution_options);
   check_cuda(cudaSetDevice(program_options.device_id), "cudaSetDevice");
-  impl_->device_id = program_options.device_id;
-  FfaCudaProgramBuildState build_state;
-  build_state.layout.groups.reserve(impl_->execution_plan.groups().size());
+  impl_ = std::make_unique<CudaFfaProgramImpl>(program_options.device_id,
+                                               execution_options);
+}
 
-  for (const auto& group : impl_->execution_plan.groups()) {
-    FfaCudaProgramGroup program_group;
-    program_group.tasks.reserve(group.tasks.size());
-    for (const auto& task : group.tasks) {
-      append_program_task_layout(task, build_state, program_group,
-                                 impl_->device_id);
-    }
-    build_state.layout.groups.push_back(std::move(program_group));
-  }
-  configure_subtree_dynamic_shared_memory(
-      build_state.max_subtree_shared_bytes);
-  impl_->ops = materialize_program_ops(build_state);
-  impl_->layout = std::move(build_state.layout);
-  impl_->workspace = std::make_unique<CudaFfaWorkspace>(
-      impl_->execution_plan, impl_->execution_options, impl_->device_id);
+CudaFfaProgram::CudaFfaProgram(
+    CudaFfaExecutionPlan execution_plan,
+    const CudaFfaProgramOptions& program_options,
+    const CudaFfaExecutionOptions& execution_options)
+    : CudaFfaProgram(program_options, execution_options) {
+  CudaDeviceScope device_scope(device_id());
+  CudaFfaProgramState state = build_cuda_ffa_program_state(
+      std::move(execution_plan), device_id());
+  auto workspace = std::make_unique<CudaFfaWorkspace>(
+      state.execution_plan, impl_->execution_options, device_id());
+  impl_->execution_plan.emplace(std::move(state.execution_plan));
+  impl_->layout = std::move(state.layout);
+  impl_->ops = std::move(state.ops);
+  impl_->workspace = std::move(workspace);
 }
 
 CudaFfaProgram::CudaFfaProgram(
     const FfaSearchPlan& plan,
     const CudaFfaProgramOptions& program_options,
     const CudaFfaExecutionOptions& execution_options)
-    : CudaFfaProgram(make_ffa_cuda_execution_plan(plan), program_options,
-                     execution_options) {
+    : CudaFfaProgram(program_options, execution_options) {
+  prepare(plan);
 }
 
 CudaFfaProgram::~CudaFfaProgram() = default;
@@ -95,11 +144,81 @@ bool CudaFfaProgram::empty() const noexcept {
   return impl_ == nullptr;
 }
 
+bool CudaFfaProgram::prepared() const noexcept {
+  return impl_ != nullptr && impl_->execution_plan.has_value() &&
+         impl_->workspace != nullptr;
+}
+
+void CudaFfaProgram::prepare(const FfaSearchPlan& plan) {
+  if (empty()) {
+    throw std::logic_error("CUDA FFA program must not be empty");
+  }
+  validate_ffa_search_plan(plan);
+  if (impl_->source_plan.has_value() &&
+      same_ffa_search_plan(*impl_->source_plan, plan)) {
+    return;
+  }
+
+  // Copy the logical plan before releasing the active device state. The copy
+  // is host-only and gives the resource transition a clean commit point.
+  std::optional<FfaSearchPlan> source_plan = plan;
+  CudaFfaExecutionPlan execution_plan = make_ffa_cuda_execution_plan(plan);
+  const CudaFfaWorkspaceShape required_workspace =
+      estimate_ffa_cuda_workspace(execution_plan, impl_->execution_options);
+  const bool reuse_workspace =
+      impl_->workspace != nullptr &&
+      impl_->workspace->can_hold(required_workspace);
+
+  CudaDeviceScope device_scope(device_id());
+
+  // Build metadata before changing the active state. This keeps validation and
+  // metadata construction independent from the lifetime of the large buffers.
+  CudaFfaProgramState state = build_cuda_ffa_program_state(
+      std::move(execution_plan), device_id());
+
+  if (!reuse_workspace) {
+    // A capacity increase is rare. Release the old large buffers before
+    // allocating the replacement so a plan transition does not require two
+    // complete FFA workspaces simultaneously. If allocation fails, the
+    // Program remains unprepared, just as after clear().
+    clear();
+    impl_->workspace = std::make_unique<CudaFfaWorkspace>(
+        required_workspace, device_id());
+  } else {
+    // Device metadata is also active state. Do not release it while an earlier
+    // search can still be using it.
+    check_cuda(cudaStreamSynchronize(impl_->execution_options.stream),
+               "CUDA FFA prepare synchronize");
+  }
+
+  impl_->execution_plan.emplace(std::move(state.execution_plan));
+  impl_->layout = std::move(state.layout);
+  impl_->ops = std::move(state.ops);
+  impl_->source_plan = std::move(source_plan);
+}
+
+void CudaFfaProgram::clear() {
+  if (empty()) {
+    return;
+  }
+  CudaDeviceScope device_scope(device_id());
+  check_cuda(cudaStreamSynchronize(impl_->execution_options.stream),
+             "CUDA FFA program clear synchronize");
+  impl_->workspace.reset();
+  impl_->ops = FfaCudaProgramOps{};
+  impl_->layout = FfaCudaProgramLayout{};
+  impl_->execution_plan.reset();
+  impl_->source_plan.reset();
+}
+
 const CudaFfaExecutionPlan& CudaFfaProgram::execution_plan() const {
   if (empty()) {
     throw std::logic_error("CUDA FFA program must not be empty");
   }
-  return impl_->execution_plan;
+  if (!prepared()) {
+    throw std::logic_error("CUDA FFA program must be prepared");
+  }
+  return *impl_->execution_plan;
 }
 
 int CudaFfaProgram::device_id() const {
@@ -124,16 +243,14 @@ cudaStream_t CudaFfaProgram::stream() const {
 }
 
 const CudaFfaWorkspaceShape& CudaFfaProgram::workspace_shape() const {
-  if (empty()) {
-    throw std::logic_error("CUDA FFA program must not be empty");
-  }
+  (void)execution_plan();
+  // This is the allocated capacity. It may exceed the active plan's exact
+  // requirement after a smaller plan is prepared.
   return impl_->workspace->shape;
 }
 
 std::size_t CudaFfaProgram::device_metadata_bytes() const {
-  if (empty()) {
-    throw std::logic_error("CUDA FFA program must not be empty");
-  }
+  (void)execution_plan();
   return checked_add(
       checked_add(
           checked_add(impl_->ops.subtree_ops.bytes(),
@@ -161,6 +278,8 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
   std::vector<CudaFfaPrepareGroup> groups;
   std::size_t max_prepared_nsamples = 0;
   std::size_t max_transform_elements = 0;
+  // A prepare group appends all of its task detections to one compact
+  // buffer. Track the largest group total, rather than the largest task.
   std::size_t max_detection_slots_per_series = 0;
   for (const auto& task : plan.tasks) {
     const std::size_t transform_elements = checked_multiply(
@@ -205,12 +324,15 @@ CudaFfaExecutionPlan make_ffa_cuda_execution_plan(const FfaSearchPlan& plan) {
           "CUDA FFA prepare group has inconsistent prepared_nsamples");
     }
     group->tasks.push_back(task_layout);
+    group->detection_slots_per_series = checked_add(
+        group->detection_slots_per_series, detection_slots_per_series,
+        "CUDA FFA prepare group detection slot count overflow");
     max_prepared_nsamples =
         std::max(max_prepared_nsamples, task.prepared_nsamples);
     max_transform_elements =
         std::max(max_transform_elements, transform_elements);
     max_detection_slots_per_series = std::max(
-        max_detection_slots_per_series, detection_slots_per_series);
+        max_detection_slots_per_series, group->detection_slots_per_series);
   }
 
   return CudaFfaExecutionPlan(plan.observation, std::move(groups), max_prepared_nsamples,
@@ -342,6 +464,9 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
   if (program.empty()) {
     throw std::invalid_argument("CUDA FFA program must not be empty");
   }
+  if (!program.prepared()) {
+    throw std::logic_error("CUDA FFA program must be prepared");
+  }
   validate_launch_options(options);
   if (program.device_id() != options.device_id) {
     throw std::invalid_argument(
@@ -351,7 +476,7 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
     throw std::out_of_range("CUDA FFA program group_index is out of range");
   }
   const auto& group = program.impl_->layout.groups[group_index];
-  const auto& plan_group = program.impl_->execution_plan.groups()[group_index];
+  const auto& plan_group = program.execution_plan().groups()[group_index];
   if (task_index >= group.tasks.size()) {
     throw std::out_of_range("CUDA FFA program task_index is out of range");
   }
@@ -377,8 +502,11 @@ namespace detail {
 class CudaFfaTileRunner {
  private:
   static CudaFfaWorkspace& workspace_for(CudaFfaProgram& program) {
-    if (program.empty() || program.impl_->workspace == nullptr) {
+    if (program.empty()) {
       throw std::invalid_argument("CUDA FFA program must not be empty");
+    }
+    if (!program.prepared() || program.impl_->workspace == nullptr) {
+      throw std::logic_error("CUDA FFA program must be prepared");
     }
     return *program.impl_->workspace;
   }
@@ -499,6 +627,9 @@ class CudaFfaTileRunner {
 
   void grow_peak_buffer(std::size_t group_index, std::size_t required_records) {
     const auto& options = program_.impl_->execution_options;
+    // Detection appends results from every task in a prepare group to the
+    // same compact buffer. The plan-wide maximum is a safe capacity for any
+    // group and must not be reduced to one task's slot count.
     const std::size_t plan_records = checked_multiply(
         workspace_.shape.series_tile_size,
         workspace_.shape.max_detection_slots_per_series,
@@ -549,7 +680,7 @@ class CudaFfaTileRunner {
     const auto& program_group = program_.impl_->layout.groups[group_index];
     const auto& program_task = program_group.tasks[task_index];
     const auto& task =
-        program_.impl_->execution_plan.groups()[group_index].tasks[task_index];
+        program_.execution_plan().groups()[group_index].tasks[task_index];
     if (task_index > std::numeric_limits<std::uint32_t>::max()) {
       throw std::overflow_error("CUDA FFA task index overflow");
     }
@@ -628,7 +759,7 @@ class CudaFfaTileRunner {
                  "CUDA FFA detection compact peaks D2H");
     }
     for (const FfaCudaPeak& compact_peak : compact_peaks) {
-      const auto& group = program_.impl_->execution_plan.groups()[group_index];
+      const auto& group = program_.execution_plan().groups()[group_index];
       if (compact_peak.task_index >= group.tasks.size()) {
         throw std::logic_error("CUDA FFA peak task index is invalid");
       }

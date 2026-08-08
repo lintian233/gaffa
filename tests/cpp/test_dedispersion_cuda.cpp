@@ -340,6 +340,34 @@ TEST(DedispersionCuda, MultiDmFloatMatchesCpu) {
   EXPECT_EQ(cuda.data, cpu.data);
 }
 
+TEST(DedispersionCuda, TiledMultiDmHostMatchesCpuAndFullDevice) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{
+      1,  2,  3,  4,  5,  6,  7,  8, 9,  10, 11, 12, 13, 14, 15, 16,
+      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 8, 4);
+  const auto plan = multi_plan(5);
+  const auto cpu = gaffa::dedisperse_multi_dm_cpu(view, frequency, plan);
+  const auto full_device = gaffa::copy_to_host(
+      gaffa::dedisperse_multi_dm_cuda_device(view, frequency, plan));
+
+  EXPECT_EQ(full_device.data, cpu.data);
+  for (std::size_t tile_size : {std::size_t{1}, std::size_t{2},
+                                std::size_t{100}}) {
+    gaffa::CudaDedispersionOptions options;
+    options.time_tile_samples = tile_size;
+    const auto tiled =
+        gaffa::dedisperse_multi_dm_cuda(view, frequency, plan, options);
+    EXPECT_EQ(tiled.shape.ndm, cpu.shape.ndm);
+    EXPECT_EQ(tiled.shape.nsamples, cpu.shape.nsamples);
+    EXPECT_EQ(tiled.data, cpu.data);
+  }
+}
+
 TEST(DedispersionCuda, SubbandDegenerateMatchesMultiDmCpu) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";
@@ -393,6 +421,40 @@ TEST(DedispersionCuda, SubbandNormalMatchesCpuSubband) {
   EXPECT_EQ(cuda.shape.ndm, cpu.shape.ndm);
   EXPECT_EQ(cuda.shape.nsamples, cpu.shape.nsamples);
   EXPECT_EQ(cuda.data, cpu.data);
+}
+
+TEST(DedispersionCuda, TiledSubbandHostMatchesCpuAndFullDevice) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const std::vector<std::uint8_t> samples{
+      1,  2,  3,  4,  5,  6,  7,  8, 9,  10, 11, 12, 13, 14, 15, 16,
+      17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32};
+  const std::vector<double> frequency{1000.0, 1200.0, 1500.0, 2000.0};
+  const auto view = make_view(samples, 8, 4);
+  const auto plan = multi_plan(5);
+  const gaffa::SubbandDedispersionOptions subband_options{
+      .subband_channels = 2,
+      .ndm_per_nominal = 2,
+  };
+  const auto cpu = gaffa::dedisperse_subband_cpu(
+      view, frequency, plan, subband_options);
+  const auto full_device = gaffa::copy_to_host(
+      gaffa::dedisperse_subband_cuda_device(
+          view, frequency, plan, subband_options));
+
+  EXPECT_EQ(full_device.data, cpu.data);
+  for (std::size_t tile_size : {std::size_t{1}, std::size_t{3},
+                                std::size_t{100}}) {
+    gaffa::CudaDedispersionOptions cuda_options;
+    cuda_options.time_tile_samples = tile_size;
+    const auto tiled = gaffa::dedisperse_subband_cuda(
+        view, frequency, plan, subband_options, cuda_options);
+    EXPECT_EQ(tiled.shape.ndm, cpu.shape.ndm);
+    EXPECT_EQ(tiled.shape.nsamples, cpu.shape.nsamples);
+    EXPECT_EQ(tiled.data, cpu.data);
+  }
 }
 
 TEST(DedispersionCuda, BaseTestFixtureMatchesCpuModes) {

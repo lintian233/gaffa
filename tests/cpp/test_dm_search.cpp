@@ -100,6 +100,37 @@ TEST(DmSearch, AppliesPreprocessPlanBeforeSearch) {
   EXPECT_DOUBLE_EQ(result.front().dm, 30.0);
 }
 
+TEST(DmSearch, FloatPreprocessMatchesDirectSearch) {
+  const gaffa::DedispersedResult<float> input{
+      .data = {2.0F, 2.0F, 2.0F, 8.0F, 2.0F, 2.0F, 2.0F, 8.0F},
+      .shape = {.ndm = 1, .nsamples = 8},
+  };
+  const std::array<double, 1> dms{30.0};
+  const auto plan = small_plan(input.shape.nsamples, 1.0);
+  auto options = small_search_options();
+  options.preprocess.steps.push_back(gaffa::PreprocessStep{
+      .kind = gaffa::PreprocessStepKind::Normalise,
+  });
+
+  const auto actual = gaffa::search_dm_ffa_cpu(
+      input.view(), {.values = dms, .index_offset = 3}, plan, options);
+  const auto preprocessed = gaffa::preprocess_time_series_cpu(
+      input.view().dm_series(0), options.preprocess);
+  const auto periodic = gaffa::search_ffa_cpu(
+      preprocessed, plan, options.search);
+  const auto expected = gaffa::attach_dm_peaks(periodic, dms[0], 3);
+
+  ASSERT_EQ(actual.size(), expected.size());
+  for (std::size_t index = 0; index < actual.size(); ++index) {
+    EXPECT_EQ(actual[index].dm, expected[index].dm);
+    EXPECT_EQ(actual[index].dm_index, expected[index].dm_index);
+    EXPECT_EQ(actual[index].peak.snr, expected[index].peak.snr);
+    EXPECT_EQ(actual[index].peak.motion.frequency_hz,
+              expected[index].peak.motion.frequency_hz);
+    EXPECT_EQ(actual[index].peak.phase_bin, expected[index].peak.phase_bin);
+  }
+}
+
 TEST(DmSearch, FloatEmptyPreprocessMatchesDirectFfa) {
   const gaffa::DedispersedResult<float> input{
       .data = {0.0F, 0.0F, 0.0F, 5.0F, 0.0F, 0.0F, 0.0F, 5.0F},

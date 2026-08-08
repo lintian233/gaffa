@@ -29,6 +29,7 @@ find_package(CUDAToolkit REQUIRED)
 find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 find_package(pybind11 CONFIG REQUIRED)
 find_package(OpenMP)
+find_package(yaml-cpp CONFIG REQUIRED)
 include(CTest)
 
 # Loki is an optional periodic-search backend. Core never depends on it; the
@@ -76,6 +77,7 @@ list(FILTER GAFFA_CORE_SOURCES EXCLUDE REGEX ".*/cuda_memory\\.cu$")
 file(GLOB_RECURSE GAFFA_PYTHON_BINDING_SOURCES CONFIGURE_DEPENDS
   src/gaffa/python/*.cpp
 )
+list(FILTER GAFFA_PYTHON_BINDING_SOURCES EXCLUDE REGEX ".*/loki_bindings\\.cpp$")
 
 # CUDA memory is shared infrastructure. Keep it separate from the core object
 # collection so device allocation ownership has one reusable implementation.
@@ -146,6 +148,21 @@ set_target_properties(_core PROPERTIES
   LINKER_LANGUAGE CUDA
 )
 
+if(GAFFA_ENABLE_LOKI)
+  # Keep the optional Loki Python extension outside _core. Importing gaffa._core
+  # must not require Loki or change the dependency graph of the core package.
+  pybind11_add_module(_loki NO_EXTRAS
+    src/gaffa/python/loki_bindings.cpp
+  )
+  target_link_libraries(_loki PRIVATE gaffa_loki)
+  target_include_directories(_loki PRIVATE include)
+  set_target_properties(_loki PROPERTIES
+    BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    LINKER_LANGUAGE CUDA
+  )
+endif()
+
 if(BUILD_TESTING)
   find_package(GTest CONFIG REQUIRED)
 
@@ -210,6 +227,43 @@ if(BUILD_TESTING)
     )
     gtest_discover_tests(gaffa_loki_pffa_tests)
   endif()
+
+  add_executable(gaffa_search_config_tests
+    cli/gaffa_search/config.cpp
+    cli/gaffa_search/config_yaml.cpp
+    tests/cli/test_gaffa_search_config.cpp
+  )
+  target_link_libraries(gaffa_search_config_tests PRIVATE
+    GTest::gtest_main
+    yaml-cpp::yaml-cpp
+  )
+  target_include_directories(gaffa_search_config_tests PRIVATE
+    include
+    cli/gaffa_search
+  )
+  gtest_discover_tests(gaffa_search_config_tests)
+
+  add_executable(gaffa_search_output_tests
+    cli/gaffa_search/config.cpp
+    cli/gaffa_search/config_yaml.cpp
+    cli/gaffa_search/report.cpp
+    cli/gaffa_search/output.cpp
+    tests/cli/test_gaffa_search_output.cpp
+  )
+  target_link_libraries(gaffa_search_output_tests PRIVATE
+    GTest::gtest_main
+    gaffa_core
+    yaml-cpp::yaml-cpp
+  )
+  target_include_directories(gaffa_search_output_tests PRIVATE
+    include
+    cli/gaffa_search
+  )
+  set_target_properties(gaffa_search_output_tests PROPERTIES
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    LINKER_LANGUAGE CUDA
+  )
+  gtest_discover_tests(gaffa_search_output_tests)
 endif()
 
 file(GLOB GAFFA_BENCHMARK_SOURCES CONFIGURE_DEPENDS
@@ -261,8 +315,40 @@ if(GAFFA_ENABLE_LOKI)
   )
 endif()
 
+# The production command-line runner is an orchestration layer. Keep it
+# outside src/gaffa so CLI configuration and device scheduling do not become
+# part of the reusable algorithm library.
+add_executable(gaffa_search
+  cli/gaffa_search/config.cpp
+  cli/gaffa_search/config_yaml.cpp
+  cli/gaffa_search/cuda_worker.cpp
+  cli/gaffa_search/output.cpp
+  cli/gaffa_search/report.cpp
+  cli/gaffa_search/search.cpp
+  cli/gaffa_search/main.cpp
+)
+target_link_libraries(gaffa_search PRIVATE
+  gaffa_core
+  yaml-cpp::yaml-cpp
+)
+target_include_directories(gaffa_search PRIVATE include cli/gaffa_search)
+set_target_properties(gaffa_search PROPERTIES
+  CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  LINKER_LANGUAGE CUDA
+)
+if(GAFFA_ENABLE_LOKI)
+  target_link_libraries(gaffa_search PRIVATE gaffa_loki)
+  target_compile_definitions(gaffa_search PRIVATE GAFFA_SEARCH_ENABLE_LOKI)
+  set_target_properties(gaffa_search PROPERTIES
+    BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+  )
+endif()
+
 if(GAFFA_BENCHMARK_TARGETS)
   add_custom_target(gaffa_benchmarks DEPENDS ${GAFFA_BENCHMARK_TARGETS})
 endif()
 
 install(TARGETS _core LIBRARY DESTINATION gaffa)
+if(GAFFA_ENABLE_LOKI)
+  install(TARGETS _loki LIBRARY DESTINATION gaffa)
+endif()

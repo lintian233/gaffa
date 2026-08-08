@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from ..peaks._bindings import DmPeak
+from ..peaks._bindings import DmPeak, PeriodicPeak
 from ..preprocessing._bindings import PreprocessPlan
 
 
@@ -48,6 +48,40 @@ class FfaPeak:
     def __repr__(self) -> str: ...
 
 
+class _CudaProgram:
+    def __init__(
+        self,
+        plan: FfaPlan,
+        device_id: int,
+        series_tile_size: int = 16,
+    ) -> None: ...
+
+    @property
+    def device_id(self) -> int: ...
+
+    @property
+    def tile_capacity(self) -> int: ...
+
+    @property
+    def nsamples(self) -> int: ...
+
+    def search(
+        self,
+        data: NDArray[np.float32],
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int = 0,
+    ) -> list[PeriodicPeak]: ...
+
+    def search_batch(
+        self,
+        data: NDArray[np.float32],
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int = 0,
+    ) -> list[list[PeriodicPeak]]: ...
+
+
 def _make_riptide_ffa_plan(
     *,
     nsamples: int,
@@ -65,18 +99,18 @@ def _make_riptide_ffa_plan(
     ...
 
 
-def _ffa_search_cpu(
+def _search_raw_cpu(
     time_series: NDArray[np.float32],
     plan: FfaPlan,
     *,
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
 ) -> list[FfaPeak]:
-    """Private CPU binding used by :func:`gaffa.ffa.ffa_search`."""
+    """Private CPU binding used by :func:`gaffa.ffa.search_raw`."""
     ...
 
 
-def _ffa_search_cuda_host(
+def _search_raw_cuda_host(
     time_series: NDArray[np.float32],
     plan: FfaPlan,
     *,
@@ -84,8 +118,26 @@ def _ffa_search_cuda_host(
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
 ) -> list[FfaPeak]:
-    """Private host-input CUDA binding used by :func:`gaffa.ffa.ffa_search`."""
+    """Private CUDA binding used by :func:`gaffa.ffa.search_raw`."""
     ...
+
+
+def _search_periodic_cpu(
+    time_series: NDArray[np.float32],
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int = 0,
+) -> list[PeriodicPeak]: ...
+
+
+def _search_periodic_batch_cpu(
+    data: NDArray[np.float32],
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int = 0,
+) -> list[list[PeriodicPeak]]: ...
 
 
 def _search_dms_cpu(

@@ -89,10 +89,13 @@ struct LokiPffaExecutionOptions {
   std::size_t max_peaks_per_series = 1'000'000;
 };
 
-// Reusable, device-affine time-domain Loki P-FFA executor. It accepts one
-// normalized time series. The program owns an explicit unit-variance buffer;
-// it does not infer or modify the caller's signal statistics. A Program is
-// move-only and supports one active search at a time.
+// Reusable, device-affine time-domain Loki P-FFA executor for one immutable
+// LokiPffaPlan. Loki's region layout and workspace are plan-specific, so a
+// different search plan uses a different Program; the input time-series
+// storage may still be reused by the caller. It accepts one normalized time
+// series. The program owns an explicit unit-variance buffer; it does not infer
+// or modify the caller's signal statistics. A Program is move-only and
+// supports one active search at a time.
 class LokiPffaProgram {
  public:
   LokiPffaProgram(LokiPffaPlan plan,

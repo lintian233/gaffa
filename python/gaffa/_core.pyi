@@ -23,11 +23,14 @@ from .dedispersion._bindings import (
     dedisperse_subband as dedisperse_subband,
 )
 from .ffa._bindings import (
+    _CudaProgram as _CudaProgram,
     FfaPeak as FfaPeak,
     FfaPlan as FfaPlan,
-    _ffa_search_cpu as _ffa_search_cpu,
-    _ffa_search_cuda_host as _ffa_search_cuda_host,
     _make_riptide_ffa_plan as _make_riptide_ffa_plan,
+    _search_periodic_batch_cpu as _search_periodic_batch_cpu,
+    _search_periodic_cpu as _search_periodic_cpu,
+    _search_raw_cpu as _search_raw_cpu,
+    _search_raw_cuda_host as _search_raw_cuda_host,
     _search_dms_cpu as _search_dms_cpu,
 )
 from .peaks._bindings import (
@@ -84,11 +87,14 @@ __all__ = [
     "PreprocessPlan",
     "ReverseBackend",
     "ReverseBackendName",
-    "_ffa_search_cpu",
-    "_ffa_search_cuda_host",
+    "_CudaProgram",
     "_fold_dedispersed_profile",
     "_fold_dedispersed_spectrum",
     "_make_riptide_ffa_plan",
+    "_search_periodic_batch_cpu",
+    "_search_periodic_cpu",
+    "_search_raw_cpu",
+    "_search_raw_cuda_host",
     "_make_riptide_preprocess_plan",
     "_search_dms_cpu",
     "cuda_device_count",

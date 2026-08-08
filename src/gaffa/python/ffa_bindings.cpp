@@ -12,9 +12,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <limits>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <pybind11/numpy.h>
@@ -74,6 +77,50 @@ void validate_time_series_array(const py::buffer_info& info) {
   }
 }
 
+struct HostBatchView {
+  const float* data = nullptr;
+  std::size_t nseries = 0;
+  std::size_t nsamples = 0;
+};
+
+HostBatchView validate_host_batch_array(const py::array& array,
+                                        bool allow_batch) {
+  const py::buffer_info info = array.request();
+  if (info.ndim != 1 && (!allow_batch || info.ndim != 2)) {
+    throw py::value_error("FFA input must be a 1D series or 2D batch");
+  }
+  if (info.itemsize != static_cast<py::ssize_t>(sizeof(float)) ||
+      info.format != py::format_descriptor<float>::format()) {
+    throw py::type_error("FFA input must have dtype float32");
+  }
+  if (info.ndim == 1) {
+    if (info.shape[0] <= 0 ||
+        info.strides[0] != static_cast<py::ssize_t>(sizeof(float))) {
+      throw py::value_error(
+          "FFA time_series must be non-empty and C-contiguous; use "
+          "numpy.ascontiguousarray explicitly if a copy is intended");
+    }
+    return HostBatchView{
+        .data = static_cast<const float*>(info.ptr),
+        .nseries = 1,
+        .nsamples = static_cast<std::size_t>(info.shape[0]),
+    };
+  }
+
+  if (info.shape[0] <= 0 || info.shape[1] <= 0 ||
+      info.strides[1] != static_cast<py::ssize_t>(sizeof(float)) ||
+      info.strides[0] != info.shape[1] * info.itemsize) {
+    throw py::value_error(
+        "FFA batch must be non-empty and C-contiguous; use "
+        "numpy.ascontiguousarray explicitly if a copy is intended");
+  }
+  return HostBatchView{
+      .data = static_cast<const float*>(info.ptr),
+      .nseries = static_cast<std::size_t>(info.shape[0]),
+      .nsamples = static_cast<std::size_t>(info.shape[1]),
+  };
+}
+
 std::size_t parse_peak_limit(const py::object& max_peaks) {
   if (max_peaks.is_none()) {
     return 0;
@@ -83,6 +130,167 @@ std::size_t parse_peak_limit(const py::object& max_peaks) {
     throw py::value_error("max_peaks must be positive or None");
   }
   return peak_limit;
+}
+
+class HostCudaFfaProgram {
+ public:
+  HostCudaFfaProgram(const gaffa::FfaSearchPlan& plan, int device_id,
+                     std::size_t series_tile_size)
+      : program_(plan,
+                 gaffa::CudaFfaProgramOptions{.device_id = device_id},
+                 gaffa::CudaFfaExecutionOptions{
+                     .series_tile_size = series_tile_size,
+                 }) {}
+
+  std::vector<gaffa::PeriodicPeak> search(const py::array& array,
+                                           float snr_threshold,
+                                           std::size_t max_peaks) {
+    const HostBatchView input = validate_host_batch_array(array, false);
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      throw std::runtime_error(
+          "CudaProgram does not permit concurrent search() calls");
+    }
+    validate_input_contract(input);
+    const std::size_t element_count = checked_element_count(input);
+    py::gil_scoped_release release;
+    const std::vector<std::vector<gaffa::PeriodicPeak>> batch =
+        search_batch_impl(input, element_count, snr_threshold, max_peaks);
+    return batch.front();
+  }
+
+  std::vector<std::vector<gaffa::PeriodicPeak>> search_batch(
+      const py::array& array, float snr_threshold, std::size_t max_peaks) {
+    const HostBatchView input = validate_host_batch_array(array, true);
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) {
+      throw std::runtime_error(
+          "CudaProgram does not permit concurrent search() calls");
+    }
+    validate_input_contract(input);
+    const std::size_t element_count = checked_element_count(input);
+    py::gil_scoped_release release;
+    return search_batch_impl(input, element_count, snr_threshold, max_peaks);
+  }
+
+  int device_id() const noexcept {
+    return program_.device_id();
+  }
+
+  std::size_t tile_capacity() const {
+    return program_.tile_capacity();
+  }
+
+  std::size_t nsamples() const {
+    return program_.execution_plan().observation().nsamples;
+  }
+
+ private:
+  std::vector<std::vector<gaffa::PeriodicPeak>> search_batch_impl(
+      HostBatchView input, std::size_t element_count, float snr_threshold,
+      std::size_t max_peaks) {
+    CudaDeviceScope device_scope(device_id());
+    ensure_input_capacity(element_count);
+    check_cuda(cudaMemcpy(device_input_.data(), input.data,
+                          element_count * sizeof(float),
+                          cudaMemcpyHostToDevice),
+               "cudaMemcpy host-to-device FFA input");
+
+    const gaffa::SeriesPeaks flat = gaffa::search_ffa_batch_cuda(
+        program_,
+        gaffa::CudaTimeSeriesBatchView{
+            .data = device_input_.data(),
+            .nseries = input.nseries,
+            .nsamples = input.nsamples,
+            .device_id = device_id(),
+        },
+        gaffa::FfaSearchOptions{
+            .snr_threshold = snr_threshold,
+            .max_peaks = max_peaks,
+        });
+
+    std::vector<std::vector<gaffa::PeriodicPeak>> result(input.nseries);
+    for (const gaffa::SeriesPeak& peak : flat) {
+      if (peak.series_index >= result.size()) {
+        throw std::logic_error("CUDA FFA returned an invalid series index");
+      }
+      result[peak.series_index].push_back(peak.peak);
+    }
+    return result;
+  }
+
+  void validate_input_contract(HostBatchView input) const {
+    if (input.nseries > program_.tile_capacity()) {
+      throw py::value_error("FFA batch exceeds CudaProgram tile capacity");
+    }
+    if (input.nsamples != nsamples()) {
+      throw py::value_error(
+          "FFA input_nsamples must match CudaProgram plan nsamples");
+    }
+  }
+
+  static std::size_t checked_element_count(HostBatchView input) {
+    if (input.nseries != 0 &&
+        input.nsamples > std::numeric_limits<std::size_t>::max() /
+                            input.nseries) {
+      throw py::value_error("FFA batch element count overflow");
+    }
+    return input.nseries * input.nsamples;
+  }
+
+  void ensure_input_capacity(std::size_t element_count) {
+    if (device_input_.size() >= element_count) {
+      return;
+    }
+    gaffa::CudaDeviceBuffer<float> replacement(element_count);
+    device_input_ = std::move(replacement);
+  }
+
+  gaffa::CudaFfaProgram program_;
+  gaffa::CudaDeviceBuffer<float> device_input_;
+  std::mutex mutex_;
+};
+
+std::vector<gaffa::PeriodicPeak> periodic_search_cpu_for_python(
+    const py::array& array, const gaffa::FfaSearchPlan& plan,
+    float snr_threshold, std::size_t max_peaks) {
+  const HostBatchView input = validate_host_batch_array(array, false);
+  if (input.nsamples != plan.observation.nsamples) {
+    throw py::value_error(
+        "FFA input_nsamples must match plan observation nsamples");
+  }
+  py::gil_scoped_release release;
+  return gaffa::search_ffa_cpu(
+      std::span<const float>(input.data, input.nsamples), plan,
+      gaffa::FfaSearchOptions{
+          .snr_threshold = snr_threshold,
+          .max_peaks = max_peaks,
+      });
+}
+
+std::vector<std::vector<gaffa::PeriodicPeak>> periodic_search_batch_cpu_for_python(
+    const py::array& array, const gaffa::FfaSearchPlan& plan,
+    float snr_threshold, std::size_t max_peaks) {
+  const HostBatchView input = validate_host_batch_array(array, true);
+  if (input.nsamples != plan.observation.nsamples) {
+    throw py::value_error(
+        "FFA input_nsamples must match plan observation nsamples");
+  }
+  py::gil_scoped_release release;
+  std::vector<std::vector<gaffa::PeriodicPeak>> result;
+  result.reserve(input.nseries);
+  for (std::size_t series_index = 0; series_index < input.nseries;
+       ++series_index) {
+    const std::span<const float> series(
+        input.data + series_index * input.nsamples, input.nsamples);
+    result.push_back(gaffa::search_ffa_cpu(
+        series, plan,
+        gaffa::FfaSearchOptions{
+            .snr_threshold = snr_threshold,
+            .max_peaks = max_peaks,
+        }));
+  }
+  return result;
 }
 
 void validate_dm_array(const py::buffer_info& info) {
@@ -303,15 +511,38 @@ void bind_ffa(py::module_& module) {
              py::arg("width_trial_spacing") = 1.5,
              py::arg("max_tasks") = 1'000'000);
 
-  module.def("_ffa_search_cpu", &ffa_search_cpu_for_python,
+  module.def("_search_raw_cpu", &ffa_search_cpu_for_python,
              py::arg("time_series"), py::arg("plan"), py::kw_only(),
              py::arg("snr_threshold") = 6.0F,
              py::arg("max_peaks") = py::none());
 
-  module.def("_ffa_search_cuda_host", &ffa_search_cuda_host_for_python,
+  module.def("_search_raw_cuda_host", &ffa_search_cuda_host_for_python,
              py::arg("time_series"), py::arg("plan"), py::kw_only(),
              py::arg("device_id") = 0, py::arg("snr_threshold") = 6.0F,
              py::arg("max_peaks") = py::none());
+
+  py::class_<HostCudaFfaProgram>(module, "_CudaProgram")
+      .def(py::init<const gaffa::FfaSearchPlan&, int, std::size_t>(),
+           py::arg("plan"), py::arg("device_id"),
+           py::arg("series_tile_size") = 16)
+      .def("search", &HostCudaFfaProgram::search, py::arg("data"),
+           py::kw_only(), py::arg("snr_threshold") = 6.0F,
+           py::arg("max_peaks") = 0)
+      .def("search_batch", &HostCudaFfaProgram::search_batch,
+           py::arg("data"), py::kw_only(),
+           py::arg("snr_threshold") = 6.0F, py::arg("max_peaks") = 0)
+      .def_property_readonly("device_id", &HostCudaFfaProgram::device_id)
+      .def_property_readonly("tile_capacity",
+                             &HostCudaFfaProgram::tile_capacity)
+      .def_property_readonly("nsamples", &HostCudaFfaProgram::nsamples);
+
+  module.def("_search_periodic_cpu", &periodic_search_cpu_for_python,
+             py::arg("time_series"), py::arg("plan"), py::kw_only(),
+             py::arg("snr_threshold") = 6.0F, py::arg("max_peaks") = 0);
+  module.def("_search_periodic_batch_cpu",
+             &periodic_search_batch_cpu_for_python, py::arg("data"),
+             py::arg("plan"), py::kw_only(),
+             py::arg("snr_threshold") = 6.0F, py::arg("max_peaks") = 0);
 
   module.def("_search_dms_cpu", &search_dms_cpu_for_python,
              py::arg("data"), py::kw_only(), py::arg("tsamp"),

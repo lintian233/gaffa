@@ -296,6 +296,15 @@ TEST(FfaCuda, ExecutionPlanTracksTaskShapeAndElements) {
             plan.tasks[2].rows * plan.tasks[2].bins);
 }
 
+TEST(FfaCuda, ExecutionPlanCountsAllTaskDetectionSlotsInPrepareGroup) {
+  const auto compiled = gaffa::make_ffa_cuda_execution_plan(grouped_plan());
+
+  const auto* group = find_group(compiled, 1.0);
+  ASSERT_NE(group, nullptr);
+  EXPECT_EQ(group->detection_slots_per_series, 4 * 3 + 8 * 3);
+  EXPECT_EQ(compiled.max_detection_slots_per_series(), 36);
+}
+
 TEST(FfaCuda, CompileExecutionPlanRejectsInvalidPlan) {
   EXPECT_THROW((void)gaffa::make_ffa_cuda_execution_plan(gaffa::FfaSearchPlan{}),
                std::invalid_argument);
@@ -405,6 +414,7 @@ TEST(FfaCuda, ProgramExposesExecutionPlan) {
   const gaffa::CudaFfaProgram program(plan);
 
   EXPECT_EQ(program.device_id(), 0);
+  EXPECT_TRUE(program.prepared());
   EXPECT_EQ(program.execution_plan().groups().size(),
             expected.groups().size());
   EXPECT_EQ(program.execution_plan().max_prepared_nsamples(),
@@ -415,6 +425,216 @@ TEST(FfaCuda, ProgramExposesExecutionPlan) {
   ASSERT_EQ(program.execution_plan().groups().size(), 2);
   EXPECT_EQ(program.execution_plan().groups()[0].tasks.size(), 2);
   EXPECT_EQ(program.execution_plan().groups()[1].tasks.size(), 1);
+}
+
+TEST(FfaCuda, UnpreparedProgramRejectsPlanDependentOperations) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0});
+
+  EXPECT_FALSE(program.empty());
+  EXPECT_FALSE(program.prepared());
+  EXPECT_EQ(program.device_id(), 0);
+  EXPECT_THROW((void)program.execution_plan(), std::logic_error);
+  EXPECT_THROW((void)program.workspace_shape(), std::logic_error);
+  EXPECT_THROW((void)program.device_metadata_bytes(), std::logic_error);
+
+  EXPECT_THROW(
+      (void)gaffa::search_ffa_raw_batch_cuda(
+          program,
+          gaffa::CudaTimeSeriesBatchView{
+              .data = nullptr,
+              .nseries = 1,
+              .nsamples = 64,
+              .device_id = 0,
+          }),
+      std::logic_error);
+}
+
+TEST(FfaCuda, PrepareMakesProgramSearchableAndClearReleasesPlan) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto plan = grouped_plan();
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 2});
+
+  program.prepare(plan);
+  ASSERT_TRUE(program.prepared());
+  EXPECT_EQ(program.execution_plan().observation().nsamples,
+            plan.observation.nsamples);
+  EXPECT_GT(program.device_metadata_bytes(), 0);
+
+  program.clear();
+  EXPECT_FALSE(program.prepared());
+  EXPECT_THROW((void)program.execution_plan(), std::logic_error);
+  EXPECT_THROW((void)program.workspace_shape(), std::logic_error);
+
+  program.prepare(plan);
+  EXPECT_TRUE(program.prepared());
+  EXPECT_EQ(program.execution_plan().groups().size(), 2);
+}
+
+TEST(FfaCuda, PreparingIdenticalPlanReusesProgramShape) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto plan = grouped_plan();
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 2});
+
+  program.prepare(plan);
+  const std::size_t metadata_bytes = program.device_metadata_bytes();
+  const auto workspace = program.workspace_shape();
+
+  program.prepare(plan);
+
+  EXPECT_TRUE(program.prepared());
+  EXPECT_EQ(program.device_metadata_bytes(), metadata_bytes);
+  EXPECT_EQ(program.workspace_shape().prepared_bytes, workspace.prepared_bytes);
+  EXPECT_EQ(program.workspace_shape().scratch_bytes, workspace.scratch_bytes);
+  EXPECT_EQ(program.workspace_shape().output_bytes, workspace.output_bytes);
+}
+
+TEST(FfaCuda, PreparingDifferentPlanIsAnExplicitResourceTransition) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
+  program.prepare(grouped_plan());
+  ASSERT_EQ(program.execution_plan().observation().nsamples, 64);
+
+  program.prepare(valid_plan());
+  EXPECT_TRUE(program.prepared());
+  EXPECT_EQ(program.execution_plan().observation().nsamples, 2048);
+  EXPECT_EQ(program.execution_plan().groups().size(), 2);
+}
+
+TEST(FfaCuda, SmallerPlanReusesWorkspaceCapacityAndSearchesCorrectly) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto larger_plan = valid_plan();
+  const auto smaller_plan = grouped_plan();
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
+
+  program.prepare(larger_plan);
+  const auto capacity = program.workspace_shape();
+
+  program.prepare(smaller_plan);
+
+  EXPECT_EQ(program.workspace_shape().prepared_bytes, capacity.prepared_bytes);
+  EXPECT_EQ(program.workspace_shape().scratch_bytes, capacity.scratch_bytes);
+  EXPECT_EQ(program.workspace_shape().output_bytes, capacity.output_bytes);
+  EXPECT_EQ(program.workspace_shape().detection_compact_bytes,
+            capacity.detection_compact_bytes);
+  EXPECT_EQ(program.execution_plan().observation().nsamples,
+            smaller_plan.observation.nsamples);
+
+  std::vector<float> host_input(smaller_plan.observation.nsamples);
+  for (std::size_t index = 0; index < host_input.size(); ++index) {
+    host_input[index] = static_cast<float>((index * 17 + 3) % 23) - 11.0F;
+  }
+  gaffa::CudaDeviceBuffer<float> device_input(host_input.size());
+  ASSERT_EQ(cudaMemcpy(device_input.data(), host_input.data(),
+                       device_input.bytes(), cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
+  const auto actual = gaffa::search_ffa_raw_cuda(
+      program,
+      static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
+          .as_span(0),
+      options);
+  const auto expected = gaffa::search_ffa_raw_cpu(
+      std::span<const float>(host_input), smaller_plan, options);
+
+  ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
+  for (std::size_t index = 0; index < expected.peaks.size(); ++index) {
+    EXPECT_EQ(actual.peaks[index].shift, expected.peaks[index].shift);
+    EXPECT_EQ(actual.peaks[index].phase, expected.peaks[index].phase);
+    EXPECT_EQ(actual.peaks[index].width_index,
+              expected.peaks[index].width_index);
+    EXPECT_FLOAT_EQ(actual.peaks[index].snr, expected.peaks[index].snr);
+  }
+}
+
+TEST(FfaCuda, InvalidPreparePreservesTheActiveProgram) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
+  const auto active_plan = valid_plan();
+  program.prepare(active_plan);
+  const auto active_nsamples =
+      program.execution_plan().observation().nsamples;
+  const auto active_metadata_bytes = program.device_metadata_bytes();
+
+  auto invalid_plan = active_plan;
+  invalid_plan.tasks.front().rows = 0;
+  EXPECT_THROW(program.prepare(invalid_plan), std::invalid_argument);
+
+  EXPECT_TRUE(program.prepared());
+  EXPECT_EQ(program.execution_plan().observation().nsamples,
+            active_nsamples);
+  EXPECT_EQ(program.device_metadata_bytes(), active_metadata_bytes);
+}
+
+TEST(FfaCuda, PreparedProgramSearchMatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  const auto plan = valid_plan();
+  std::vector<float> host_input(plan.observation.nsamples);
+  for (std::size_t index = 0; index < host_input.size(); ++index) {
+    host_input[index] = static_cast<float>((index * 13 + 7) % 31) - 15.0F;
+  }
+
+  gaffa::CudaDeviceBuffer<float> device_input(host_input.size());
+  ASSERT_EQ(cudaMemcpy(device_input.data(), host_input.data(),
+                       device_input.bytes(), cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  gaffa::CudaFfaProgram program(
+      gaffa::CudaFfaProgramOptions{.device_id = 0},
+      gaffa::CudaFfaExecutionOptions{.series_tile_size = 1});
+  program.prepare(plan);
+
+  const gaffa::FfaSearchOptions options{.snr_threshold = -1000000.0F};
+  const auto actual = gaffa::search_ffa_raw_cuda(
+      program,
+      static_cast<const gaffa::CudaDeviceBuffer<float>&>(device_input)
+          .as_span(0),
+      options);
+  const auto expected =
+      gaffa::search_ffa_raw_cpu(std::span<const float>(host_input), plan,
+                                options);
+
+  ASSERT_EQ(actual.peaks.size(), expected.peaks.size());
+  for (std::size_t index = 0; index < expected.peaks.size(); ++index) {
+    EXPECT_EQ(actual.peaks[index].shift, expected.peaks[index].shift);
+    EXPECT_EQ(actual.peaks[index].phase, expected.peaks[index].phase);
+    EXPECT_EQ(actual.peaks[index].width_index,
+              expected.peaks[index].width_index);
+    EXPECT_FLOAT_EQ(actual.peaks[index].snr, expected.peaks[index].snr);
+  }
 }
 
 TEST(FfaCuda, ProgramAcceptsExecutionPlanAndSurvivesMove) {

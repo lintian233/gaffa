@@ -102,6 +102,40 @@ TEST(CandidateAnalysis, AppliesSnrThresholdAfterHarmonicRemoval) {
       1.0);
 }
 
+TEST(CandidateAnalysis, MergesPeaksFromMultipleSearchRuns) {
+  // Two search ranges can emit different profile resolutions for the same
+  // DM trials. The global candidate pass must merge them and retain every
+  // raw response in the resulting candidate.
+  auto dm0_range_a = peak(100.0, 0, 2.0, 20.0F);
+  auto dm0_range_b = peak(100.0, 0, 2.0, 19.0F);
+  auto dm1_range_a = peak(100.5, 1, 2.0, 18.0F);
+  auto dm1_range_b = peak(100.5, 1, 2.0, 17.0F);
+  dm0_range_a.peak.phase_bins = 128;
+  dm0_range_b.peak.phase_bins = 256;
+  dm1_range_a.peak.phase_bins = 128;
+  dm1_range_b.peak.phase_bins = 256;
+
+  auto analysis_options = options();
+  analysis_options.selection.snr_min = 0.0F;
+  analysis_options.selection.max_candidates = 0;
+  analysis_options.clustering.max_dm_index_distance = 1;
+  analysis_options.clustering.cluster_across_widths = true;
+
+  const std::vector<gaffa::DmPeak> peaks{
+      dm0_range_a, dm0_range_b, dm1_range_a, dm1_range_b};
+  const auto result =
+      gaffa::make_candidates_cpu(peaks, context(), analysis_options);
+
+  ASSERT_EQ(result.candidate_set.candidates.size(), 1U);
+  ASSERT_EQ(result.selected.size(), 1U);
+  const gaffa::Candidate& candidate =
+      result.candidate_set.candidates[result.selected.front()];
+  EXPECT_EQ(candidate.member_count, peaks.size());
+  EXPECT_EQ(result.candidate_set.members_of(candidate).size(), peaks.size());
+  EXPECT_FLOAT_EQ(candidate.best.peak.snr, 20.0F);
+  EXPECT_DOUBLE_EQ(candidate.best.dm, 100.0);
+}
+
 TEST(CandidateAnalysis, RejectsNonFiniteSelectionThreshold) {
   auto analysis_options = options();
   analysis_options.selection.snr_min = NAN;

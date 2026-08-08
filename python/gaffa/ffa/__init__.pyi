@@ -1,15 +1,57 @@
 """Fast-folding-algorithm search primitives for preprocessed time series."""
 
-from typing import Literal
-
 import numpy as np
 from numpy.typing import NDArray
 
 from ..dedispersion import DedispersedResult
-from ..peaks import DmPeak
+from ..peaks import DmPeak, PeriodicPeak
 from ..preprocessing import PreprocessPlan
 from ._bindings import FfaPeak as FfaPeak
 from ._bindings import FfaPlan as FfaPlan
+
+
+class CudaProgram:
+    """Reusable native CUDA FFA execution state for host NumPy inputs."""
+
+    def __init__(
+        self,
+        plan: FfaPlan,
+        *,
+        device: str = "cuda:0",
+        series_tile_size: int = 16,
+    ) -> None: ...
+
+    @property
+    def device(self) -> str: ...
+
+    @property
+    def nsamples(self) -> int: ...
+
+    @property
+    def series_tile_size(self) -> int: ...
+
+    def search(
+        self,
+        time_series: NDArray[np.float32],
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int | None = None,
+    ) -> list[PeriodicPeak]: ...
+
+    def search_batch(
+        self,
+        data: NDArray[np.float32],
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int | None = None,
+    ) -> list[list[PeriodicPeak]]: ...
+
+    def close(self) -> None: ...
+
+    def __enter__(self) -> CudaProgram: ...
+
+    def __exit__(self, exc_type: object, exc_value: object,
+                 traceback: object) -> None: ...
 
 
 def make_riptide_plan(
@@ -54,16 +96,15 @@ def make_riptide_plan(
     ...
 
 
-def ffa_search(
+def search_raw(
     time_series: NDArray[np.float32],
     plan: FfaPlan,
     *,
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
-    backend: Literal["cpu", "cuda"] = "cpu",
-    device_id: int = 0,
+    device: str | None = None,
 ) -> list[FfaPeak]:
-    """Run raw FFA peak detection on one preprocessed time series.
+    """Run raw FFA peak detection on one prepared time series.
 
     Parameters
     ----------
@@ -78,17 +119,41 @@ def ffa_search(
     max_peaks
         Optional positive raw-peak safety limit. Reaching the limit raises
         rather than silently truncating scientific output.
-    backend
-        ``"cpu"`` or ``"cuda"``. CUDA uploads the host input once and returns
-        only compact raw peak records.
-    device_id
-        CUDA device ordinal. It must remain zero for the CPU backend.
+    device
+        ``None`` selects CPU. A value such as ``"cuda:0"`` selects CUDA.
+        CUDA uploads the host input once and returns only compact raw peak
+        records.
 
     Returns
     -------
     list[FfaPeak]
         Raw FFA peaks in deterministic descending order.
     """
+    ...
+
+
+def search(
+    time_series: NDArray[np.float32],
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+    device: str | None = None,
+) -> list[PeriodicPeak]:
+    """Search one prepared series with CPU or native CUDA."""
+    ...
+
+
+def search_batch(
+    data: NDArray[np.float32],
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+    device: str | None = None,
+    series_tile_size: int = 16,
+) -> list[list[PeriodicPeak]]:
+    """Search a prepared ``[nseries, nsamples]`` batch."""
     ...
 
 
@@ -133,9 +198,13 @@ def search_dms_cpu(
 
 
 __all__ = [
+    "CudaProgram",
     "FfaPeak",
     "FfaPlan",
-    "ffa_search",
+    "PeriodicPeak",
     "make_riptide_plan",
+    "search",
+    "search_batch",
+    "search_raw",
     "search_dms_cpu",
 ]

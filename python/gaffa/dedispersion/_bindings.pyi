@@ -146,7 +146,7 @@ def dedisperse_spectrum(
     backend: Backend = "cpu",
     device_id: int = 0,
     threads_per_block: int = 256,
-    time_tile_samples: int = 81920,
+    time_tile_samples: int = 0,
 ) -> DedispersedSpectrum:
     """Dedisperse one DM and return a host-resident aligned dynamic spectrum.
 
@@ -163,8 +163,9 @@ def dedisperse_spectrum(
     threads_per_block
         CUDA thread-block size used by the CUDA backend.
     time_tile_samples
-        CUDA time-tile setting. The current spectrum CUDA path materializes
-        the full output, so this does not reduce returned-spectrum memory.
+        CUDA time-tile setting. Zero selects an automatic tile for host
+        time-series APIs. The spectrum CUDA path materializes the full output,
+        so this does not reduce returned-spectrum memory.
 
     Returns
     -------
@@ -187,7 +188,7 @@ def dedisperse_single_dm(
     backend: Backend = "cpu",
     device_id: int = 0,
     threads_per_block: int = 256,
-    time_tile_samples: int = 81920,
+    time_tile_samples: int = 0,
 ) -> DedispersedResult:
     """Dedisperse one DM into a host-resident valid-only time series.
 
@@ -208,7 +209,7 @@ def dedisperse_multi_dm(
     backend: Backend = "cpu",
     device_id: int = 0,
     threads_per_block: int = 256,
-    time_tile_samples: int = 81920,
+    time_tile_samples: int = 0,
 ) -> DedispersedResult:
     """Dedisperse a contiguous DM grid into host-resident time series.
 
@@ -230,7 +231,7 @@ def dedisperse_subband(
     ndm_per_nominal: int = 32,
     device_id: int = 0,
     threads_per_block: int = 256,
-    time_tile_samples: int = 81920,
+    time_tile_samples: int = 0,
 ) -> DedispersedResult:
     """Dedisperse a contiguous DM grid with the subband method.
 

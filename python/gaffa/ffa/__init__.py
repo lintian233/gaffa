@@ -4,13 +4,36 @@ from .._core import (
     DmPeak,
     FfaPeak,
     FfaPlan,
-    _ffa_search_cpu,
-    _ffa_search_cuda_host,
+    PeriodicPeak,
+    _CudaProgram,
     _make_riptide_ffa_plan,
     _search_dms_cpu,
+    _search_periodic_batch_cpu,
+    _search_periodic_cpu,
+    _search_raw_cpu,
+    _search_raw_cuda_host,
 )
 from ..dedispersion import DedispersedResult
 from ..preprocessing import PreprocessPlan
+
+
+def _parse_device(device: str | None) -> int | None:
+    if device is None:
+        return None
+    if not isinstance(device, str) or not device.startswith("cuda:"):
+        raise ValueError("device must be None or a CUDA device such as 'cuda:0'")
+    ordinal = device[5:]
+    if not ordinal.isdigit():
+        raise ValueError("device must be a CUDA device such as 'cuda:0'")
+    return int(ordinal)
+
+
+def _parse_max_peaks(max_peaks: int | None) -> int:
+    if max_peaks is None:
+        return 0
+    if not isinstance(max_peaks, int) or isinstance(max_peaks, bool) or max_peaks <= 0:
+        raise ValueError("max_peaks must be positive or None")
+    return max_peaks
 
 
 def make_riptide_plan(
@@ -42,37 +65,198 @@ def make_riptide_plan(
     )
 
 
-def ffa_search(
+def search_raw(
     time_series,
     plan: FfaPlan,
     *,
     snr_threshold: float = 6.0,
     max_peaks: int | None = None,
-    backend: str = "cpu",
-    device_id: int = 0,
+    device: str | None = None,
 ) -> list[FfaPeak]:
-    """Search one preprocessed time series with an FFA plan."""
+    """Search one prepared time series and return raw FFA peaks.
 
-    if backend == "cpu":
-        if device_id != 0:
-            raise ValueError("device_id is only valid with backend='cuda'")
-        return _ffa_search_cpu(
+    ``device=None`` selects the CPU implementation. A value such as
+    ``device="cuda:0"`` selects the native CUDA implementation. This is the
+    low-level raw-detection API; use :func:`search` for canonical
+    :class:`~gaffa.peaks.PeriodicPeak` results.
+    """
+
+    device_id = _parse_device(device)
+    if max_peaks is not None:
+        _parse_max_peaks(max_peaks)
+    if device_id is None:
+        return _search_raw_cpu(
             time_series,
             plan,
             snr_threshold=snr_threshold,
             max_peaks=max_peaks,
         )
-    if backend == "cuda":
-        if device_id < 0:
-            raise ValueError("device_id must be non-negative")
-        return _ffa_search_cuda_host(
+    return _search_raw_cuda_host(
+        time_series,
+        plan,
+        device_id=device_id,
+        snr_threshold=snr_threshold,
+        max_peaks=max_peaks,
+    )
+
+
+def search(
+    time_series,
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+    device: str | None = None,
+) -> list[PeriodicPeak]:
+    """Search one prepared time series and return canonical periodic peaks.
+
+    ``device=None`` uses the native CPU implementation. A value such as
+    ``device="cuda:0"`` performs a one-shot native CUDA search. Repeated CUDA
+    tile searches should reuse :class:`CudaProgram` instead.
+    """
+
+    device_id = _parse_device(device)
+    peak_limit = _parse_max_peaks(max_peaks)
+    if device_id is None:
+        return _search_periodic_cpu(
             time_series,
             plan,
-            device_id=device_id,
             snr_threshold=snr_threshold,
-            max_peaks=max_peaks,
+            max_peaks=peak_limit,
         )
-    raise ValueError("backend must be 'cpu' or 'cuda'")
+    assert device is not None
+    return CudaProgram(plan, device=device).search(
+        time_series,
+        snr_threshold=snr_threshold,
+        max_peaks=max_peaks,
+    )
+
+
+def search_batch(
+    data,
+    plan: FfaPlan,
+    *,
+    snr_threshold: float = 6.0,
+    max_peaks: int | None = None,
+    device: str | None = None,
+    series_tile_size: int = 16,
+) -> list[list[PeriodicPeak]]:
+    """Search a prepared ``[nseries, nsamples]`` batch.
+
+    Each returned inner list corresponds to one input row. The native CPU
+    batch convenience path is intentionally a thin row-wise wrapper; the
+    optimized DM-search CPU path remains :func:`search_dms_cpu`.
+    """
+
+    device_id = _parse_device(device)
+    peak_limit = _parse_max_peaks(max_peaks)
+    if device_id is None:
+        return _search_periodic_batch_cpu(
+            data,
+            plan,
+            snr_threshold=snr_threshold,
+            max_peaks=peak_limit,
+        )
+    assert device is not None
+    return CudaProgram(
+        plan,
+        device=device,
+        series_tile_size=series_tile_size,
+    ).search_batch(
+        data,
+        snr_threshold=snr_threshold,
+        max_peaks=max_peaks,
+    )
+
+
+class CudaProgram:
+    """Reusable native CUDA FFA execution state for host NumPy inputs."""
+
+    def __init__(
+        self,
+        plan: FfaPlan,
+        *,
+        device: str = "cuda:0",
+        series_tile_size: int = 16,
+    ) -> None:
+        device_id = _parse_device(device)
+        if device_id is None:
+            raise ValueError("CudaProgram requires a CUDA device")
+        if (
+            isinstance(series_tile_size, bool)
+            or not isinstance(series_tile_size, int)
+            or series_tile_size <= 0
+        ):
+            raise ValueError("series_tile_size must be positive")
+        self._program = _CudaProgram(plan, device_id, series_tile_size)
+
+    @property
+    def device(self) -> str:
+        self._ensure_open()
+        return f"cuda:{self._get_program().device_id}"
+
+    @property
+    def nsamples(self) -> int:
+        self._ensure_open()
+        return self._get_program().nsamples
+
+    @property
+    def series_tile_size(self) -> int:
+        self._ensure_open()
+        return self._get_program().tile_capacity
+
+    def search(
+        self,
+        time_series,
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int | None = None,
+    ) -> list[PeriodicPeak]:
+        """Search one prepared host ``float32`` time series."""
+
+        self._ensure_open()
+        return self._get_program().search(
+            time_series,
+            snr_threshold=snr_threshold,
+            max_peaks=_parse_max_peaks(max_peaks),
+        )
+
+    def search_batch(
+        self,
+        data,
+        *,
+        snr_threshold: float = 6.0,
+        max_peaks: int | None = None,
+    ) -> list[list[PeriodicPeak]]:
+        """Search a prepared host ``[nseries, nsamples]`` batch."""
+
+        self._ensure_open()
+        return self._get_program().search_batch(
+            data,
+            snr_threshold=snr_threshold,
+            max_peaks=_parse_max_peaks(max_peaks),
+        )
+
+    def close(self) -> None:
+        """Release the CUDA Program and its reusable device allocations."""
+
+        self._program = None
+
+    def __enter__(self):
+        self._ensure_open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def _ensure_open(self) -> None:
+        if self._program is None:
+            raise RuntimeError("CudaProgram is closed")
+
+    def _get_program(self) -> _CudaProgram:
+        if self._program is None:
+            raise RuntimeError("CudaProgram is closed")
+        return self._program
 
 
 def search_dms_cpu(
@@ -104,9 +288,13 @@ def search_dms_cpu(
 
 
 __all__ = [
+    "CudaProgram",
     "FfaPeak",
     "FfaPlan",
-    "ffa_search",
+    "PeriodicPeak",
     "make_riptide_plan",
+    "search",
+    "search_batch",
     "search_dms_cpu",
+    "search_raw",
 ]

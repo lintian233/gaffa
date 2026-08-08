@@ -649,19 +649,19 @@ void bind_dedispersion(py::module_& module) {
              py::arg("filterbank"), py::kw_only(), py::arg("dm"),
              py::arg("backend") = "cpu", py::arg("device_id") = 0,
              py::arg("threads_per_block") = 256,
-             py::arg("time_tile_samples") = 81920);
+             py::arg("time_tile_samples") = 0);
 
   module.def("dedisperse_single_dm", &dedisperse_single_dm_for_python,
              py::arg("filterbank"), py::kw_only(), py::arg("dm"),
              py::arg("backend") = "cpu", py::arg("device_id") = 0,
              py::arg("threads_per_block") = 256,
-             py::arg("time_tile_samples") = 81920);
+             py::arg("time_tile_samples") = 0);
 
   module.def("dedisperse_multi_dm", &dedisperse_multi_dm_for_python,
              py::arg("filterbank"), py::kw_only(), py::arg("dm_low"),
              py::arg("dm_step"), py::arg("ndm"), py::arg("backend") = "cpu",
              py::arg("device_id") = 0, py::arg("threads_per_block") = 256,
-             py::arg("time_tile_samples") = 81920);
+             py::arg("time_tile_samples") = 0);
 
   module.def("dedisperse_subband", &dedisperse_subband_for_python,
              py::arg("filterbank"), py::kw_only(), py::arg("dm_low"),
@@ -669,7 +669,7 @@ void bind_dedispersion(py::module_& module) {
              py::arg("subband_channels") = 32,
              py::arg("ndm_per_nominal") = 32, py::arg("device_id") = 0,
              py::arg("threads_per_block") = 256,
-             py::arg("time_tile_samples") = 81920);
+             py::arg("time_tile_samples") = 0);
 }
 
 }  // namespace gaffa::python

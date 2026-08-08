@@ -270,6 +270,10 @@ void preprocess_time_series_cpu(std::span<const float> input,
     }
     return;
   }
+  if (plan.steps.size() == 1) {
+    apply_preprocess_step(plan.steps.front(), input, output);
+    return;
+  }
 
   std::vector<float> scratch(input.size());
   std::span<const float> current = input;

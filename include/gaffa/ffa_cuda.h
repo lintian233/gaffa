@@ -71,9 +71,13 @@ struct FfaBatchSearchResult {
 };
 
 struct CudaFfaWorkspaceShape {
+  // For a prepared CudaFfaProgram these fields describe allocated capacity,
+  // which may be larger than the active plan after plan replacement.
   std::size_t series_tile_size = 0;
   std::size_t max_prepared_nsamples = 0;
   std::size_t max_task_elements = 0;
+  // Maximum sum of detection slots emitted by one series in any prepare
+  // group. Results from all tasks in a group share one compact buffer.
   std::size_t max_detection_slots_per_series = 0;
   std::size_t prepared_bytes = 0;
   std::size_t scratch_bytes = 0;
@@ -101,6 +105,10 @@ struct CudaFfaTaskLayout {
 struct CudaFfaPrepareGroup {
   CudaFfaPrepareKey prepare_key{};
   std::size_t prepared_nsamples = 0;
+  // The compact detector appends every task in this group to one buffer.
+  // This is therefore the sum of the task slots for one input series, not
+  // the maximum slot count of an individual task.
+  std::size_t detection_slots_per_series = 0;
   std::vector<CudaFfaTaskLayout> tasks;
 };
 
@@ -118,6 +126,8 @@ class CudaFfaExecutionPlan {
   [[nodiscard]] std::span<const CudaFfaPrepareGroup> groups() const noexcept;
   [[nodiscard]] std::size_t max_prepared_nsamples() const noexcept;
   [[nodiscard]] std::size_t max_transform_elements() const noexcept;
+  // Maximum per-series compact capacity required by one complete prepare
+  // group. It includes every task in that group.
   [[nodiscard]] std::size_t max_detection_slots_per_series() const noexcept;
 
  private:
@@ -141,11 +151,23 @@ struct CudaFfaProgramImpl;
 struct CudaFfaInput;
 struct CudaFfaBuffer;
 
-// Owns GPU-resident metadata and reusable workspace for one FFA plan on one
-// device. It is move-only, not thread-safe, and supports one active
-// search_ffa_batch_cuda() call at a time.
+// Owns GPU-resident metadata and reusable workspace capacity for one device.
+// It has one active FFA plan at a time. Replacing that plan replaces the
+// active metadata and reuses the workspace when its capacity is sufficient;
+// a larger plan may grow the workspace. It is move-only, not thread-safe, and
+// supports one active search_ffa_batch_cuda() call at a time. A Program
+// constructed without a logical plan must be prepared before any plan-
+// dependent operation is used.
 class CudaFfaProgram {
  public:
+  // Constructs an unprepared, device-affine program. No FFA metadata or
+  // workspace is allocated until prepare() is called.
+  explicit CudaFfaProgram(
+      const CudaFfaProgramOptions& program_options = {},
+      const CudaFfaExecutionOptions& execution_options = {});
+
+  // Compatibility convenience constructor. It performs prepare(plan) before
+  // returning, so the resulting Program is ready for search immediately.
   explicit CudaFfaProgram(CudaFfaExecutionPlan execution_plan,
                           const CudaFfaProgramOptions& program_options = {},
                           const CudaFfaExecutionOptions& execution_options = {});
@@ -161,6 +183,19 @@ class CudaFfaProgram {
   CudaFfaProgram& operator=(const CudaFfaProgram&) = delete;
 
   [[nodiscard]] bool empty() const noexcept;
+  [[nodiscard]] bool prepared() const noexcept;
+
+  // Builds or replaces the active device metadata. Re-preparing an identical
+  // logical plan is a no-op. The large workspace is retained when its
+  // capacity is sufficient and is replaced only when the new plan needs more
+  // storage. Search never prepares a plan implicitly.
+  void prepare(const FfaSearchPlan& plan);
+
+  // Synchronizes the Program stream and releases active metadata and all
+  // workspace capacity. The Program remains usable and can be prepared again
+  // afterwards.
+  void clear();
+
   [[nodiscard]] const CudaFfaExecutionPlan& execution_plan() const;
   [[nodiscard]] int device_id() const;
   [[nodiscard]] std::size_t tile_capacity() const;

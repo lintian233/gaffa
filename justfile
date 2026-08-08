@@ -44,6 +44,21 @@ build-release: configure-release
 build-benchmarks: configure-release
     {{ dev_env }} cmake --build {{ release_dir }} --target gaffa_benchmarks
 
+build-cli: configure-release
+    {{ dev_env }} cmake --build {{ release_dir }} --target gaffa_search
+
+build-cli-loki: configure-loki-release
+    {{ dev_env }} cmake --build {{ loki_release_dir }} --target gaffa_search
+
+run-search input="tests/data/basetest.fil" dm_range="0:1:2" search_range="native-cpu:0.1:1:16:32" native_devices="0" loki_devices="0" dedisp_backend="cuda-subband" dedisp_device="0" print_candidates="64" cand="" overwrite="0": build-cli
+    {{ dev_env }} extra_args=(); if [ -n "{{ cand }}" ]; then extra_args+=(--cand "{{ cand }}"); fi; if [ "{{ overwrite }}" = "1" ]; then extra_args+=(--overwrite); fi; {{ release_dir }}/gaffa_search --input "{{ input }}" --dm-range "{{ dm_range }}" --search "{{ search_range }}" --native-devices "{{ native_devices }}" --loki-devices "{{ loki_devices }}" --dedisp-backend "{{ dedisp_backend }}" --dedisp-device "{{ dedisp_device }}" --print-candidates "{{ print_candidates }}" "${extra_args[@]}"
+
+run-search-config config="configs/search.yaml": build-cli
+    {{ dev_env }} {{ release_dir }}/gaffa_search --config "{{ config }}"
+
+run-search-loki input="tests/data/basetest.fil" dm_range="0:1:2" search_range="loki-cuda:0.1:1:16:32:truncate" native_devices="0" loki_devices="0" dedisp_backend="cuda-subband" dedisp_device="0" print_candidates="64" cand="" overwrite="0": build-cli-loki
+    {{ dev_env }} extra_args=(); if [ -n "{{ cand }}" ]; then extra_args+=(--cand "{{ cand }}"); fi; if [ "{{ overwrite }}" = "1" ]; then extra_args+=(--overwrite); fi; {{ loki_release_dir }}/gaffa_search --input "{{ input }}" --dm-range "{{ dm_range }}" --search "{{ search_range }}" --native-devices "{{ native_devices }}" --loki-devices "{{ loki_devices }}" --dedisp-backend "{{ dedisp_backend }}" --dedisp-device "{{ dedisp_device }}" --print-candidates "{{ print_candidates }}" "${extra_args[@]}"
+
 install: deps-debug
     {{ dev_env }} python -m pip install -e ".[dev]" --no-build-isolation --force-reinstall \
       -Cbuild-dir="build/editable-debug" \
@@ -67,11 +82,14 @@ configure-loki: deps-debug
     {{ dev_env }} if [ -f {{ loki_dir }}/CMakeCache.txt ]; then cmake -S . -B {{ loki_dir }} -G Ninja -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_LOKI=ON; else cmake -S . -B {{ loki_dir }} -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/debug/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Debug -DGAFFA_ENABLE_LOKI=ON; fi
 
 build-loki: configure-loki
-    {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki
+    {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki _loki
 
-test-loki: configure-loki
+test-loki: configure-loki test-loki-python
     {{ dev_env }} cmake --build {{ loki_dir }} --target gaffa_loki_smoke_tests gaffa_loki_pffa_tests
     {{ dev_env }} ctest --test-dir {{ loki_dir }} -R "^(LokiSmoke|LokiPffaPlan|LokiPffaProgram)\\." --output-on-failure
+
+test-loki-python: build-loki
+    {{ dev_env }} GAFFA_LOKI_BUILD_DIR="$PWD/{{ loki_dir }}" PYTHONPATH="$PWD/python" python -m pytest -v tests/test_loki.py
 
 configure-loki-release: deps-release
     {{ dev_env }} if [ -f {{ loki_release_dir }}/CMakeCache.txt ]; then cmake -S . -B {{ loki_release_dir }} -G Ninja -DCMAKE_BUILD_TYPE=Release -DGAFFA_ENABLE_LOKI=ON; else cmake -S . -B {{ loki_release_dir }} -G Ninja -DCMAKE_TOOLCHAIN_FILE=build/conan/release/conan_toolchain.cmake -DCMAKE_BUILD_TYPE=Release -DGAFFA_ENABLE_LOKI=ON; fi
@@ -79,7 +97,7 @@ configure-loki-release: deps-release
 # Tests and quality checks
 
 test-python:
-    {{ dev_env }} python -m pytest -v --cov
+    {{ dev_env }} python -m pytest -v --cov=gaffa --cov-report=term-missing
 
 typecheck-python:
     {{ dev_env }} pyright

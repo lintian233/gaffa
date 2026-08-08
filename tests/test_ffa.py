@@ -24,10 +24,10 @@ def test_make_riptide_plan_exposes_stable_summary() -> None:
     assert plan.width_trials == (1,)
 
 
-def test_ffa_search_returns_sorted_raw_peaks() -> None:
+def test_search_raw_returns_sorted_raw_peaks() -> None:
     series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
 
-    peaks = ffa.ffa_search(series, make_plan(series.size), snr_threshold=0.0)
+    peaks = ffa.search_raw(series, make_plan(series.size), snr_threshold=0.0)
 
     assert peaks
     assert all(isinstance(peak, ffa.FfaPeak) for peak in peaks)
@@ -38,54 +38,101 @@ def test_ffa_search_returns_sorted_raw_peaks() -> None:
     assert peaks[0].bins == 2
 
 
-def test_ffa_search_returns_empty_above_threshold() -> None:
+def test_search_raw_returns_empty_above_threshold() -> None:
     series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
 
-    peaks = ffa.ffa_search(series, make_plan(series.size), snr_threshold=1000.0)
+    peaks = ffa.search_raw(series, make_plan(series.size), snr_threshold=1000.0)
 
     assert peaks == []
 
 
-def test_ffa_search_rejects_inputs_that_would_copy() -> None:
+def test_search_returns_canonical_periodic_peaks() -> None:
+    series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
+
+    result = ffa.search(series, make_plan(series.size), snr_threshold=0.0)
+
+    assert result
+    assert all(isinstance(peak, peaks.PeriodicPeak) for peak in result)
+    assert result[0].motion.reference_time_seconds == 4.0
+    assert result[0].motion.frequency_hz > 0.0
+
+
+def test_search_batch_preserves_series_boundaries() -> None:
+    series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
+    batch = np.stack([series, series])
+
+    result = ffa.search_batch(batch, make_plan(series.size), snr_threshold=0.0)
+
+    assert len(result) == 2
+    assert all(result_row for result_row in result)
+    assert all(
+        isinstance(peak, peaks.PeriodicPeak)
+        for result_row in result
+        for peak in result_row
+    )
+
+
+def test_search_raw_rejects_inputs_that_would_copy() -> None:
     plan = make_plan(8)
 
     with pytest.raises(TypeError, match="numpy.ndarray"):
-        ffa.ffa_search([0.0] * 8, plan)
+        ffa.search_raw([0.0] * 8, plan)
     with pytest.raises(TypeError, match="dtype float32"):
-        ffa.ffa_search(np.zeros(8, dtype=np.float64), plan)
+        ffa.search_raw(np.zeros(8, dtype=np.float64), plan)
     with pytest.raises(ValueError, match="1D"):
-        ffa.ffa_search(np.zeros((1, 8), dtype=np.float32), plan)
+        ffa.search_raw(np.zeros((1, 8), dtype=np.float32), plan)
     with pytest.raises(ValueError, match="C-contiguous"):
-        ffa.ffa_search(np.zeros(16, dtype=np.float32)[::2], plan)
+        ffa.search_raw(np.zeros(16, dtype=np.float32)[::2], plan)
 
 
-def test_ffa_search_rejects_plan_length_mismatch_and_invalid_peak_limit() -> None:
+def test_search_raw_rejects_plan_length_mismatch_and_invalid_peak_limit() -> None:
     series = np.zeros(8, dtype=np.float32)
 
     with pytest.raises(ValueError, match="input_nsamples"):
-        ffa.ffa_search(series, make_plan(9))
+        ffa.search_raw(series, make_plan(9))
     with pytest.raises(ValueError, match="positive or None"):
-        ffa.ffa_search(series, make_plan(series.size), max_peaks=0)
+        ffa.search_raw(series, make_plan(series.size), max_peaks=0)
 
 
-def test_ffa_search_rejects_unknown_backend_and_unused_device() -> None:
+def test_search_raw_rejects_unknown_device_and_old_arguments() -> None:
     series = np.zeros(8, dtype=np.float32)
     plan = make_plan(series.size)
 
-    with pytest.raises(ValueError, match="'cpu' or 'cuda'"):
-        ffa.ffa_search(series, plan, backend="opencl")
-    with pytest.raises(ValueError, match="only valid"):
-        ffa.ffa_search(series, plan, device_id=1)
+    with pytest.raises(ValueError, match="cuda:0"):
+        ffa.search_raw(series, plan, device="opencl:0")
+    with pytest.raises(ValueError, match="cuda:0"):
+        ffa.search_raw(series, plan, device="cuda:x")
+    with pytest.raises(TypeError):
+        ffa.search_raw(series, plan, backend="cuda")  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        ffa.search_raw(series, plan, device_id=1)  # type: ignore[call-arg]
+
+
+def test_search_rejects_invalid_device() -> None:
+    series = np.zeros(8, dtype=np.float32)
+    plan = make_plan(series.size)
+
+    with pytest.raises(ValueError, match="cuda:0"):
+        ffa.search(series, plan, device="gpu:0")
+    with pytest.raises(ValueError, match="cuda:0"):
+        ffa.search(series, plan, device="cuda:x")
+
+
+def test_cuda_program_rejects_cpu_device() -> None:
+    with pytest.raises(ValueError, match="requires a CUDA device"):
+        ffa.CudaProgram(make_plan(8), device=None)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="series_tile_size"):
+        ffa.CudaProgram(make_plan(8), series_tile_size=True)  # type: ignore[arg-type]
 
 
 @pytest.mark.skipif(gaffa.cuda_device_count() == 0, reason="CUDA device required")
-def test_ffa_search_cuda_matches_cpu() -> None:
+def test_search_raw_cuda_matches_cpu() -> None:
     series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
     plan = make_plan(series.size)
 
-    cpu_peaks = ffa.ffa_search(series, plan, snr_threshold=1.0)
-    cuda_peaks = ffa.ffa_search(
-        series, plan, snr_threshold=1.0, backend="cuda"
+    cpu_peaks = ffa.search_raw(series, plan, snr_threshold=1.0)
+    cuda_peaks = ffa.search_raw(
+        series, plan, snr_threshold=1.0, device="cuda:0"
     )
 
     assert len(cuda_peaks) == len(cpu_peaks)
@@ -97,6 +144,32 @@ def test_ffa_search_cuda_matches_cpu() -> None:
         assert cuda_peak.phase == cpu_peak.phase
         assert cuda_peak.shift == cpu_peak.shift
         assert cuda_peak.bins == cpu_peak.bins
+
+
+@pytest.mark.skipif(gaffa.cuda_device_count() == 0, reason="CUDA device required")
+def test_search_cuda_and_program_return_canonical_peaks() -> None:
+    series = np.array([0, 0, 0, 5, 0, 0, 0, 5], dtype=np.float32)
+    plan = make_plan(series.size)
+
+    cpu_result = ffa.search(series, plan, snr_threshold=1.0)
+    one_shot = ffa.search(series, plan, snr_threshold=1.0, device="cuda:0")
+    with ffa.CudaProgram(plan, device="cuda:0", series_tile_size=2) as program:
+        repeated = program.search(series, snr_threshold=1.0)
+        batch = program.search_batch(
+            np.stack([series, series]), snr_threshold=1.0
+        )
+
+    assert len(one_shot) == len(cpu_result)
+    assert len(repeated) == len(cpu_result)
+    assert len(batch) == 2
+    assert batch[0] and batch[1]
+    assert one_shot[0].motion.frequency_hz == pytest.approx(
+        cpu_result[0].motion.frequency_hz
+    )
+    assert repeated[0].snr == pytest.approx(cpu_result[0].snr)
+
+    with pytest.raises(RuntimeError, match="closed"):
+        program.search(series)
 
 
 def test_search_dms_cpu_returns_physical_peaks_for_one_block() -> None:
