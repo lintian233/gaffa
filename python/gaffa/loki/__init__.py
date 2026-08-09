@@ -5,6 +5,8 @@ It accepts prepared host ``float32`` NumPy arrays and keeps the CUDA execution
 state reusable through :class:`PffaProgram`.
 """
 
+from __future__ import annotations
+
 from ..peaks import PeriodicPeak
 
 try:
@@ -12,8 +14,7 @@ try:
     from .._loki import _make_pffa_plan, _PffaProgram
 except ImportError as error:
     raise ImportError(
-        "gaffa.loki requires a build with GAFFA_ENABLE_LOKI=ON and the Loki "
-        "runtime available"
+        "gaffa.loki requires a build with GAFFA_ENABLE_LOKI=ON and the Loki runtime available"
     ) from error
 
 
@@ -29,11 +30,7 @@ def _parse_device(device: str) -> int:
 def _parse_peak_limit(max_peaks: int | None, default: int) -> int:
     if max_peaks is None:
         return default
-    if (
-        isinstance(max_peaks, bool)
-        or not isinstance(max_peaks, int)
-        or max_peaks <= 0
-    ):
+    if isinstance(max_peaks, bool) or not isinstance(max_peaks, int) or max_peaks <= 0:
         raise ValueError("max_peaks must be positive or None")
     return max_peaks
 

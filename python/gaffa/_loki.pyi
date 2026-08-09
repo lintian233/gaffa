@@ -1,6 +1,5 @@
 """Private pybind11 declarations for the optional Loki extension."""
 
-
 from typing import Any
 
 from .peaks import PeriodicPeak
@@ -9,8 +8,6 @@ class PffaPlan:
     nsamples: int
     tsamp: float
 
-
-
 class _PffaProgram:
     def __init__(
         self,
@@ -18,27 +15,22 @@ class _PffaProgram:
         device_id: int,
         max_peaks_per_series: int,
     ) -> None: ...
-
     @property
     def device_id(self) -> int: ...
-
     @property
     def nsamples(self) -> int: ...
-
     def search(
         self,
         time_series: Any,
         *,
         max_peaks: int,
     ) -> list[PeriodicPeak]: ...
-
     def search_batch(
         self,
         data: Any,
         *,
         max_peaks: int,
     ) -> list[list[PeriodicPeak]]: ...
-
 
 def _make_pffa_plan(
     *,

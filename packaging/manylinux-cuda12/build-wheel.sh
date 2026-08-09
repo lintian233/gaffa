@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly python=/opt/python/cp312-cp312/bin/python
+readonly python_tag=${PYTHON_TAG:-cp312-cp312}
+readonly python=/opt/python/${python_tag}/bin/python
 readonly prefix=/opt/wheel-deps
 readonly cuda_architectures=${CMAKE_CUDA_ARCHITECTURES:-75\;80\;86\;89\;90\;100\;120}
 readonly pybind11_dir=$("${python}" -m pybind11 --cmakedir)

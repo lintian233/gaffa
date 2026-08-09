@@ -1,17 +1,14 @@
 """Optional Loki P-FFA Python API."""
 
-from typing import Self
-
 import numpy as np
 from numpy.typing import NDArray
+from typing_extensions import Self
 
 from ..peaks import PeriodicPeak
 
 class PffaPlan:
     nsamples: int
     tsamp: float
-
-
 
 class PffaProgram:
     def __init__(
@@ -21,34 +18,25 @@ class PffaProgram:
         device: str = "cuda:0",
         max_peaks_per_series: int = 1_000_000,
     ) -> None: ...
-
     @property
     def device(self) -> str: ...
-
     @property
     def nsamples(self) -> int: ...
-
     def search(
         self,
         time_series: NDArray[np.float32],
         *,
         max_peaks: int | None = None,
     ) -> list[PeriodicPeak]: ...
-
     def search_batch(
         self,
         data: NDArray[np.float32],
         *,
         max_peaks: int | None = None,
     ) -> list[list[PeriodicPeak]]: ...
-
     def close(self) -> None: ...
-
     def __enter__(self) -> Self: ...
-
-    def __exit__(self, exc_type: object, exc_value: object,
-                 traceback: object) -> None: ...
-
+    def __exit__(self, exc_type: object, exc_value: object, traceback: object) -> None: ...
 
 def make_pffa_plan(
     *,
@@ -65,8 +53,6 @@ def make_pffa_plan(
     width_spacing: float = 1.5,
     snr_threshold: float = 6.0,
 ) -> PffaPlan: ...
-
-
 def search(
     time_series: NDArray[np.float32],
     plan: PffaPlan,
@@ -74,8 +60,6 @@ def search(
     device: str = "cuda:0",
     max_peaks: int | None = None,
 ) -> list[PeriodicPeak]: ...
-
-
 def search_batch(
     data: NDArray[np.float32],
     plan: PffaPlan,
@@ -84,6 +68,5 @@ def search_batch(
     max_peaks: int | None = None,
     max_peaks_per_series: int = 1_000_000,
 ) -> list[list[PeriodicPeak]]: ...
-
 
 __all__ = ["PffaPlan", "PffaProgram", "make_pffa_plan", "search", "search_batch"]

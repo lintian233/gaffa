@@ -1,5 +1,7 @@
 """Fast-folding-algorithm search primitives for preprocessed time series."""
 
+from __future__ import annotations
+
 from .._core import (
     DmPeak,
     FfaPeak,

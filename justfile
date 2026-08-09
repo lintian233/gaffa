@@ -89,10 +89,11 @@ wheel: deps-release
 
 # Reproducible CUDA 12 / Loki wheel. Loki is supplied as an independent
 # BuildKit context so no developer-specific absolute path enters the image.
-wheel-loki-manylinux loki_src="../loki":
+wheel-loki-manylinux loki_src="../loki" python_tag="cp312-cp312":
     mkdir -p wheelhouse
     docker buildx build \
         --build-context loki="{{loki_src}}" \
+        --build-arg PYTHON_TAG="{{python_tag}}" \
         --file packaging/manylinux-cuda12/Dockerfile \
         --target wheel \
         --output type=local,dest=wheelhouse \
@@ -109,18 +110,19 @@ wheel-loki-toolchain-image:
 
 # Build with CUDA 12.8, then install and run the wheel against the minimum
 # supported CUDA 12.1 user-space runtime.
-wheel-loki-runtime-image loki_src="../loki" pypi_index_url="https://pypi.org/simple":
+wheel-loki-runtime-image loki_src="../loki" pypi_index_url="https://pypi.org/simple" python_tag="cp312-cp312":
     docker buildx build \
         --build-context loki="{{loki_src}}" \
+        --build-arg PYTHON_TAG="{{python_tag}}" \
         --build-arg RUNTIME_PIP_INDEX_URL="{{pypi_index_url}}" \
         --file packaging/manylinux-cuda12/Dockerfile \
         --target runtime-test \
         --load \
-        --tag gaffa-wheel-runtime-test:cuda12.1 \
+        --tag gaffa-wheel-runtime-test:cuda12.1-{{python_tag}} \
         .
 
-test-wheel-loki loki_src="../loki" pypi_index_url="https://pypi.org/simple": (wheel-loki-runtime-image loki_src pypi_index_url)
-    docker run --rm --gpus all gaffa-wheel-runtime-test:cuda12.1
+test-wheel-loki loki_src="../loki" pypi_index_url="https://pypi.org/simple" python_tag="cp312-cp312": (wheel-loki-runtime-image loki_src pypi_index_url python_tag)
+    docker run --rm --gpus all gaffa-wheel-runtime-test:cuda12.1-{{python_tag}}
 
 # Optional Loki integration. CMake discovers Loki through standard package
 # paths, LOKI_ROOT, or the conventional $HOME/opt/loki prefix.

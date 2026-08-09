@@ -9,7 +9,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "gaffa"
 version = "0.1.0"
-requires-python = ">=3.12"
+requires-python = ">=3.9"
 readme = "README.md"
 authors = [{ name = "lintian233" }]
 description = "CUDA/C++ and Python toolkit for pulsar data processing and FFA searches."
@@ -17,6 +17,7 @@ license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 dependencies = [
   "numpy>=1.26,<2.5",
+  "typing_extensions>=4.7",
 ]
 
 [project.scripts]
@@ -60,7 +61,7 @@ exclude = [
 ]
 
 [tool.cibuildwheel]
-build = ["cp312-*"]
+build = ["cp39-*", "cp310-*", "cp311-*", "cp312-*"]
 archs = ["x86_64"]
 skip = ["*-musllinux_*", "pp*"]
 
@@ -77,13 +78,13 @@ CUDACXX = "/usr/local/cuda/bin/nvcc"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py39"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
 [tool.pyright]
 include = ["python", "tests/typecheck"]
-pythonVersion = "3.12"
+pythonVersion = "3.9"
 typeCheckingMode = "basic"
 reportMissingModuleSource = "none"
