@@ -148,6 +148,12 @@ struct MotionOverride {
   gaffa::ValueRange range{};
 };
 
+struct ReductionOverride {
+  std::size_t search_id = 0;
+  bool top_k = false;
+  std::size_t value = 0;
+};
+
 void apply_motion_overrides(Config& config,
                             const std::vector<MotionOverride>& overrides) {
   for (const MotionOverride& item : overrides) {
@@ -162,6 +168,24 @@ void apply_motion_overrides(Config& config,
       throw std::invalid_argument("motion range was specified more than once");
     }
     *target = item.range;
+  }
+}
+
+void apply_reduction_overrides(
+    Config& config, const std::vector<ReductionOverride>& overrides) {
+  for (const ReductionOverride& item : overrides) {
+    if (item.search_id >= config.search_ranges.size()) {
+      throw std::invalid_argument("reduction search id is out of range");
+    }
+    auto& reduction = config.search_ranges[item.search_id].reduction;
+    std::size_t* target =
+        item.top_k ? &reduction.top_k_per_group
+                   : &reduction.max_groups_per_series;
+    if (*target != 0) {
+      throw std::invalid_argument(
+          "reduction option was specified more than once");
+    }
+    *target = item.value;
   }
 }
 
@@ -262,6 +286,16 @@ void validate_config_impl(const Config& config) {
     }
     validate_motion_range(search.motion.accel, "accel");
     validate_motion_range(search.motion.jerk, "jerk");
+    if (search.reduction.top_k_per_group != 0 &&
+        search.reduction.max_groups_per_series == 0) {
+      throw std::invalid_argument(
+          "reduction max_groups must be > 0 when top_k is enabled");
+    }
+    if (!std::isfinite(search.reduction.frequency_tolerance_hz) ||
+        search.reduction.frequency_tolerance_hz < 0.0) {
+      throw std::invalid_argument(
+          "reduction frequency tolerance must be finite and non-negative");
+    }
     if (search.motion.jerk && !search.motion.accel) {
       throw std::invalid_argument("jerk search requires accel search");
     }
@@ -302,6 +336,8 @@ void print_usage(const char* program) {
       << "  --search VALUE            Repeatable search range\n"
       << "  --search-accel ID:MIN:MAX Loki acceleration range in m/s^2\n"
       << "  --search-jerk ID:MIN:MAX  Loki jerk range in m/s^3\n"
+      << "  --search-top-k ID:N       GPU peak top-K per coordinate group\n"
+      << "  --search-max-groups ID:N Maximum coordinate groups per DM\n"
       << "  --dedisp-backend VALUE    cpu-subband or cuda-subband\n"
       << "  --dedisp-device ID        CUDA device for dedispersion\n"
       << "  --native-devices IDS      Comma-separated Native CUDA devices\n"
@@ -345,6 +381,7 @@ Config parse_arguments(int argc, char** argv) {
 
   Config config;
   std::vector<MotionOverride> motion_overrides;
+  std::vector<ReductionOverride> reduction_overrides;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     auto require_value = [&](const char* option) -> std::string_view {
@@ -382,6 +419,21 @@ Config parse_arguments(int argc, char** argv) {
               .minimum = parse_number<double>(parts[1], "motion minimum"),
               .maximum = parse_number<double>(parts[2], "motion maximum"),
           },
+      });
+    } else if (argument == "--search-top-k" ||
+               argument == "--search-max-groups") {
+      const char* option = argument == "--search-top-k"
+                               ? "--search-top-k"
+                               : "--search-max-groups";
+      const auto parts = split(require_value(option), ':');
+      if (parts.size() != 2) {
+        throw std::invalid_argument(std::string(option) +
+                                    " expects search_id:value");
+      }
+      reduction_overrides.push_back(ReductionOverride{
+          .search_id = parse_number<std::size_t>(parts[0], "search id"),
+          .top_k = argument == "--search-top-k",
+          .value = parse_number<std::size_t>(parts[1], "reduction value"),
       });
     } else if (argument == "--dedisp-backend") {
       const auto value = require_value("--dedisp-backend");
@@ -458,6 +510,7 @@ Config parse_arguments(int argc, char** argv) {
     }
   }
   apply_motion_overrides(config, motion_overrides);
+  apply_reduction_overrides(config, reduction_overrides);
   validate_config(config);
   return config;
 }

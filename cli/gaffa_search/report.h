@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace gaffa_search {
@@ -44,6 +45,8 @@ struct Report {
   std::size_t selected_count = 0;
   std::size_t harmonic_relation_count = 0;
   std::vector<CandidateRow> candidates;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 Report make_report(const FileResult& result);

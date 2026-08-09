@@ -368,6 +368,8 @@ void launch_program_transform_before_terminal(
 
 struct CudaFfaWorkspace {
   CudaFfaWorkspace(const CudaFfaWorkspaceShape& workspace_shape,
+                   const CudaFfaExecutionPlan& plan,
+                   const CudaFfaExecutionOptions& options,
                    int device_id)
       : shape(workspace_shape) {
     check_cuda(cudaSetDevice(device_id), "cudaSetDevice");
@@ -378,13 +380,24 @@ struct CudaFfaWorkspace {
         shape.detection_compact_bytes / sizeof(FfaCudaPeak));
     detection_peak_count = CudaDeviceBuffer<unsigned long long>(1);
     detection_peak_overflow = CudaDeviceBuffer<unsigned int>(1);
+    reduction = FfaCudaReductionWorkspace(
+        plan, options, detection_compact.size(), device_id);
+    shape.reduction_bytes = reduction.bytes();
+    shape.total_bytes = checked_add(
+        shape.total_bytes, shape.reduction_bytes,
+        "CUDA FFA workspace reduction byte size overflow");
+    if (options.workspace_bytes_limit != 0 &&
+        shape.total_bytes > options.workspace_bytes_limit) {
+      throw std::runtime_error(
+          "CUDA FFA reduction workspace exceeds workspace_bytes_limit");
+    }
   }
 
   CudaFfaWorkspace(const CudaFfaExecutionPlan& plan,
                    const CudaFfaExecutionOptions& options,
                    int device_id)
-      : CudaFfaWorkspace(estimate_ffa_cuda_workspace(plan, options),
-                         device_id) {}
+      : CudaFfaWorkspace(estimate_ffa_cuda_workspace(plan, options), plan,
+                         options, device_id) {}
 
   [[nodiscard]] bool can_hold(const CudaFfaWorkspaceShape& required) const
       noexcept {
@@ -396,7 +409,8 @@ struct CudaFfaWorkspace {
            shape.prepared_bytes >= required.prepared_bytes &&
            shape.scratch_bytes >= required.scratch_bytes &&
            shape.output_bytes >= required.output_bytes &&
-           shape.detection_compact_bytes >= required.detection_compact_bytes;
+           shape.detection_compact_bytes >= required.detection_compact_bytes &&
+           shape.reduction_bytes >= required.reduction_bytes;
   }
 
   CudaSpan<float> prepared_span(std::size_t nseries,
@@ -456,17 +470,27 @@ struct CudaFfaWorkspace {
     return detection_compact.size();
   }
 
-  void resize_peak_buffer(std::size_t capacity_records) {
+  void resize_peak_buffer(std::size_t capacity_records,
+                          const CudaFfaExecutionPlan& plan,
+                          const CudaFfaExecutionOptions& options,
+                          int device_id) {
     if (capacity_records == 0) {
       throw std::invalid_argument(
           "CUDA FFA peak buffer capacity must be > 0");
     }
     CudaDeviceBuffer<FfaCudaPeak> replacement(capacity_records);
+    FfaCudaReductionWorkspace replacement_reduction(
+        plan, options, capacity_records, device_id);
     const std::size_t previous_bytes = shape.detection_compact_bytes;
+    const std::size_t previous_reduction_bytes = shape.reduction_bytes;
     detection_compact = std::move(replacement);
+    reduction = std::move(replacement_reduction);
     shape.detection_compact_bytes = detection_compact.bytes();
+    shape.reduction_bytes = reduction.bytes();
     shape.total_bytes = checked_add(
-        shape.total_bytes - previous_bytes, shape.detection_compact_bytes,
+        shape.total_bytes - previous_bytes - previous_reduction_bytes,
+        checked_add(shape.detection_compact_bytes, shape.reduction_bytes,
+                    "CUDA FFA workspace byte size overflow"),
         "CUDA FFA workspace byte size overflow");
   }
 
@@ -477,6 +501,7 @@ struct CudaFfaWorkspace {
   CudaDeviceBuffer<FfaCudaPeak> detection_compact;
   CudaDeviceBuffer<unsigned long long> detection_peak_count;
   CudaDeviceBuffer<unsigned int> detection_peak_overflow;
+  FfaCudaReductionWorkspace reduction;
 };
 
 }  // namespace

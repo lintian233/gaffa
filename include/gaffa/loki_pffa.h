@@ -2,6 +2,7 @@
 
 #include "gaffa/cuda_memory.h"
 #include "gaffa/periodic_peak.h"
+#include "gaffa/peak_reduction.h"
 #include "gaffa/time_series_cuda.h"
 
 #include <cuda_runtime_api.h>
@@ -9,6 +10,7 @@
 #include <cstddef>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace gaffa {
@@ -87,6 +89,13 @@ struct LokiPffaExecutionOptions {
   // Compact peak limit for one input series across every Loki execution
   // region. Exceeding it fails rather than silently truncating candidates.
   std::size_t max_peaks_per_series = 1'000'000;
+
+  PeakReductionOptions reduction{};
+};
+
+struct LokiPffaSearchDiagnostics {
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 // Reusable, device-affine time-domain Loki P-FFA executor for one immutable
@@ -120,6 +129,11 @@ class LokiPffaProgram {
   SeriesPeaks search_batch(
       CudaTimeSeriesBatchView normalised_batch,
       LokiPffaExecutionOptions options = {});
+
+  // Diagnostics describe bounded GPU reduction for the most recent search or
+  // search_batch call. Ordinary CUDA/Loki errors still throw immediately.
+  [[nodiscard]] const LokiPffaSearchDiagnostics& last_search_diagnostics()
+      const noexcept;
 
  private:
   struct Impl;

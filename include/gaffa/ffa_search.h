@@ -2,9 +2,11 @@
 
 #include "gaffa/ffa_peak.h"
 #include "gaffa/ffa_plan.h"
+#include "gaffa/peak_reduction.h"
 
 #include <cstddef>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace gaffa {
@@ -21,6 +23,10 @@ struct FfaSearchOptions {
 
 struct FfaSearchResult {
   std::vector<FfaPeak> peaks;
+  // CUDA bounded reduction may return a partial result with diagnostics. CPU
+  // search always leaves this true and the warning list empty.
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 // Executes an already-built FFA search plan on a finite, preprocessed 1D float

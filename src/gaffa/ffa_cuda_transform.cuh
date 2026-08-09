@@ -96,6 +96,16 @@ void validate_execution_options(const CudaFfaExecutionOptions& options) {
         "CUDA FFA peak buffer bytes must satisfy "
         "sizeof(FfaCudaPeak) <= initial <= max");
   }
+  if (options.reduction.enabled() &&
+      options.reduction.max_groups_per_series == 0) {
+    throw std::invalid_argument(
+        "CUDA peak reduction max_groups_per_series must be > 0");
+  }
+  if (!std::isfinite(options.reduction.frequency_tolerance_hz) ||
+      options.reduction.frequency_tolerance_hz < 0.0) {
+    throw std::invalid_argument(
+        "CUDA peak reduction frequency_tolerance_hz must be finite and >= 0");
+  }
 }
 
 void validate_launch_options(const CudaLaunchOptions& options) {

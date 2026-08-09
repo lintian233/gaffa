@@ -8,8 +8,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -192,5 +194,87 @@ TEST(GaffaSearchOutput, WritesCompleteCandidateAndReportFiles) {
   EXPECT_NE(report_text.find("showing            1 of 1"),
             std::string::npos);
 
+  std::filesystem::remove_all(directory);
+}
+
+TEST(GaffaSearchOutput, PlansSingleFileOutputAsAFilePrefix) {
+  const auto directory = temporary_directory();
+  gaffa_search::Config config;
+  config.input = directory / "input.fil";
+  config.candidate_output = directory / "candidate";
+
+  const std::vector<std::filesystem::path> inputs = {config.input};
+  const auto outputs =
+      gaffa_search::plan_output_paths(config, inputs);
+
+  ASSERT_EQ(outputs.size(), 1U);
+  EXPECT_EQ(outputs.front().candidates, directory / "candidate.cand");
+  EXPECT_EQ(outputs.front().report, directory / "candidate.out");
+  gaffa_search::validate_output_plan(outputs, false);
+
+  std::filesystem::remove_all(directory);
+}
+
+TEST(GaffaSearchOutput, PlansDirectoryInputByInputStem) {
+  const auto directory = temporary_directory();
+  const auto input_directory = directory / "inputs";
+  std::filesystem::create_directories(input_directory);
+
+  gaffa_search::Config config;
+  config.input = input_directory;
+  config.candidate_output = directory / "results";
+  const std::vector<std::filesystem::path> inputs = {
+      input_directory / "first.fil", input_directory / "second.fil"};
+
+  const auto outputs =
+      gaffa_search::plan_output_paths(config, inputs);
+
+  ASSERT_EQ(outputs.size(), 2U);
+  EXPECT_EQ(outputs[0].candidates,
+            directory / "results" / "first.cand");
+  EXPECT_EQ(outputs[1].report,
+            directory / "results" / "second.out");
+  gaffa_search::validate_output_plan(outputs, false);
+
+  std::filesystem::remove_all(directory);
+}
+
+TEST(GaffaSearchOutput, RejectsDuplicatePlannedOutputPaths) {
+  const auto directory = temporary_directory();
+  const auto input_directory = directory / "inputs";
+  std::filesystem::create_directories(input_directory);
+
+  gaffa_search::Config config;
+  config.input = input_directory;
+  config.candidate_output = directory / "results";
+  const std::vector<std::filesystem::path> inputs = {
+      directory / "one" / "observation.fil",
+      directory / "two" / "observation.fil"};
+  const auto outputs =
+      gaffa_search::plan_output_paths(config, inputs);
+
+  EXPECT_THROW(gaffa_search::validate_output_plan(outputs, false),
+               std::invalid_argument);
+  std::filesystem::remove_all(directory);
+}
+
+TEST(GaffaSearchOutput, RejectsExistingOutputWithoutOverwrite) {
+  const auto directory = temporary_directory();
+  const auto output_path = directory / "candidate.cand";
+  std::ofstream(output_path) << "existing\n";
+
+  gaffa_search::OutputPaths outputs{
+      .candidates = output_path,
+      .report = directory / "candidate.out",
+  };
+  EXPECT_THROW(
+      gaffa_search::validate_output_plan(std::span<const gaffa_search::OutputPaths>(
+                                              &outputs, 1),
+                                          false),
+      std::runtime_error);
+  EXPECT_NO_THROW(
+      gaffa_search::validate_output_plan(std::span<const gaffa_search::OutputPaths>(
+                                              &outputs, 1),
+                                          true));
   std::filesystem::remove_all(directory);
 }

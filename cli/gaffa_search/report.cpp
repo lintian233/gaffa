@@ -96,6 +96,8 @@ Report make_report(const FileResult& result) {
   report.candidate_count = candidate_set.candidates.size();
   report.selected_count = candidate_result.selected.size();
   report.harmonic_relation_count = candidate_result.harmonic_relations.size();
+  report.complete = result.complete;
+  report.warnings = result.warnings;
 
   for (const std::size_t selected_index : candidate_result.selected) {
     report.candidates.push_back(

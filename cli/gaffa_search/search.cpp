@@ -48,11 +48,15 @@ struct DmRangeRuntime {
 struct SearchRunResult {
   SearchRunInfo info;
   gaffa::DmPeaks peaks;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 struct RawSearchResult {
   gaffa::DmPeaks peaks;
   std::vector<SearchRunInfo> runs;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 struct Tile {
@@ -298,7 +302,7 @@ gaffa::DmPeaks run_native_cpu(
 }
 
 template <typename ValueT>
-gaffa::DmPeaks run_cuda_phase(
+CudaSearchResult run_cuda_phase(
     const gaffa::DedispersedResult<ValueT>& dedispersed,
     const DmRangeRuntime& dm_range, const SearchRangeConfig& search,
     const Config& config, double tsamp, std::vector<int> devices,
@@ -314,12 +318,14 @@ gaffa::DmPeaks run_cuda_phase(
       workers.back()->prepare_native(
           search, dedispersed.shape.nsamples, tsamp, config.snr_threshold,
           config.max_peaks, config.preprocess, config.running_median_seconds,
-          config.resources.native_cuda.max_peak_memory_bytes);
+          config.resources.native_cuda.max_peak_memory_bytes,
+          search.reduction);
     } else {
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
       workers.back()->prepare_loki(
           search, dedispersed.shape.nsamples, tsamp, config.snr_threshold,
-          config.max_peaks, config.preprocess, config.running_median_seconds);
+          config.max_peaks, config.preprocess, config.running_median_seconds,
+          search.reduction);
 #else
       throw std::runtime_error(
           "loki-cuda was requested but GAFFA_ENABLE_LOKI is disabled");
@@ -327,7 +333,7 @@ gaffa::DmPeaks run_cuda_phase(
     }
   }
 
-  std::vector<gaffa::DmPeaks> worker_results(workers.size());
+  std::vector<CudaSearchResult> worker_results(workers.size());
   std::vector<std::exception_ptr> worker_errors(workers.size());
   std::atomic<std::size_t> next_tile = 0;
   std::atomic<bool> cancelled = false;
@@ -356,32 +362,33 @@ gaffa::DmPeaks run_cuda_phase(
               dedispersed.data.data() + offset, count);
           const auto dms = std::span<const double>(
               dm_range.dm_values.data() + tile.local_begin, tile.count);
-          gaffa::DmPeaks peaks;
+          CudaSearchResult search_result;
           if constexpr (std::is_same_v<ValueT, std::uint32_t>) {
             if (search.backend == Backend::NativeCuda) {
-              peaks = workers[worker_index]->run_native(
+              search_result = workers[worker_index]->run_native(
                   source, tile.count, dedispersed.shape.nsamples, dms,
                   dm_range.global_dm_index_begin + tile.local_begin);
             } else {
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
-              peaks = workers[worker_index]->run_loki(
+              search_result = workers[worker_index]->run_loki(
                   source, tile.count, dedispersed.shape.nsamples, dms,
                   dm_range.global_dm_index_begin + tile.local_begin);
 #endif
             }
           } else {
             if (search.backend == Backend::NativeCuda) {
-              peaks = workers[worker_index]->run_native(
+              search_result = workers[worker_index]->run_native(
                   source, tile.count, dedispersed.shape.nsamples, dms,
                   dm_range.global_dm_index_begin + tile.local_begin);
             } else {
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
-              peaks = workers[worker_index]->run_loki(
+              search_result = workers[worker_index]->run_loki(
                   source, tile.count, dedispersed.shape.nsamples, dms,
                   dm_range.global_dm_index_begin + tile.local_begin);
 #endif
             }
           }
+          gaffa::DmPeaks& peaks = search_result.peaks;
           const std::size_t count_after =
               produced.fetch_add(peaks.size(), std::memory_order_relaxed) +
               peaks.size();
@@ -391,7 +398,11 @@ gaffa::DmPeaks run_cuda_phase(
                 "maximum total raw peak limit exceeded");
           }
           auto& local = worker_results[worker_index];
-          local.insert(local.end(),
+          local.complete &= search_result.complete;
+          local.warnings.insert(local.warnings.end(),
+                                search_result.warnings.begin(),
+                                search_result.warnings.end());
+          local.peaks.insert(local.peaks.end(),
                        std::make_move_iterator(peaks.begin()),
                        std::make_move_iterator(peaks.end()));
           if (progress != nullptr) {
@@ -428,11 +439,16 @@ gaffa::DmPeaks run_cuda_phase(
     std::rethrow_exception(first_error);
   }
   gaffa::DmPeaks output;
+  CudaSearchResult result;
   for (auto& local : worker_results) {
-    output.insert(output.end(), std::make_move_iterator(local.begin()),
-                  std::make_move_iterator(local.end()));
+    result.complete &= local.complete;
+    result.warnings.insert(result.warnings.end(), local.warnings.begin(),
+                           local.warnings.end());
+    output.insert(output.end(), std::make_move_iterator(local.peaks.begin()),
+                  std::make_move_iterator(local.peaks.end()));
   }
-  return output;
+  result.peaks = std::move(output);
+  return result;
 }
 
 bool dm_peak_less(const gaffa::DmPeak& lhs, const gaffa::DmPeak& rhs) {
@@ -593,23 +609,38 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
           }
           break;
         case Backend::NativeCuda:
-          run.peaks = run_cuda_phase(
+          {
+            CudaSearchResult search_result = run_cuda_phase(
               dedispersed, dm_range, search, config,
               filterbank.header.tsamp, config.native_cuda_devices, peak_limit,
               progress);
+            run.peaks = std::move(search_result.peaks);
+            run.complete = search_result.complete;
+            run.warnings = std::move(search_result.warnings);
+          }
           break;
         case Backend::LokiCuda:
-          run.peaks = run_cuda_phase(
+          {
+            CudaSearchResult search_result = run_cuda_phase(
               dedispersed, dm_range, search, config,
               filterbank.header.tsamp, config.loki_cuda_devices, peak_limit,
               progress);
+            run.peaks = std::move(search_result.peaks);
+            run.complete = search_result.complete;
+            run.warnings = std::move(search_result.warnings);
+          }
           break;
       }
       run.info.raw_peak_count = run.peaks.size();
+      run.info.complete = run.complete;
+      run.info.warnings = run.warnings;
       if (progress != nullptr) {
         progress->finish_search_run(run.info.raw_peak_count);
       }
       append_checked(result.peaks, std::move(run.peaks), config);
+      result.complete &= run.complete;
+      result.warnings.insert(result.warnings.end(), run.warnings.begin(),
+                             run.warnings.end());
       result.runs.push_back(std::move(run.info));
     }
   };
@@ -657,9 +688,9 @@ RawSearchResult run_filterbank(const gaffa::FilterbankData& filterbank,
 
 }  // namespace
 
-FileResult execute_file(const Config& config,
-                        const std::filesystem::path& input,
-                        ProgressTracker* progress) {
+FileResult search_file(const Config& config,
+                       const std::filesystem::path& input,
+                       ProgressTracker* progress) {
   const auto total_begin = std::chrono::steady_clock::now();
   const auto read_begin = total_begin;
   if (progress != nullptr) {
@@ -701,6 +732,8 @@ FileResult execute_file(const Config& config,
   result.raw_peak_count = raw.peaks.size();
   result.candidates = std::move(candidates);
   result.search_runs = std::move(raw.runs);
+  result.complete = raw.complete;
+  result.warnings = std::move(raw.warnings);
   const auto candidate_end = std::chrono::steady_clock::now();
   result.timing.candidate_seconds =
       std::chrono::duration<double>(candidate_end - candidate_begin).count();
@@ -720,12 +753,13 @@ FileResult execute_file(const Config& config,
   return result;
 }
 
-RunResult execute_impl(const Config& config, ProgressTracker* progress) {
+std::vector<std::filesystem::path> discover_inputs(
+    const std::filesystem::path& input) {
   std::vector<std::filesystem::path> inputs;
-  if (std::filesystem::is_regular_file(config.input)) {
-    inputs.push_back(config.input);
-  } else if (std::filesystem::is_directory(config.input)) {
-    for (const auto& entry : std::filesystem::directory_iterator(config.input)) {
+  if (std::filesystem::is_regular_file(input)) {
+    inputs.push_back(input);
+  } else if (std::filesystem::is_directory(input)) {
+    for (const auto& entry : std::filesystem::directory_iterator(input)) {
       if (entry.is_regular_file() && entry.path().extension() == ".fil") {
         inputs.push_back(entry.path());
       }
@@ -739,32 +773,32 @@ RunResult execute_impl(const Config& config, ProgressTracker* progress) {
     throw std::invalid_argument(
         "input must be a regular filterbank file or a directory");
   }
+  return inputs;
+}
 
-  RunResult result;
-  result.files.reserve(inputs.size());
+void search_each_file(const Config& config,
+                      std::span<const std::filesystem::path> inputs,
+                      ProgressTracker& progress,
+                      FileResultConsumer consumer) {
+  if (inputs.empty()) {
+    throw std::invalid_argument("search requires at least one input file");
+  }
+  if (!consumer) {
+    throw std::invalid_argument("search file consumer must be callable");
+  }
+
   try {
     for (std::size_t index = 0; index < inputs.size(); ++index) {
       const auto& input = inputs[index];
       Config file_config = config;
       file_config.input = input;
-      if (progress != nullptr) {
-        progress->begin_file(input, index + 1, inputs.size());
-      }
-      result.files.push_back(execute_file(file_config, input, progress));
+      progress.begin_file(input, index + 1, inputs.size());
+      consumer(search_file(file_config, input, &progress));
     }
   } catch (...) {
-    if (progress != nullptr) {
-      progress->mark_failed();
-    }
+    progress.mark_failed();
     throw;
   }
-  return result;
-}
-
-RunResult execute(const Config& config) { return execute_impl(config, nullptr); }
-
-RunResult execute(const Config& config, ProgressTracker& progress) {
-  return execute_impl(config, &progress);
 }
 
 }  // namespace gaffa_search

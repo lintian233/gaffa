@@ -51,6 +51,13 @@ if (( ${#repaired_wheels[@]} != 1 )); then
   exit 1
 fi
 
+# patchelf currently produces invalid program headers for the CUDA-heavy CLI.
+# Keep auditwheel's repaired Python extensions and shared libraries, but restore
+# the original CLI ELF and place aliases for its bundled non-CUDA dependencies
+# beside it, where its build-time relative RUNPATH already points.
+"${python}" /src/gaffa/packaging/manylinux-cuda12/restore_cli_binary.py \
+  "${repaired_wheels[0]}" "${raw_wheels[0]}"
+
 auditwheel show "${repaired_wheels[0]}"
 "${python}" /src/gaffa/packaging/manylinux-cuda12/verify-wheel.py \
   "${repaired_wheels[0]}"

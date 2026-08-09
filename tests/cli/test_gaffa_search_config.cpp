@@ -70,6 +70,28 @@ TEST(GaffaSearchConfig, ParsesMultipleDmAndSearchRanges) {
   EXPECT_EQ(config.native_cuda_devices[1], 1);
 }
 
+TEST(GaffaSearchConfig, ParsesPeakReductionOverrides) {
+  const auto config = parse({
+      "gaffa_search", "--input", "observation.fil", "--dm-range",
+      "0:1:4", "--search", "native-cuda:0.018:1:180:256",
+      "--native-devices", "0", "--search-top-k", "0:8",
+      "--search-max-groups", "0:128",
+  });
+
+  ASSERT_EQ(config.search_ranges.size(), 1U);
+  EXPECT_EQ(config.search_ranges.front().reduction.top_k_per_group, 8U);
+  EXPECT_EQ(config.search_ranges.front().reduction.max_groups_per_series,
+            128U);
+}
+
+TEST(GaffaSearchConfig, RejectsPeakReductionWithoutGroupLimit) {
+  EXPECT_THROW(
+      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
+             "0:1:4", "--search", "native-cuda:0.018:1:180:256",
+             "--native-devices", "0", "--search-top-k", "0:8"}),
+      std::invalid_argument);
+}
+
 TEST(GaffaSearchConfig, RejectsOverlappingDmRanges) {
   EXPECT_THROW(
       parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
@@ -225,6 +247,7 @@ search:
       bins: {min: 180, max: 256}
       accel: {min: -5.0, max: 5.0}
       jerk: {min: -0.2, max: 0.2}
+      reduction: {top_k: 3, max_groups: 64}
       window: zero-pad
 preprocess:
   kind: normalise
@@ -268,6 +291,8 @@ output:
   ASSERT_TRUE(config.search_ranges[1].motion.jerk.has_value());
   EXPECT_DOUBLE_EQ(config.search_ranges[1].motion.jerk->minimum, -0.2);
   EXPECT_DOUBLE_EQ(config.search_ranges[1].motion.jerk->maximum, 0.2);
+  EXPECT_EQ(config.search_ranges[1].reduction.top_k_per_group, 3U);
+  EXPECT_EQ(config.search_ranges[1].reduction.max_groups_per_series, 64U);
   EXPECT_FLOAT_EQ(config.snr_threshold, 8.0F);
   EXPECT_EQ(config.max_peaks, 12U);
   EXPECT_EQ(config.max_total_raw_peaks, 100U);

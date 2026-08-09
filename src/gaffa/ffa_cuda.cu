@@ -15,6 +15,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -23,6 +25,7 @@ namespace {
 
 #include "ffa_cuda_kernels.cuh"
 #include "ffa_cuda_transform.cuh"
+#include "ffa_cuda_reduction.cuh"
 #include "ffa_cuda_program.cuh"
 
 class CudaDeviceScope {

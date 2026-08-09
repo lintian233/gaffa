@@ -7,6 +7,8 @@
 #include <loki/search/configs.hpp>
 #include <loki/utils/workspace.hpp>
 
+#include <cub/cub.cuh>
+
 #include <cuda/std/span>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -133,6 +135,14 @@ std::size_t checked_add(std::size_t lhs, std::size_t rhs,
   return lhs + rhs;
 }
 
+unsigned int reduction_grid_blocks(std::size_t count, const char* operation) {
+  const std::size_t blocks = count / 256U + (count % 256U != 0 ? 1U : 0U);
+  if (blocks > std::numeric_limits<unsigned int>::max()) {
+    throw std::overflow_error(std::string(operation) + " grid overflow");
+  }
+  return static_cast<unsigned int>(blocks);
+}
+
 std::vector<loki::ParamLimit> make_loki_limits(
     const LokiTaylorSearchSpace& search_space) {
   std::vector<loki::ParamLimit> limits;
@@ -164,6 +174,276 @@ double parameter_value(const loki::ParamLimit& limit, std::size_t count,
                       static_cast<double>(count)) *
                          (static_cast<double>(index) + 0.5);
 }
+
+struct LokiPeakRef {
+  float snr = 0.0F;
+  std::uint32_t index = 0;
+};
+
+static_assert(sizeof(LokiPeakRef) == 8);
+
+struct LokiReductionSummary {
+  std::size_t count = 0;
+  bool overflow = false;
+};
+
+__global__ void build_loki_reduction_refs_kernel(
+    const float* scores, const std::uint32_t* indices, std::size_t count,
+    LokiPeakRef* refs) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < count) {
+    refs[index] = LokiPeakRef{
+        .snr = scores[index],
+        .index = indices[index],
+    };
+  }
+}
+
+__global__ void build_loki_reduction_group_keys_kernel(
+    const LokiPeakRef* refs, std::size_t count, std::size_t width_count,
+    std::uint32_t* keys) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index < count) {
+    keys[index] = static_cast<std::uint32_t>(refs[index].index / width_count);
+  }
+}
+
+__global__ void select_loki_reduction_peaks_kernel(
+    const std::uint32_t* sorted_keys, const LokiPeakRef* sorted_refs,
+    std::size_t count, std::size_t top_k, std::size_t max_groups,
+    std::size_t output_capacity, std::uint32_t* group_count,
+    unsigned long long* output_count, unsigned int* overflow,
+    LokiPeakRef* output) {
+  const std::size_t index =
+      static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= count ||
+      (index != 0 && sorted_keys[index] == sorted_keys[index - 1])) {
+    return;
+  }
+  const std::size_t group = atomicAdd(group_count, 1U);
+  if (group >= max_groups) {
+    atomicExch(overflow, 1U);
+    return;
+  }
+  const std::uint32_t key = sorted_keys[index];
+  for (std::size_t rank = 0; rank < top_k && index + rank < count; ++rank) {
+    if (sorted_keys[index + rank] != key) {
+      break;
+    }
+    const unsigned long long output_index = atomicAdd(output_count, 1ULL);
+    if (output_index >= output_capacity) {
+      atomicExch(overflow, 1U);
+      continue;
+    }
+    output[output_index] = sorted_refs[index + rank];
+  }
+}
+
+std::size_t query_loki_reduction_sort_bytes(std::size_t capacity) {
+  std::size_t score_bytes = 0;
+  cub::DeviceRadixSort::SortPairsDescending(
+      nullptr, score_bytes, static_cast<const float*>(nullptr),
+      static_cast<float*>(nullptr), static_cast<const LokiPeakRef*>(nullptr),
+      static_cast<LokiPeakRef*>(nullptr), capacity);
+  std::size_t group_bytes = 0;
+  cub::DeviceRadixSort::SortPairs(
+      nullptr, group_bytes, static_cast<const std::uint32_t*>(nullptr),
+      static_cast<std::uint32_t*>(nullptr),
+      static_cast<const LokiPeakRef*>(nullptr),
+      static_cast<LokiPeakRef*>(nullptr), capacity);
+  return std::max(score_bytes, group_bytes);
+}
+
+class LokiReductionWorkspace {
+ public:
+  LokiReductionWorkspace() = default;
+
+  LokiReductionWorkspace(const PeakReductionOptions& options,
+                         std::size_t input_capacity)
+      : top_k_(options.top_k_per_group),
+        max_groups_(options.max_groups_per_series),
+        input_capacity_(input_capacity) {
+    if (top_k_ == 0) {
+      return;
+    }
+    if (max_groups_ == 0) {
+      throw std::invalid_argument(
+          "Loki peak reduction max_groups_per_series must be > 0");
+    }
+    if (max_groups_ > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::overflow_error(
+          "Loki peak reduction max_groups_per_series exceeds uint32_t");
+    }
+    allocate();
+  }
+
+  LokiReductionWorkspace(const LokiReductionWorkspace&) = delete;
+  LokiReductionWorkspace& operator=(const LokiReductionWorkspace&) = delete;
+  LokiReductionWorkspace(LokiReductionWorkspace&&) noexcept = default;
+  LokiReductionWorkspace& operator=(LokiReductionWorkspace&&) noexcept = default;
+
+  [[nodiscard]] bool enabled() const noexcept { return top_k_ != 0; }
+
+  [[nodiscard]] bool matches(const PeakReductionOptions& options,
+                             std::size_t capacity) const noexcept {
+    return top_k_ == options.top_k_per_group &&
+           max_groups_ == options.max_groups_per_series &&
+           input_capacity_ >= capacity;
+  }
+
+  [[nodiscard]] std::size_t bytes() const noexcept {
+    return refs_a_.bytes() + refs_b_.bytes() + sorted_scores_.bytes() +
+           keys_a_.bytes() + keys_b_.bytes() + group_count_.bytes() +
+           output_.bytes() + output_count_.bytes() + overflow_.bytes() +
+           temp_.bytes();
+  }
+
+  static std::size_t estimate_bytes(const PeakReductionOptions& options,
+                                    std::size_t input_capacity) {
+    if (!options.enabled()) {
+      return 0;
+    }
+    if (options.max_groups_per_series == 0 || input_capacity == 0) {
+      throw std::invalid_argument(
+          "Loki peak reduction requires a non-empty input capacity and "
+          "max_groups_per_series > 0");
+    }
+    if (options.max_groups_per_series >
+        std::numeric_limits<std::uint32_t>::max()) {
+      throw std::overflow_error(
+          "Loki peak reduction max_groups_per_series exceeds uint32_t");
+    }
+
+    std::size_t bytes = 0;
+    const auto add_array = [&bytes](std::size_t count,
+                                    std::size_t element_size,
+                                    const char* message) {
+      bytes = checked_add(
+          bytes, checked_multiply(count, element_size, message),
+          "Loki reduction workspace byte size overflow");
+    };
+    add_array(input_capacity, sizeof(LokiPeakRef),
+              "Loki reduction reference byte size overflow");
+    add_array(input_capacity, sizeof(LokiPeakRef),
+              "Loki reduction reference byte size overflow");
+    add_array(input_capacity, sizeof(float),
+              "Loki reduction score byte size overflow");
+    add_array(input_capacity, sizeof(std::uint32_t),
+              "Loki reduction group key byte size overflow");
+    add_array(input_capacity, sizeof(std::uint32_t),
+              "Loki reduction group key byte size overflow");
+    add_array(1, sizeof(std::uint32_t),
+              "Loki reduction group counter byte size overflow");
+    const std::size_t output_count = checked_multiply(
+        options.max_groups_per_series, options.top_k_per_group,
+        "Loki reduction output size overflow");
+    add_array(output_count, sizeof(LokiPeakRef),
+              "Loki reduction output byte size overflow");
+    add_array(1, sizeof(unsigned long long),
+              "Loki reduction output counter byte size overflow");
+    add_array(1, sizeof(unsigned int),
+              "Loki reduction overflow byte size overflow");
+    bytes = checked_add(
+        bytes, query_loki_reduction_sort_bytes(input_capacity),
+        "Loki reduction workspace byte size overflow");
+    return bytes;
+  }
+
+  [[nodiscard]] const CudaDeviceBuffer<LokiPeakRef>& output() const noexcept {
+    return output_;
+  }
+
+  LokiReductionSummary reduce(const CudaDeviceBuffer<float>& scores,
+                              const CudaDeviceBuffer<std::uint32_t>& indices,
+                              std::size_t count, std::size_t width_count,
+                              cudaStream_t stream) {
+    if (!enabled() || count > input_capacity_ || width_count == 0) {
+      throw std::invalid_argument("invalid Loki reduction input");
+    }
+    if (count == 0) {
+      return {};
+    }
+    check_cuda(cudaMemsetAsync(group_count_.data(), 0,
+                               group_count_.bytes(), stream),
+               "Loki reduction group counter reset");
+    check_cuda(cudaMemsetAsync(output_count_.data(), 0,
+                               output_count_.bytes(), stream),
+               "Loki reduction output counter reset");
+    check_cuda(cudaMemsetAsync(overflow_.data(), 0, overflow_.bytes(), stream),
+               "Loki reduction overflow reset");
+
+    const unsigned int blocks =
+        reduction_grid_blocks(count, "Loki reduction");
+    build_loki_reduction_refs_kernel<<<blocks, 256, 0, stream>>>(
+        scores.data(), indices.data(), count, refs_a_.data());
+    check_cuda(cudaGetLastError(), "Loki reduction ref launch");
+
+    std::size_t temp_bytes = temp_.bytes();
+    cub::DeviceRadixSort::SortPairsDescending(
+        temp_.data(), temp_bytes, scores.data(), sorted_scores_.data(),
+        refs_a_.data(), refs_b_.data(), count, 0, sizeof(float) * 8, stream);
+    build_loki_reduction_group_keys_kernel<<<blocks, 256, 0, stream>>>(
+        refs_b_.data(), count, width_count, keys_a_.data());
+    check_cuda(cudaGetLastError(), "Loki reduction key launch");
+    cub::DeviceRadixSort::SortPairs(
+        temp_.data(), temp_bytes, keys_a_.data(), keys_b_.data(),
+        refs_b_.data(), refs_a_.data(), count, 0, sizeof(std::uint32_t) * 8,
+        stream);
+    select_loki_reduction_peaks_kernel<<<blocks, 256, 0, stream>>>(
+        keys_b_.data(), refs_a_.data(), count, top_k_, max_groups_,
+        output_.size(), group_count_.data(), output_count_.data(),
+        overflow_.data(), output_.data());
+    check_cuda(cudaGetLastError(), "Loki reduction select launch");
+    check_cuda(cudaStreamSynchronize(stream), "Loki reduction synchronize");
+
+    unsigned long long output_count = 0;
+    unsigned int overflow = 0;
+    check_cuda(cudaMemcpy(&output_count, output_count_.data(),
+                          sizeof(output_count), cudaMemcpyDeviceToHost),
+               "Loki reduction count D2H");
+    check_cuda(cudaMemcpy(&overflow, overflow_.data(), sizeof(overflow),
+                          cudaMemcpyDeviceToHost),
+               "Loki reduction overflow D2H");
+    if (output_count > output_.size()) {
+      throw std::logic_error("Loki reduction output count is invalid");
+    }
+    return LokiReductionSummary{
+        .count = static_cast<std::size_t>(output_count),
+        .overflow = overflow != 0,
+    };
+  }
+
+ private:
+  void allocate() {
+    refs_a_ = CudaDeviceBuffer<LokiPeakRef>(input_capacity_);
+    refs_b_ = CudaDeviceBuffer<LokiPeakRef>(input_capacity_);
+    sorted_scores_ = CudaDeviceBuffer<float>(input_capacity_);
+    keys_a_ = CudaDeviceBuffer<std::uint32_t>(input_capacity_);
+    keys_b_ = CudaDeviceBuffer<std::uint32_t>(input_capacity_);
+    group_count_ = CudaDeviceBuffer<std::uint32_t>(1);
+    output_ = CudaDeviceBuffer<LokiPeakRef>(checked_multiply(
+        max_groups_, top_k_, "Loki reduction output size overflow"));
+    output_count_ = CudaDeviceBuffer<unsigned long long>(1);
+    overflow_ = CudaDeviceBuffer<unsigned int>(1);
+    temp_ = CudaDeviceMemory(query_loki_reduction_sort_bytes(input_capacity_));
+  }
+
+  std::size_t top_k_ = 0;
+  std::size_t max_groups_ = 0;
+  std::size_t input_capacity_ = 0;
+  CudaDeviceBuffer<LokiPeakRef> refs_a_;
+  CudaDeviceBuffer<LokiPeakRef> refs_b_;
+  CudaDeviceBuffer<float> sorted_scores_;
+  CudaDeviceBuffer<std::uint32_t> keys_a_;
+  CudaDeviceBuffer<std::uint32_t> keys_b_;
+  CudaDeviceBuffer<std::uint32_t> group_count_;
+  CudaDeviceBuffer<LokiPeakRef> output_;
+  CudaDeviceBuffer<unsigned long long> output_count_;
+  CudaDeviceBuffer<unsigned int> overflow_;
+  CudaDeviceMemory temp_;
+};
 
 }  // namespace
 
@@ -218,6 +498,7 @@ struct LokiPffaProgram::Impl {
     try {
       DeviceGuard guard(options.device_id);
       counter.reset();
+      reduction.reset();
       workspace.reset();
     } catch (...) {
       // Destructors cannot report CUDA/Loki cleanup failures.
@@ -234,6 +515,8 @@ struct LokiPffaProgram::Impl {
   CudaDeviceBuffer<float> scores;
   CudaDeviceBuffer<std::uint32_t> indices;
   CudaDeviceBuffer<std::uint32_t> widths;
+  std::unique_ptr<LokiReductionWorkspace> reduction;
+  LokiPffaSearchDiagnostics diagnostics;
   std::size_t resolved_budget_bytes = 0;
   std::atomic_flag search_active = ATOMIC_FLAG_INIT;
 };
@@ -503,6 +786,11 @@ const LokiPffaPlan& LokiPffaProgram::plan() const noexcept {
   return impl_->plan;
 }
 
+const LokiPffaSearchDiagnostics& LokiPffaProgram::last_search_diagnostics()
+    const noexcept {
+  return impl_->diagnostics;
+}
+
 std::vector<PeriodicPeak> LokiPffaProgram::search(
     CudaSpan<const float> normalised_time_series,
     LokiPffaExecutionOptions execution_options) {
@@ -517,8 +805,20 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
   if (execution_options.max_peaks_per_series == 0) {
     throw std::invalid_argument("Loki P-FFA max_peaks_per_series must be > 0");
   }
+  if (execution_options.reduction.enabled() &&
+      execution_options.reduction.max_groups_per_series == 0) {
+    throw std::invalid_argument(
+        "Loki peak reduction max_groups_per_series must be > 0");
+  }
+  if (!std::isfinite(execution_options.reduction.frequency_tolerance_hz) ||
+      execution_options.reduction.frequency_tolerance_hz < 0.0) {
+    throw std::invalid_argument(
+        "Loki peak reduction frequency tolerance must be finite and "
+        "non-negative");
+  }
 
   ActiveSearchGuard active_search(impl_->search_active);
+  impl_->diagnostics = LokiPffaSearchDiagnostics{};
   DeviceGuard guard(impl_->options.device_id);
   if (execution_options.stream != nullptr) {
     if (cuda_stream_device(execution_options.stream) !=
@@ -527,6 +827,34 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
     }
   }
   impl_->initialize(execution_options.stream);
+  if (execution_options.reduction.enabled()) {
+    if (impl_->reduction == nullptr ||
+        !impl_->reduction->matches(execution_options.reduction,
+                                   impl_->layout->score_elements)) {
+      const std::size_t base_bytes = checked_add(
+          impl_->layout->persistent_bytes, impl_->layout->transient_peak_bytes,
+          "Loki peak memory size overflow");
+      const std::size_t reduction_bytes =
+          LokiReductionWorkspace::estimate_bytes(
+              execution_options.reduction, impl_->layout->score_elements);
+      if (base_bytes > impl_->resolved_budget_bytes ||
+          reduction_bytes > impl_->resolved_budget_bytes - base_bytes) {
+        throw std::runtime_error(
+            "Loki peak reduction workspace exceeds the configured device "
+            "memory budget");
+      }
+      auto reduction = std::make_unique<LokiReductionWorkspace>(
+          execution_options.reduction, impl_->layout->score_elements);
+      if (reduction->bytes() >
+          impl_->resolved_budget_bytes - base_bytes) {
+        throw std::logic_error(
+            "Loki reduction workspace estimate is smaller than allocation");
+      }
+      impl_->reduction = std::move(reduction);
+    }
+  } else {
+    impl_->reduction.reset();
+  }
 
   std::vector<PeriodicPeak> peaks;
   for (const auto& region : impl_->layout->regions) {
@@ -552,7 +880,8 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
         impl_->plan.options().snr_threshold,
         region.plan->get_ncoords().back(), region.config.get_nbins(),
         execution_options.stream, *impl_->counter);
-    if (passing > execution_options.max_peaks_per_series - peaks.size()) {
+    if (peaks.size() > execution_options.max_peaks_per_series ||
+        passing > execution_options.max_peaks_per_series - peaks.size()) {
       throw std::runtime_error(
           "Loki P-FFA compact peak limit exceeded; raise max_peaks_per_series "
           "or increase the SNR threshold");
@@ -561,22 +890,56 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
       ffa.reset();
       continue;
     }
-    std::vector<float> host_scores(passing);
-    std::vector<std::uint32_t> host_indices(passing);
-    check_cuda(cudaMemcpyAsync(host_scores.data(), impl_->scores.data(),
-                               passing * sizeof(float), cudaMemcpyDeviceToHost,
-                               execution_options.stream),
-               "cudaMemcpyAsync Loki compact scores");
-    check_cuda(cudaMemcpyAsync(host_indices.data(), impl_->indices.data(),
-                               passing * sizeof(std::uint32_t), cudaMemcpyDeviceToHost,
-                               execution_options.stream),
-               "cudaMemcpyAsync Loki compact indices");
+    std::size_t selected_count = passing;
+    LokiReductionSummary reduction_summary;
+    if (impl_->reduction != nullptr) {
+      reduction_summary = impl_->reduction->reduce(
+          impl_->scores, impl_->indices, passing, region.widths.size(),
+          execution_options.stream);
+      selected_count = reduction_summary.count;
+      if (reduction_summary.overflow) {
+        impl_->diagnostics.complete = false;
+        impl_->diagnostics.warnings.push_back(
+            "Loki CUDA reduction exceeded max_groups_per_series; "
+            "some coordinate groups were discarded");
+      }
+    }
+    std::vector<LokiPeakRef> host_refs;
+    std::vector<float> host_scores;
+    std::vector<std::uint32_t> host_indices;
+    if (impl_->reduction != nullptr) {
+      host_refs.resize(selected_count);
+      check_cuda(cudaMemcpyAsync(
+                     host_refs.data(), impl_->reduction->output().data(),
+                     selected_count * sizeof(LokiPeakRef),
+                     cudaMemcpyDeviceToHost, execution_options.stream),
+                 "cudaMemcpyAsync Loki reduced peaks");
+    } else {
+      host_scores.resize(selected_count);
+      host_indices.resize(selected_count);
+      check_cuda(cudaMemcpyAsync(host_scores.data(), impl_->scores.data(),
+                                 selected_count * sizeof(float),
+                                 cudaMemcpyDeviceToHost,
+                                 execution_options.stream),
+                 "cudaMemcpyAsync Loki compact scores");
+      check_cuda(cudaMemcpyAsync(host_indices.data(), impl_->indices.data(),
+                                 selected_count * sizeof(std::uint32_t),
+                                 cudaMemcpyDeviceToHost,
+                                 execution_options.stream),
+                 "cudaMemcpyAsync Loki compact indices");
+    }
     check_cuda(cudaStreamSynchronize(execution_options.stream),
                "cudaStreamSynchronize Loki compact peaks");
-    peaks.reserve(checked_add(peaks.size(), passing, "Loki peak count overflow"));
-    for (std::size_t index = 0; index < passing; ++index) {
-      peaks.push_back(
-          impl_->make_peak(region, host_scores[index], host_indices[index]));
+    peaks.reserve(
+        checked_add(peaks.size(), selected_count, "Loki peak count overflow"));
+    for (std::size_t index = 0; index < selected_count; ++index) {
+      if (impl_->reduction != nullptr) {
+        peaks.push_back(impl_->make_peak(
+            region, host_refs[index].snr, host_refs[index].index));
+      } else {
+        peaks.push_back(impl_->make_peak(
+            region, host_scores[index], host_indices[index]));
+      }
     }
     // FFACUDA owns the region-specific phase map. Reset under the owning
     // device guard before moving on to the next region.
@@ -598,6 +961,7 @@ SeriesPeaks LokiPffaProgram::search_batch(
         "Loki P-FFA batch belongs to another CUDA device");
   }
 
+  LokiPffaSearchDiagnostics batch_diagnostics;
   SeriesPeaks result;
   for (std::size_t series_index = 0;
        series_index < normalised_batch.nseries; ++series_index) {
@@ -608,6 +972,10 @@ SeriesPeaks LokiPffaProgram::search_batch(
         .device_id = normalised_batch.device_id,
     };
     std::vector<PeriodicPeak> peaks = search(series, options);
+    batch_diagnostics.complete &= impl_->diagnostics.complete;
+    batch_diagnostics.warnings.insert(
+        batch_diagnostics.warnings.end(), impl_->diagnostics.warnings.begin(),
+        impl_->diagnostics.warnings.end());
     result.reserve(result.size() + peaks.size());
     for (PeriodicPeak& peak : peaks) {
       result.push_back(SeriesPeak{
@@ -616,6 +984,7 @@ SeriesPeaks LokiPffaProgram::search_batch(
       });
     }
   }
+  impl_->diagnostics = std::move(batch_diagnostics);
   return result;
 }
 

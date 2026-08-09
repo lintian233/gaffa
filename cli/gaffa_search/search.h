@@ -6,6 +6,8 @@
 #include "gaffa/periodic_peak.h"
 
 #include <filesystem>
+#include <functional>
+#include <span>
 #include <vector>
 
 namespace gaffa_search {
@@ -39,6 +41,8 @@ struct SearchRunInfo {
   Backend backend = Backend::NativeCpu;
   SearchCoordinate coordinate{};
   std::size_t raw_peak_count = 0;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 struct FileResult {
@@ -50,15 +54,23 @@ struct FileResult {
   std::size_t raw_peak_count = 0;
   gaffa::CandidateResult candidates;
   std::vector<SearchRunInfo> search_runs;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
-struct RunResult {
-  // Files are analyzed independently. Candidates are never merged across
-  // files because their observation epochs and noise realizations differ.
-  std::vector<FileResult> files;
-};
+using FileResultConsumer = std::function<void(FileResult)>;
 
-RunResult execute(const Config& config);
-RunResult execute(const Config& config, ProgressTracker& progress);
+// Discover regular filterbank files in a single-file or directory input.
+// Directory results are sorted for deterministic execution and output order.
+std::vector<std::filesystem::path> discover_inputs(
+    const std::filesystem::path& input);
+
+// Search one input at a time and immediately transfer its result to consumer.
+// The consumer is called synchronously and must consume or move the result
+// before returning. Results from different input files are never merged.
+void search_each_file(const Config& config,
+                      std::span<const std::filesystem::path> inputs,
+                      ProgressTracker& progress,
+                      FileResultConsumer consumer);
 
 }  // namespace gaffa_search

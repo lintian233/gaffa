@@ -254,7 +254,7 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
   require_map(node, path);
   reject_unknown_keys(node,
                       {"backend", "period", "bins", "accel", "jerk",
-                       "window"},
+                       "window", "reduction"},
                       path);
 
   const std::string backend_path = path + ".backend";
@@ -274,6 +274,28 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
   if (window && backend != Backend::LokiCuda) {
     throw std::invalid_argument(path +
                                 ".window is only valid for loki-cuda");
+  }
+
+  gaffa::PeakReductionOptions reduction{};
+  const YAML::Node reduction_node = node["reduction"];
+  if (reduction_node) {
+    require_map(reduction_node, path + ".reduction");
+    reject_unknown_keys(reduction_node,
+                        {"top_k", "max_groups", "frequency_tolerance_hz"},
+                        path + ".reduction");
+    if (reduction_node["top_k"]) {
+      reduction.top_k_per_group = nonnegative_size(
+          reduction_node["top_k"], path + ".reduction.top_k");
+    }
+    if (reduction_node["max_groups"]) {
+      reduction.max_groups_per_series = nonnegative_size(
+          reduction_node["max_groups"], path + ".reduction.max_groups");
+    }
+    if (reduction_node["frequency_tolerance_hz"]) {
+      reduction.frequency_tolerance_hz = scalar<double>(
+          reduction_node["frequency_tolerance_hz"],
+          path + ".reduction.frequency_tolerance_hz");
+    }
   }
 
   return SearchRangeConfig{
@@ -298,6 +320,7 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
           .accel = parse_optional_range(node, "accel", path + ".accel"),
           .jerk = parse_optional_range(node, "jerk", path + ".jerk"),
       },
+      .reduction = reduction,
   };
 }
 

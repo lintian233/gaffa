@@ -8,6 +8,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <set>
 #include <system_error>
 
 namespace gaffa_search {
@@ -233,6 +234,16 @@ void write_summary(std::ostream& output, const Config& config,
          << report.harmonic_relation_count << "\n"
             "  total candidates   "
          << report.selected_count << "\n\n";
+  output << "Status\n"
+            "  complete           "
+         << (report.complete ? "yes" : "no") << '\n';
+  if (!report.warnings.empty()) {
+    output << "  warnings           " << report.warnings.size() << '\n';
+    for (const std::string& warning : report.warnings) {
+      output << "    - " << warning << '\n';
+    }
+  }
+  output << '\n';
 }
 
 void write_human_report(std::ostream& output, const Config& config,
@@ -261,6 +272,11 @@ void write_csv(std::ostream& output, const Report& report) {
          << "# input," << csv_value(report.input.string()) << '\n'
          << "# raw_peaks," << report.raw_peak_count << '\n'
          << "# final_candidates," << report.selected_count << '\n'
+         << "# complete," << (report.complete ? "true" : "false") << '\n';
+  for (const std::string& warning : report.warnings) {
+    output << "# warning," << csv_value(warning) << '\n';
+  }
+  output
          << "rank,candidate_id,dm,snr,period_seconds,period_ms,"
             "frequency_hz,acceleration_m_per_s2,jerk_m_per_s3,snap_m_per_s4,"
             "reference_time_seconds,motion_order,phase_bin,phase_bins,"
@@ -301,17 +317,40 @@ OutputPaths make_output_paths(const Config& config,
   };
 }
 
-void validate_output_paths(const OutputPaths& paths, bool overwrite) {
-  if (overwrite) {
-    return;
+std::vector<OutputPaths> plan_output_paths(
+    const Config& config,
+    std::span<const std::filesystem::path> inputs) {
+  std::vector<OutputPaths> outputs;
+  if (!config.candidate_output) {
+    return outputs;
   }
-  if (std::filesystem::exists(paths.candidates)) {
-    throw std::runtime_error("output file already exists: " +
-                             paths.candidates.string());
+  outputs.reserve(inputs.size());
+  for (const auto& input : inputs) {
+    outputs.push_back(make_output_paths(config, input));
   }
-  if (std::filesystem::exists(paths.report)) {
-    throw std::runtime_error("output file already exists: " +
-                             paths.report.string());
+  return outputs;
+}
+
+void validate_output_plan(std::span<const OutputPaths> outputs,
+                          bool overwrite) {
+  std::set<std::filesystem::path> seen;
+  for (const auto& paths : outputs) {
+    for (const auto& path : {paths.candidates, paths.report}) {
+      const auto normalized =
+          std::filesystem::absolute(path).lexically_normal();
+      if (!seen.insert(normalized).second) {
+        throw std::invalid_argument("multiple inputs map to output file: " +
+                                    path.string());
+      }
+      if (std::filesystem::is_directory(path)) {
+        throw std::runtime_error("output path is a directory: " +
+                                 path.string());
+      }
+      if (!overwrite && std::filesystem::exists(path)) {
+        throw std::runtime_error("output file already exists: " +
+                                 path.string());
+      }
+    }
   }
 }
 

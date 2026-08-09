@@ -5,11 +5,13 @@
 #include "gaffa/ffa.h"
 #include "gaffa/ffa_search.h"
 #include "gaffa/launch_cuda.h"
+#include "gaffa/peak_reduction.h"
 #include "gaffa/time_series_cuda.h"
 
 #include <cstddef>
 #include <memory>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace gaffa {
@@ -45,6 +47,12 @@ struct CudaFfaExecutionOptions {
   std::size_t max_peak_buffer_bytes =
       1024ULL * 1024ULL * 1024ULL;
 
+  // Optional GPU-side post-detection reduction. The reduction is bounded per
+  // input series and coordinate group; it never changes the FFA transform or
+  // detection semantics. A non-empty warning list means that some task batch
+  // was discarded because its bounded reduction contract was exceeded.
+  PeakReductionOptions reduction{};
+
   cudaStream_t stream = nullptr;
 
   [[nodiscard]] CudaLaunchOptions async_launch_options(
@@ -68,6 +76,8 @@ struct FfaBatchPeak {
 
 struct FfaBatchSearchResult {
   std::vector<FfaBatchPeak> peaks;
+  bool complete = true;
+  std::vector<std::string> warnings;
 };
 
 struct CudaFfaWorkspaceShape {
@@ -83,6 +93,7 @@ struct CudaFfaWorkspaceShape {
   std::size_t scratch_bytes = 0;
   std::size_t output_bytes = 0;
   std::size_t detection_compact_bytes = 0;
+  std::size_t reduction_bytes = 0;
   std::size_t total_bytes = 0;
 };
 

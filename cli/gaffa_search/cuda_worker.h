@@ -8,8 +8,16 @@
 #include <cstdint>
 #include <memory>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace gaffa_search {
+
+struct CudaSearchResult {
+  gaffa::DmPeaks peaks;
+  bool complete = true;
+  std::vector<std::string> warnings;
+};
 
 class CudaWorker {
  public:
@@ -28,14 +36,15 @@ class CudaWorker {
                       float snr_threshold, std::size_t max_peaks,
                       const std::string& preprocess,
                       double running_median_seconds,
-                      std::size_t max_peak_buffer_bytes);
+                      std::size_t max_peak_buffer_bytes,
+                      const gaffa::PeakReductionOptions& reduction);
 
-  gaffa::DmPeaks run_native(
+  CudaSearchResult run_native(
       std::span<const std::uint32_t> tile, std::size_t nseries,
       std::size_t source_nsamples, std::span<const double> dm_values,
       std::size_t global_dm_index_begin);
 
-  gaffa::DmPeaks run_native(
+  CudaSearchResult run_native(
       std::span<const float> tile, std::size_t nseries,
       std::size_t source_nsamples, std::span<const double> dm_values,
       std::size_t global_dm_index_begin);
@@ -45,14 +54,15 @@ class CudaWorker {
                     std::size_t source_nsamples, double tsamp,
                     float snr_threshold, std::size_t max_peaks,
                     const std::string& preprocess,
-                    double running_median_seconds);
+                    double running_median_seconds,
+                    const gaffa::PeakReductionOptions& reduction);
 
-  gaffa::DmPeaks run_loki(
+  CudaSearchResult run_loki(
       std::span<const std::uint32_t> tile, std::size_t nseries,
       std::size_t source_nsamples, std::span<const double> dm_values,
       std::size_t global_dm_index_begin);
 
-  gaffa::DmPeaks run_loki(
+  CudaSearchResult run_loki(
       std::span<const float> tile, std::size_t nseries,
       std::size_t source_nsamples, std::span<const double> dm_values,
       std::size_t global_dm_index_begin);

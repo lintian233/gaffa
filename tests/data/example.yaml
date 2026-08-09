@@ -12,12 +12,12 @@ input:
   path: PT2023_0192_Mercer_5_20231221_c8_t4_filtool_01.fil
 
 dm_ranges:
-  # - low: 10
-  #   step: 0.5
-  #   count: 512
-  # - low: 266
-  #   step: 1.0
-  #   count: 512
+  - low: 10
+    step: 0.5
+    count: 512
+  - low: 266
+    step: 1.0
+    count: 512
   - low: 778
     step: 1.0
     count: 512
@@ -51,6 +51,11 @@ search:
         max: 256
       # Native FFA uses the original input length. Loki-only window
       # policies are intentionally not specified for a native range.
+      reduction:
+        top_k: 100
+        max_groups: 100
+        frequency_tolerance_hz: 0.0
+
     - backend: loki-cuda
       period:
         min: 0.1
@@ -64,6 +69,9 @@ search:
         max: 120
       # Loki P-FFA requires a power-of-two search length.
       window: truncate
+      reduction:
+        top_k: 100
+        max_groups: 100
 
 preprocess:
   kind: riptide
@@ -74,7 +82,7 @@ candidate:
   max_peaks: 0
   max_total_raw_peaks: 0
   max_candidates: 0
-  dm_radius: 25.0
+  dm_radius: 100
 
 output:
   print_candidates: 64

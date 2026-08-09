@@ -127,6 +127,7 @@ struct CudaWorker::Impl {
   WindowMode window_mode = WindowMode::Truncate;
   float snr_threshold = 0.0F;
   std::size_t max_peaks = 0;
+  gaffa::PeakReductionOptions reduction{};
 
   std::unique_ptr<gaffa::CudaPreprocessProgram> preprocess;
   std::unique_ptr<gaffa::CudaFfaProgram> native;
@@ -207,6 +208,7 @@ struct CudaWorker::Impl {
     }
     snr_threshold = threshold;
     max_peaks = peak_limit;
+    reduction = {};
 
     const gaffa::PreprocessPlan preprocess_plan = make_preprocess_plan(
         preprocess_name, tsamp, median_seconds);
@@ -330,7 +332,7 @@ struct CudaWorker::Impl {
   }
 
   template <typename T>
-  gaffa::DmPeaks run_native_tile(
+  CudaSearchResult run_native_tile(
       std::span<const T> tile, std::size_t nseries,
       std::size_t input_nsamples, std::span<const double> dms,
       std::size_t global_dm_index_begin) {
@@ -339,18 +341,31 @@ struct CudaWorker::Impl {
       throw std::logic_error("CUDA worker is not prepared for Native search");
     }
     upload_and_prepare(tile, nseries);
-    const gaffa::SeriesPeaks peaks = gaffa::search_ffa_batch_cuda(
+    const gaffa::FfaBatchSearchResult raw = gaffa::search_ffa_raw_batch_cuda(
         *native, active_prepared,
         gaffa::FfaSearchOptions{
             .snr_threshold = snr_threshold,
             .max_peaks = max_peaks,
         });
-    return attach(peaks, dms, global_dm_index_begin);
+    gaffa::SeriesPeaks peaks;
+    peaks.reserve(raw.peaks.size());
+    const auto& observation = native->execution_plan().observation();
+    for (const gaffa::FfaBatchPeak& peak : raw.peaks) {
+      peaks.push_back(gaffa::SeriesPeak{
+          .series_index = peak.series_index,
+          .peak = gaffa::periodic_peak_from_ffa(peak.peak, observation),
+      });
+    }
+    return CudaSearchResult{
+        .peaks = attach(peaks, dms, global_dm_index_begin),
+        .complete = raw.complete,
+        .warnings = std::move(raw.warnings),
+    };
   }
 
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
   template <typename T>
-  gaffa::DmPeaks run_loki_tile(
+  CudaSearchResult run_loki_tile(
       std::span<const T> tile, std::size_t nseries,
       std::size_t input_nsamples, std::span<const double> dms,
       std::size_t global_dm_index_begin) {
@@ -366,8 +381,14 @@ struct CudaWorker::Impl {
             .max_peaks_per_series =
                 max_peaks == 0 ? std::numeric_limits<std::size_t>::max()
                                : max_peaks,
+            .reduction = reduction,
         });
-    return attach(peaks, dms, global_dm_index_begin);
+    const auto& diagnostics = loki->last_search_diagnostics();
+    return CudaSearchResult{
+        .peaks = attach(peaks, dms, global_dm_index_begin),
+        .complete = diagnostics.complete,
+        .warnings = diagnostics.warnings,
+    };
   }
 #endif
 };
@@ -391,9 +412,11 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
                                 float threshold, std::size_t peak_limit,
                                 const std::string& preprocess_name,
                                 double median_seconds,
-                                std::size_t max_peak_buffer_bytes) {
+                                std::size_t max_peak_buffer_bytes,
+                                const gaffa::PeakReductionOptions& reduction) {
   impl_->prepare_common(search, source_nsamples, tsamp, threshold,
                         peak_limit, preprocess_name, median_seconds);
+  impl_->reduction = reduction;
   const double min_period =
       tsamp * static_cast<double>(search.bins_min);
   if (search.period_min < min_period) {
@@ -415,12 +438,13 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
           .initial_peak_buffer_bytes = std::min<std::size_t>(
               64ULL * 1024ULL * 1024ULL, max_peak_buffer_bytes),
           .max_peak_buffer_bytes = max_peak_buffer_bytes,
+          .reduction = reduction,
           .stream = impl_->stream->stream,
       });
   impl_->active_backend = Impl::ActiveBackend::Native;
 }
 
-gaffa::DmPeaks CudaWorker::run_native(
+CudaSearchResult CudaWorker::run_native(
     std::span<const std::uint32_t> tile, std::size_t nseries,
     std::size_t source_nsamples, std::span<const double> dms,
     std::size_t global_dm_index_begin) {
@@ -428,7 +452,7 @@ gaffa::DmPeaks CudaWorker::run_native(
                                 global_dm_index_begin);
 }
 
-gaffa::DmPeaks CudaWorker::run_native(
+CudaSearchResult CudaWorker::run_native(
     std::span<const float> tile, std::size_t nseries,
     std::size_t source_nsamples, std::span<const double> dms,
     std::size_t global_dm_index_begin) {
@@ -441,9 +465,11 @@ void CudaWorker::prepare_loki(const SearchRangeConfig& search,
                               std::size_t source_nsamples, double tsamp,
                               float threshold, std::size_t peak_limit,
                               const std::string& preprocess_name,
-                              double median_seconds) {
+                              double median_seconds,
+                              const gaffa::PeakReductionOptions& reduction) {
   impl_->prepare_common(search, source_nsamples, tsamp, threshold,
                         peak_limit, preprocess_name, median_seconds);
+  impl_->reduction = reduction;
   const auto plan = gaffa::make_loki_pffa_plan(
       impl_->prepared_nsamples, tsamp,
       gaffa::LokiTaylorSearchSpace{
@@ -464,7 +490,7 @@ void CudaWorker::prepare_loki(const SearchRangeConfig& search,
   impl_->active_backend = Impl::ActiveBackend::Loki;
 }
 
-gaffa::DmPeaks CudaWorker::run_loki(
+CudaSearchResult CudaWorker::run_loki(
     std::span<const std::uint32_t> tile, std::size_t nseries,
     std::size_t source_nsamples, std::span<const double> dms,
     std::size_t global_dm_index_begin) {
@@ -472,7 +498,7 @@ gaffa::DmPeaks CudaWorker::run_loki(
                               global_dm_index_begin);
 }
 
-gaffa::DmPeaks CudaWorker::run_loki(
+CudaSearchResult CudaWorker::run_loki(
     std::span<const float> tile, std::size_t nseries,
     std::size_t source_nsamples, std::span<const double> dms,
     std::size_t global_dm_index_begin) {

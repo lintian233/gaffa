@@ -166,6 +166,7 @@ void CudaFfaProgram::prepare(const FfaSearchPlan& plan) {
   const CudaFfaWorkspaceShape required_workspace =
       estimate_ffa_cuda_workspace(execution_plan, impl_->execution_options);
   const bool reuse_workspace =
+      !impl_->execution_options.reduction.enabled() &&
       impl_->workspace != nullptr &&
       impl_->workspace->can_hold(required_workspace);
 
@@ -183,7 +184,8 @@ void CudaFfaProgram::prepare(const FfaSearchPlan& plan) {
     // Program remains unprepared, just as after clear().
     clear();
     impl_->workspace = std::make_unique<CudaFfaWorkspace>(
-        required_workspace, device_id());
+        required_workspace, state.execution_plan, impl_->execution_options,
+        device_id());
   } else {
     // Device metadata is also active state. Do not release it while an earlier
     // search can still be using it.
@@ -370,8 +372,10 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
   const std::size_t detection_count = checked_multiply(
       options.series_tile_size, plan.max_detection_slots_per_series(),
       "CUDA FFA detection workspace element count overflow");
-  const std::size_t full_peak_bytes = checked_multiply(
-      detection_count, sizeof(FfaCudaPeak),
+  const std::size_t initial_peak_records =
+      options.initial_peak_buffer_bytes / sizeof(FfaCudaPeak);
+  const std::size_t initial_peak_bytes = checked_multiply(
+      std::min(detection_count, initial_peak_records), sizeof(FfaCudaPeak),
       "CUDA FFA detection peak workspace byte size overflow");
 
   CudaFfaWorkspaceShape shape{
@@ -386,15 +390,18 @@ CudaFfaWorkspaceShape estimate_ffa_cuda_workspace(
           task_count, "CUDA FFA scratch workspace byte size overflow"),
       .output_bytes = checked_float_bytes(
           task_count, "CUDA FFA output workspace byte size overflow"),
-      .detection_compact_bytes =
-          std::min(full_peak_bytes, options.initial_peak_buffer_bytes),
+      .detection_compact_bytes = initial_peak_bytes,
   };
+  shape.reduction_bytes = estimate_ffa_cuda_reduction_bytes(
+      plan, options,
+      shape.detection_compact_bytes / sizeof(FfaCudaPeak));
   shape.total_bytes = checked_add(
       checked_add(
           checked_add(shape.prepared_bytes, shape.scratch_bytes,
                       "CUDA FFA workspace byte size overflow"),
           shape.output_bytes, "CUDA FFA workspace byte size overflow"),
-      shape.detection_compact_bytes,
+      checked_add(shape.detection_compact_bytes, shape.reduction_bytes,
+                  "CUDA FFA workspace byte size overflow"),
       "CUDA FFA workspace byte size overflow");
 
   if (options.workspace_bytes_limit != 0 &&
@@ -497,6 +504,12 @@ void ffa_transform_block_cuda(const CudaFfaProgram& program,
 
 namespace detail {
 
+class CudaFfaCapacityError final : public std::runtime_error {
+ public:
+  explicit CudaFfaCapacityError(const std::string& message)
+      : std::runtime_error(message) {}
+};
+
 // Executes one dense [series][sample] tile using workspace owned by a
 // long-lived CudaFfaProgram. It intentionally owns no CUDA allocations.
 class CudaFfaTileRunner {
@@ -521,6 +534,14 @@ class CudaFfaTileRunner {
 
   FfaBatchSearchResult run_tile(CudaTimeSeriesBatchView input) {
     validate_tile(input);
+    if (program_.impl_->execution_options.reduction.enabled()) {
+      return run_reduced_tile(input);
+    }
+    return run_unreduced_tile(input);
+  }
+
+ private:
+  FfaBatchSearchResult run_unreduced_tile(CudaTimeSeriesBatchView input) {
     FfaBatchSearchResult result;
     std::vector<std::size_t> peak_counts(input.nseries, 0);
     const CudaLaunchOptions launch =
@@ -530,8 +551,9 @@ class CudaFfaTileRunner {
     for (std::size_t group_index = 0; group_index < groups.size();
          ++group_index) {
       for (;;) {
-        const CudaFfaGroupPeakSummary summary =
-            execute_prepare_group(group_index, input, launch);
+        prepare_group_input(group_index, input, launch);
+        const CudaFfaGroupPeakSummary summary = execute_task_batch(
+            group_index, input, launch, 0, groups[group_index].tasks.size());
         if (!summary.overflow) {
           collect_group_peaks(group_index, input.nseries, summary.count,
                               peak_counts, result);
@@ -550,7 +572,199 @@ class CudaFfaTileRunner {
     return result;
   }
 
- private:
+  FfaBatchSearchResult run_reduced_tile(CudaTimeSeriesBatchView input) {
+    FfaBatchSearchResult result;
+    NativePeakAccumulator accumulator(
+        input.nseries, program_.impl_->execution_options.reduction,
+        workspace_.reduction.frequency_tolerance_hz(),
+        workspace_.reduction.frequency_bucket_count(),
+        search_options_.max_peaks);
+    const CudaLaunchOptions launch =
+        program_.impl_->execution_options.async_launch_options(
+            program_.device_id());
+    const auto groups = program_.execution_plan().groups();
+
+    for (std::size_t group_index = 0; group_index < groups.size();
+         ++group_index) {
+      prepare_group_input(group_index, input, launch);
+      for (std::size_t task_begin = 0;
+           task_begin < groups[group_index].tasks.size();) {
+        const std::size_t task_end = choose_task_batch_end(
+            groups[group_index], task_begin, input.nseries);
+        CudaFfaGroupPeakSummary summary{};
+        bool discarded = false;
+        for (;;) {
+          summary = execute_task_batch(group_index, input, launch, task_begin,
+                                       task_end);
+          if (!summary.overflow) {
+            break;
+          }
+          try {
+            grow_peak_buffer(group_index, summary.count);
+          } catch (const CudaFfaCapacityError& error) {
+            result.complete = false;
+            result.warnings.push_back(
+                "Native CUDA reduction discarded task batch " +
+                std::to_string(task_begin) + "-" +
+                std::to_string(task_end) + ": " + error.what());
+            discarded = true;
+            break;
+          }
+        }
+        if (!discarded) {
+          const FfaCudaReductionSummary reduced = workspace_.reduction.reduce(
+              group_index, workspace_.detection_compact, summary.count,
+              search_options_.max_peaks,
+              program_.impl_->execution_options.stream);
+          if (reduced.raw_peak_limit_exceeded) {
+            throw std::runtime_error(
+                "CUDA FFA detection peak count exceeded max_peaks safety guard");
+          }
+          accumulator.add_raw_counts(reduced.raw_counts);
+          if (reduced.overflow) {
+            result.complete = false;
+            result.warnings.push_back(
+                "Native CUDA reduction discarded task batch " +
+                std::to_string(task_begin) + "-" + std::to_string(task_end) +
+                ": max_groups_per_series was exceeded");
+          }
+          // The selector writes retained groups before setting overflow. Keep
+          // that valid partial result; only the omitted groups are lossy.
+          collect_reduced_peaks(group_index, input.nseries, reduced.count,
+                                accumulator);
+        }
+        task_begin = task_end;
+      }
+    }
+    accumulator.finish(result);
+    return result;
+  }
+
+  class NativePeakAccumulator {
+   public:
+    NativePeakAccumulator(std::size_t nseries,
+                          const PeakReductionOptions& options,
+                          double frequency_tolerance_hz,
+                          std::uint64_t frequency_bucket_count,
+                          std::size_t max_peaks)
+        : nseries_(nseries), options_(options),
+          frequency_tolerance_hz_(frequency_tolerance_hz),
+          frequency_bucket_count_(frequency_bucket_count),
+          max_peaks_(max_peaks), raw_counts_(nseries, 0),
+          series_groups_(nseries) {}
+
+    void add(FfaBatchPeak peak) {
+      const std::size_t series_index = peak.series_index;
+      const std::uint64_t bucket = static_cast<std::uint64_t>(std::floor(
+          peak.peak.frequency / frequency_tolerance_hz_));
+      const std::uint64_t key =
+          static_cast<std::uint64_t>(series_index) *
+              frequency_bucket_count_ + bucket;
+      auto [group_it, inserted] = groups_.try_emplace(key);
+      auto& values = group_it->second;
+      if (inserted) {
+        series_groups_[series_index].insert(key);
+      }
+      values.push_back(std::move(peak));
+      std::sort(values.begin(), values.end(),
+                [](const FfaBatchPeak& lhs, const FfaBatchPeak& rhs) {
+                  return is_better_ffa_peak(lhs.peak, rhs.peak);
+                });
+      if (values.size() > options_.top_k_per_group) {
+        values.resize(options_.top_k_per_group);
+      }
+      trim_series(series_index);
+    }
+
+    void add_raw_counts(std::span<const std::size_t> counts) {
+      if (counts.size() != raw_counts_.size()) {
+        throw std::logic_error(
+            "CUDA FFA reduction raw count series size mismatch");
+      }
+      for (std::size_t index = 0; index < counts.size(); ++index) {
+        raw_counts_[index] = checked_add(
+            raw_counts_[index], counts[index],
+            "CUDA FFA reduction raw peak count overflow");
+        if (max_peaks_ != 0 && raw_counts_[index] > max_peaks_) {
+          throw std::runtime_error(
+              "CUDA FFA detection peak count exceeded max_peaks safety guard");
+        }
+      }
+    }
+
+    void finish(FfaBatchSearchResult& result) {
+      if (groups_discarded_) {
+        result.complete = false;
+        result.warnings.push_back(
+            "Native CUDA reduction discarded frequency groups because "
+            "max_groups_per_series was exceeded");
+      }
+      std::vector<std::vector<std::vector<FfaBatchPeak>>> per_series(
+          nseries_);
+      for (auto& entry : groups_) {
+        auto& values = entry.second;
+        if (!values.empty()) {
+          per_series[values.front().series_index].push_back(std::move(values));
+        }
+      }
+      for (auto& groups : per_series) {
+        std::sort(groups.begin(), groups.end(),
+                  [](const auto& lhs, const auto& rhs) {
+                    return is_better_ffa_peak(lhs.front().peak,
+                                              rhs.front().peak);
+                  });
+        if (groups.size() > options_.max_groups_per_series) {
+          result.complete = false;
+          groups.resize(options_.max_groups_per_series);
+        }
+        for (auto& group : groups) {
+          result.peaks.insert(result.peaks.end(), group.begin(), group.end());
+        }
+      }
+      std::sort(result.peaks.begin(), result.peaks.end(),
+                [](const FfaBatchPeak& lhs, const FfaBatchPeak& rhs) {
+                  if (lhs.series_index != rhs.series_index) {
+                    return lhs.series_index < rhs.series_index;
+                  }
+                  return is_better_ffa_peak(lhs.peak, rhs.peak);
+                });
+    }
+
+   private:
+    void trim_series(std::size_t series_index) {
+      auto& keys = series_groups_[series_index];
+      while (keys.size() > options_.max_groups_per_series) {
+        auto worst = keys.begin();
+        auto candidate = keys.begin();
+        ++candidate;
+        for (; candidate != keys.end(); ++candidate) {
+          const auto& worst_values = groups_.at(*worst);
+          const auto& candidate_values = groups_.at(*candidate);
+          if (is_better_ffa_peak(worst_values.front().peak,
+                                 candidate_values.front().peak) ||
+              (!is_better_ffa_peak(candidate_values.front().peak,
+                                   worst_values.front().peak) &&
+               *candidate > *worst)) {
+            worst = candidate;
+          }
+        }
+        groups_.erase(*worst);
+        keys.erase(worst);
+        groups_discarded_ = true;
+      }
+    }
+
+    std::size_t nseries_ = 0;
+    PeakReductionOptions options_{};
+    double frequency_tolerance_hz_ = 0.0;
+    std::uint64_t frequency_bucket_count_ = 0;
+    std::size_t max_peaks_ = 0;
+    std::vector<std::size_t> raw_counts_;
+    std::unordered_map<std::uint64_t, std::vector<FfaBatchPeak>> groups_;
+    std::vector<std::unordered_set<std::uint64_t>> series_groups_;
+    bool groups_discarded_ = false;
+  };
+
   struct CudaFfaGroupPeakSummary {
     std::size_t count = 0;
     bool overflow = false;
@@ -567,17 +781,47 @@ class CudaFfaTileRunner {
                "CUDA FFA peak overflow reset");
   }
 
-  CudaFfaGroupPeakSummary execute_prepare_group(
-      std::size_t group_index,
-      CudaTimeSeriesBatchView input,
-      const CudaLaunchOptions& launch) {
+  void prepare_group_input(std::size_t group_index,
+                           CudaTimeSeriesBatchView input,
+                           const CudaLaunchOptions& launch) {
     const auto& group = program_.execution_plan().groups()[group_index];
-    reset_group_peak_buffer();
     const auto prepared = workspace_.prepared_span(
         input.nseries, group.prepared_nsamples, program_.device_id());
     prepare_ffa_input_cuda(input, group.tasks.front().task, prepared, launch);
+  }
 
-    for (std::size_t task_index = 0; task_index < group.tasks.size();
+  std::size_t choose_task_batch_end(const CudaFfaPrepareGroup& group,
+                                    std::size_t begin,
+                                    std::size_t nseries) const {
+    const std::size_t per_series = workspace_.peak_capacity_records() / nseries;
+    std::size_t slots = 0;
+    std::size_t end = begin;
+    while (end < group.tasks.size()) {
+      const std::size_t next = checked_add(
+          slots, group.tasks[end].detection_slots_per_series,
+          "CUDA FFA task batch slot count overflow");
+      if (end != begin && next > per_series) {
+        break;
+      }
+      slots = next;
+      ++end;
+      if (next > per_series) {
+        break;
+      }
+    }
+    return std::max(end, begin + 1);
+  }
+
+  CudaFfaGroupPeakSummary execute_task_batch(
+      std::size_t group_index,
+      CudaTimeSeriesBatchView input,
+      const CudaLaunchOptions& launch,
+      std::size_t task_begin,
+      std::size_t task_end) {
+    const auto& group = program_.execution_plan().groups()[group_index];
+    reset_group_peak_buffer();
+
+    for (std::size_t task_index = task_begin; task_index < task_end;
          ++task_index) {
       const auto& task = group.tasks[task_index];
       const CudaFfaInput prepared_input = workspace_.prepared_input(
@@ -625,6 +869,40 @@ class CudaFfaTileRunner {
     };
   }
 
+  void collect_reduced_peaks(std::size_t group_index,
+                             std::size_t nseries,
+                             std::size_t selected_count,
+                             NativePeakAccumulator& accumulator) {
+    std::vector<FfaCudaPeak> compact_peaks(selected_count);
+    if (!compact_peaks.empty()) {
+      check_cuda(cudaMemcpy(compact_peaks.data(),
+                            workspace_.reduction.output().data(),
+                            compact_peaks.size() * sizeof(FfaCudaPeak),
+                            cudaMemcpyDeviceToHost),
+                 "CUDA FFA reduced peaks D2H");
+    }
+    const auto& group = program_.execution_plan().groups()[group_index];
+    for (const FfaCudaPeak& compact_peak : compact_peaks) {
+      if (compact_peak.task_index >= group.tasks.size()) {
+        throw std::logic_error("CUDA FFA reduced peak task index is invalid");
+      }
+      const auto& task = group.tasks[compact_peak.task_index];
+      if (compact_peak.series_index >= nseries ||
+          compact_peak.shift >= task.task.rows_eval ||
+          compact_peak.width_index >= task.detection_plan.boxcar_trials.size() ||
+          !std::isfinite(compact_peak.snr)) {
+        throw std::logic_error("CUDA FFA reduced peak metadata is invalid");
+      }
+      const FfaBoxcarTrial& trial = task.detection_plan.boxcar_trials[
+          compact_peak.width_index];
+      accumulator.add(FfaBatchPeak{
+          .series_index = compact_peak.series_index,
+          .peak = make_ffa_peak(task.task, trial, compact_peak.shift,
+                                compact_peak.phase, compact_peak.snr),
+      });
+    }
+  }
+
   void grow_peak_buffer(std::size_t group_index, std::size_t required_records) {
     const auto& options = program_.impl_->execution_options;
     // Detection appends results from every task in a prepare group to the
@@ -638,7 +916,7 @@ class CudaFfaTileRunner {
         plan_records, options.max_peak_buffer_bytes / sizeof(FfaCudaPeak));
     const std::size_t current_records = workspace_.peak_capacity_records();
     if (required_records > max_records) {
-      throw std::runtime_error(
+      throw CudaFfaCapacityError(
           "CUDA FFA compact peak buffer exceeded max_peak_buffer_bytes: "
           "group_index=" + std::to_string(group_index) +
           " observed_peak_records=" + std::to_string(required_records) +
@@ -654,7 +932,8 @@ class CudaFfaTileRunner {
     const std::size_t next_records =
         std::min(max_records, std::max(doubled_records, required_records));
     if (next_records <= current_records) {
-      throw std::logic_error("CUDA FFA peak buffer growth made no progress");
+      throw CudaFfaCapacityError(
+          "CUDA FFA peak buffer growth made no progress");
     }
     const std::size_t next_bytes = checked_multiply(
         next_records, sizeof(FfaCudaPeak),
@@ -664,10 +943,12 @@ class CudaFfaTileRunner {
                         workspace_.shape.detection_compact_bytes,
                     next_bytes, "CUDA FFA workspace byte size overflow") >
             options.workspace_bytes_limit) {
-      throw std::runtime_error(
+      throw CudaFfaCapacityError(
           "CUDA FFA compact peak buffer growth exceeds workspace_bytes_limit");
     }
-    workspace_.resize_peak_buffer(next_records);
+    workspace_.resize_peak_buffer(
+        next_records, program_.execution_plan(), program_.impl_->execution_options,
+        program_.device_id());
   }
 
   void enqueue_task_detection(std::size_t group_index,
@@ -843,6 +1124,8 @@ FfaSearchResult search_ffa_raw_cuda(
       options);
   FfaSearchResult result;
   result.peaks.reserve(batch.peaks.size());
+  result.complete = batch.complete;
+  result.warnings = std::move(batch.warnings);
   for (const FfaBatchPeak& peak : batch.peaks) {
     if (peak.series_index != 0) {
       throw std::logic_error("CUDA FFA single-series result has invalid index");

@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <filesystem>
 #include <iosfwd>
+#include <span>
+#include <vector>
 
 namespace gaffa_search {
 
@@ -16,7 +18,11 @@ struct OutputPaths {
 
 OutputPaths make_output_paths(const Config& config,
                               const std::filesystem::path& input);
-void validate_output_paths(const OutputPaths& paths, bool overwrite);
+std::vector<OutputPaths> plan_output_paths(
+    const Config& config,
+    std::span<const std::filesystem::path> inputs);
+void validate_output_plan(std::span<const OutputPaths> outputs,
+                          bool overwrite);
 
 // limit == 0 means render every final candidate.
 void render_human_report(std::ostream& output, const Config& config,

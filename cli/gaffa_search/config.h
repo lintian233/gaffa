@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gaffa/peak_reduction.h"
 #include "gaffa/periodic_peak.h"
 
 #include <cstddef>
@@ -48,6 +49,7 @@ struct SearchRangeConfig {
   std::size_t bins_max = 0;
   WindowMode window_mode = WindowMode::Truncate;
   MotionRangeConfig motion{};
+  gaffa::PeakReductionOptions reduction{};
 };
 
 inline constexpr std::size_t kDefaultNativeCudaMaxPeakMemoryBytes =

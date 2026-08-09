@@ -17,7 +17,7 @@ license = "GPL-3.0-only"
 license-files = ["LICENSE"]
 dependencies = [
   "numpy>=1.26,<2.5",
-  "typing_extensions>=4.7",
+  "typing_extensions>=4.1",
 ]
 
 [project.scripts]
