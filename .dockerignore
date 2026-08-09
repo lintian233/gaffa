@@ -1,0 +1,16 @@
+.git
+.conan2
+.coverage
+.pytest_cache
+.ruff_cache
+.vscode
+__pycache__
+build
+coverage
+dist
+reports
+wheelhouse
+tests/data
+*.pyc
+*.nsys-rep
+*.sqlite

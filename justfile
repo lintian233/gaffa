@@ -87,6 +87,39 @@ wheel: deps-release
       -Ccmake.args="-Dpybind11_DIR=$PWD/build/conan/release" \
       -Ccmake.args="-DCMAKE_BUILD_TYPE=Release"
 
+# Reproducible CUDA 12 / Loki wheel. Loki is supplied as an independent
+# BuildKit context so no developer-specific absolute path enters the image.
+wheel-loki-manylinux loki_src="../loki":
+    mkdir -p wheelhouse
+    docker buildx build \
+        --build-context loki="{{loki_src}}" \
+        --file packaging/manylinux-cuda12/Dockerfile \
+        --target wheel \
+        --output type=local,dest=wheelhouse \
+        .
+
+# Build the reusable CUDA 12 manylinux toolchain referenced by cibuildwheel.
+wheel-loki-toolchain-image:
+    docker buildx build \
+        --file packaging/manylinux-cuda12/Dockerfile \
+        --target toolchain \
+        --tag gaffa-manylinux_2_28-cuda12:12.8 \
+        --load \
+        .
+
+wheel-loki-runtime-image loki_src="../loki" pypi_index_url="https://pypi.org/simple":
+    docker buildx build \
+        --build-context loki="{{loki_src}}" \
+        --build-arg RUNTIME_PIP_INDEX_URL="{{pypi_index_url}}" \
+        --file packaging/manylinux-cuda12/Dockerfile \
+        --target runtime-test \
+        --load \
+        --tag gaffa-wheel-runtime-test:cuda12.8 \
+        .
+
+test-wheel-loki loki_src="../loki" pypi_index_url="https://pypi.org/simple": (wheel-loki-runtime-image loki_src pypi_index_url)
+    docker run --rm --gpus all gaffa-wheel-runtime-test:cuda12.8
+
 # Optional Loki integration. CMake discovers Loki through standard package
 # paths, LOKI_ROOT, or the conventional $HOME/opt/loki prefix.
 

@@ -15,6 +15,14 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 option(GAFFA_ENABLE_COVERAGE "Build host C++ coverage instrumentation" OFF)
 option(GAFFA_ENABLE_LOKI
        "Build optional Loki P-FFA backend and integration tests" OFF)
+option(GAFFA_BUNDLE_LOKI
+       "Bundle the Loki shared runtime into the Python package" OFF)
+set(GAFFA_LOKI_LICENSE_FILE "" CACHE FILEPATH
+    "Path to the Loki license file when bundling its runtime")
+
+if(GAFFA_BUNDLE_LOKI AND NOT GAFFA_ENABLE_LOKI)
+  message(FATAL_ERROR "GAFFA_BUNDLE_LOKI requires GAFFA_ENABLE_LOKI=ON")
+endif()
 
 if(GAFFA_ENABLE_COVERAGE)
   if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -44,12 +52,14 @@ if(GAFFA_ENABLE_LOKI)
   endif()
   find_package(loki 0.0.3 CONFIG REQUIRED HINTS ${GAFFA_LOKI_HINTS})
 
+  set(GAFFA_LOKI_IMPORTED_CONFIGURATION)
   foreach(GAFFA_LOKI_CONFIGURATION RELEASE RELWITHDEBINFO DEBUG MINSIZEREL)
     get_target_property(
       GAFFA_LOKI_LIBRARY_LOCATION loki::loki
       "IMPORTED_LOCATION_${GAFFA_LOKI_CONFIGURATION}"
     )
     if(GAFFA_LOKI_LIBRARY_LOCATION)
+      set(GAFFA_LOKI_IMPORTED_CONFIGURATION "${GAFFA_LOKI_CONFIGURATION}")
       break()
     endif()
   endforeach()
@@ -62,6 +72,25 @@ if(GAFFA_ENABLE_LOKI)
   get_filename_component(
     GAFFA_LOKI_LIBRARY_DIR "${GAFFA_LOKI_LIBRARY_LOCATION}" DIRECTORY
   )
+
+  if(GAFFA_BUNDLE_LOKI)
+    if(GAFFA_LOKI_IMPORTED_CONFIGURATION)
+      get_target_property(
+        GAFFA_LOKI_LIBRARY_SONAME loki::loki
+        "IMPORTED_SONAME_${GAFFA_LOKI_IMPORTED_CONFIGURATION}"
+      )
+    else()
+      get_target_property(GAFFA_LOKI_LIBRARY_SONAME loki::loki IMPORTED_SONAME)
+    endif()
+    if(NOT GAFFA_LOKI_LIBRARY_SONAME)
+      message(FATAL_ERROR "loki::loki must expose an imported SONAME for wheel bundling")
+    endif()
+    if(NOT EXISTS "${GAFFA_LOKI_LICENSE_FILE}")
+      message(FATAL_ERROR
+        "GAFFA_LOKI_LICENSE_FILE must name the Loki license when bundling its runtime"
+      )
+    endif()
+  endif()
 endif()
 
 file(GLOB_RECURSE GAFFA_CORE_SOURCES CONFIGURE_DEPENDS
@@ -156,9 +185,14 @@ if(GAFFA_ENABLE_LOKI)
   )
   target_link_libraries(_loki PRIVATE gaffa_loki)
   target_include_directories(_loki PRIVATE include)
+  set(GAFFA_LOKI_EXTENSION_INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}")
+  if(GAFFA_BUNDLE_LOKI)
+    set(GAFFA_LOKI_EXTENSION_INSTALL_RPATH "$ORIGIN/.libs")
+  endif()
   set_target_properties(_loki PROPERTIES
     BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
-    INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    INSTALL_RPATH "${GAFFA_LOKI_EXTENSION_INSTALL_RPATH}"
+    INSTALL_REMOVE_ENVIRONMENT_RPATH ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     LINKER_LANGUAGE CUDA
   )
@@ -340,9 +374,18 @@ set_target_properties(gaffa_search PROPERTIES
 if(GAFFA_ENABLE_LOKI)
   target_link_libraries(gaffa_search PRIVATE gaffa_loki)
   target_compile_definitions(gaffa_search PRIVATE GAFFA_SEARCH_ENABLE_LOKI)
+  set(GAFFA_LOKI_CLI_INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}")
+  if(GAFFA_BUNDLE_LOKI)
+    if(SKBUILD)
+      set(GAFFA_LOKI_CLI_INSTALL_RPATH "$ORIGIN/../.libs")
+    else()
+      set(GAFFA_LOKI_CLI_INSTALL_RPATH "$ORIGIN/../gaffa/.libs")
+    endif()
+  endif()
   set_target_properties(gaffa_search PROPERTIES
     BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
-    INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    INSTALL_RPATH "${GAFFA_LOKI_CLI_INSTALL_RPATH}"
+    INSTALL_REMOVE_ENVIRONMENT_RPATH ON
   )
 endif()
 
@@ -353,10 +396,22 @@ endif()
 install(TARGETS _core LIBRARY DESTINATION gaffa)
 if(GAFFA_ENABLE_LOKI)
   install(TARGETS _loki LIBRARY DESTINATION gaffa)
+  if(GAFFA_BUNDLE_LOKI)
+    install(
+      FILES "${GAFFA_LOKI_LIBRARY_LOCATION}"
+      DESTINATION gaffa/.libs
+      RENAME "${GAFFA_LOKI_LIBRARY_SONAME}"
+    )
+    install(
+      FILES "${GAFFA_LOKI_LICENSE_FILE}"
+      DESTINATION gaffa/licenses
+      RENAME LOKI_LICENSE
+    )
+  endif()
 endif()
 
 if(SKBUILD)
-  set(GAFFA_RUNTIME_INSTALL_DIR "${SKBUILD_SCRIPTS_DIR}")
+  set(GAFFA_RUNTIME_INSTALL_DIR "gaffa/_bin")
 else()
   include(GNUInstallDirs)
   set(GAFFA_RUNTIME_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}")

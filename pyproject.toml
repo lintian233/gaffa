@@ -2,10 +2,7 @@
 requires = [
   "scikit-build-core>=0.10",
   "wheel",
-  "cmake>=3.26",
-  "ninja",
-  "pybind11>=2.13",
-  "conan>=2.0"
+  "pybind11>=2.13"
 ]
 build-backend = "scikit_build_core.build"
 
@@ -15,10 +12,15 @@ version = "0.1.0"
 requires-python = ">=3.12"
 readme = "README.md"
 authors = [{ name = "lintian233" }]
-description = "CUDA/C++ and Python hybrid project scaffold."
+description = "CUDA/C++ and Python toolkit for pulsar data processing and FFA searches."
+license = "GPL-3.0-only"
+license-files = ["LICENSE"]
 dependencies = [
   "numpy>=1.26,<2.5",
 ]
+
+[project.scripts]
+gaffa_search = "gaffa._cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -33,7 +35,7 @@ wheel.packages = ["python/gaffa"]
 build-dir = "build/{wheel_tag}"
 
 [tool.scikit-build.cmake]
-minimum-version = "3.26"
+version = ">=3.26"
 
 [tool.scikit-build.cmake.define]
 CMAKE_BUILD_TYPE = "Release"
@@ -63,7 +65,8 @@ archs = ["x86_64"]
 skip = ["*-musllinux_*", "pp*"]
 
 [tool.cibuildwheel.linux]
-repair-wheel-command = "auditwheel repair -w {dest_dir} {wheel}"
+manylinux-x86_64-image = "gaffa-manylinux_2_28-cuda12:12.8"
+repair-wheel-command = "auditwheel repair --plat manylinux_2_28_x86_64 --exclude libcuda.so.1 --exclude libcudart.so.12 --exclude libcufft.so.11 --exclude libcurand.so.10 -w {dest_dir} {wheel}"
 
 
 [tool.cibuildwheel.environment]
@@ -71,7 +74,6 @@ CMAKE_BUILD_TYPE = "Release"
 CMAKE_CUDA_ARCHITECTURES = "75;80;86;89;90"
 CUDA_HOME = "/usr/local/cuda"
 CUDACXX = "/usr/local/cuda/bin/nvcc"
-NVCC_PREPEND_FLAGS = "--allow-unsupported-compiler"
 
 [tool.ruff]
 line-length = 100
