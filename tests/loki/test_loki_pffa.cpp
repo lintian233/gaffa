@@ -180,6 +180,34 @@ TEST(LokiPffaProgram, SearchesOneNormalisedDeviceSeries) {
   }
 }
 
+TEST(LokiPffaProgram, SearchesOnExplicitProgramDeviceStream) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+
+  const auto plan = gaffa::make_loki_pffa_plan(
+      kNsamples, kTsampSeconds,
+      {.frequency_hz = {.minimum = 100.0, .maximum = 110.0}},
+      test_plan_options());
+  gaffa::LokiPffaProgram program(plan);
+  const std::vector<float> signal = make_sinusoid();
+  gaffa::CudaDeviceBuffer<float> signal_device(signal.size());
+  ASSERT_EQ(cudaMemcpy(signal_device.data(), signal.data(), signal_device.bytes(),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+
+  cudaStream_t stream = nullptr;
+  ASSERT_EQ(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), cudaSuccess);
+  const auto& signal_device_const = signal_device;
+  const auto peaks = program.search(
+      signal_device_const.as_span(0),
+      gaffa::LokiPffaExecutionOptions{.stream = stream});
+
+  expect_common_peak_fields(peaks, gaffa::MotionOrder::Frequency);
+  EXPECT_EQ(cudaStreamDestroy(stream), cudaSuccess);
+}
+
 TEST(LokiPffaProgram, SearchesBatchAndAttachesDmIdentity) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";

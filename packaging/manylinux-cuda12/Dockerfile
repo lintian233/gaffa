@@ -51,14 +51,30 @@ RUN packaging/manylinux-cuda12/build-wheel.sh
 FROM scratch AS wheel
 COPY --from=builder /wheelhouse/ /
 
-FROM cuda-base AS runtime-test
+FROM ${MANYLINUX_IMAGE} AS cuda-runtime-base
 
-ENV PATH=/opt/python/cp312-cp312/bin:/usr/local/cuda-12.8/bin:${PATH}
-ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64
+ARG CUDA_RUNTIME_SERIES=12-1
+RUN curl --fail --location \
+       https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo \
+       --output /etc/yum.repos.d/cuda-rhel8.repo \
+    && dnf install -y \
+       "cuda-cudart-${CUDA_RUNTIME_SERIES}" \
+       "libcufft-${CUDA_RUNTIME_SERIES}" \
+       "libcurand-${CUDA_RUNTIME_SERIES}" \
+    && dnf clean all
+
+FROM cuda-runtime-base AS runtime-test
+
+ENV PATH=/opt/python/cp312-cp312/bin:/usr/local/cuda-12.1/bin:${PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64
 
 COPY --from=builder /wheelhouse /wheelhouse
 COPY packaging/manylinux-cuda12/runtime-smoke.py /opt/gaffa/runtime-smoke.py
+COPY packaging/manylinux-cuda12/verify-wheel.py /opt/gaffa/verify-wheel.py
 ARG RUNTIME_PIP_INDEX_URL=https://pypi.org/simple
+RUN /opt/python/cp312-cp312/bin/python /opt/gaffa/verify-wheel.py \
+      /wheelhouse/*.whl \
+      --cuda-runtime-root /usr/local/cuda-12.1/targets/x86_64-linux/lib
 RUN --mount=type=cache,target=/root/.cache/pip \
     /opt/python/cp312-cp312/bin/python -m pip install \
       --index-url "${RUNTIME_PIP_INDEX_URL}" \

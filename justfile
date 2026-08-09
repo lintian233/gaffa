@@ -107,6 +107,8 @@ wheel-loki-toolchain-image:
         --load \
         .
 
+# Build with CUDA 12.8, then install and run the wheel against the minimum
+# supported CUDA 12.1 user-space runtime.
 wheel-loki-runtime-image loki_src="../loki" pypi_index_url="https://pypi.org/simple":
     docker buildx build \
         --build-context loki="{{loki_src}}" \
@@ -114,11 +116,11 @@ wheel-loki-runtime-image loki_src="../loki" pypi_index_url="https://pypi.org/sim
         --file packaging/manylinux-cuda12/Dockerfile \
         --target runtime-test \
         --load \
-        --tag gaffa-wheel-runtime-test:cuda12.8 \
+        --tag gaffa-wheel-runtime-test:cuda12.1 \
         .
 
 test-wheel-loki loki_src="../loki" pypi_index_url="https://pypi.org/simple": (wheel-loki-runtime-image loki_src pypi_index_url)
-    docker run --rm --gpus all gaffa-wheel-runtime-test:cuda12.8
+    docker run --rm --gpus all gaffa-wheel-runtime-test:cuda12.1
 
 # Optional Loki integration. CMake discovers Loki through standard package
 # paths, LOKI_ROOT, or the conventional $HOME/opt/loki prefix.

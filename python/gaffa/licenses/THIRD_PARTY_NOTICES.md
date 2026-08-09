@@ -10,5 +10,5 @@ runtime components:
 - yaml-cpp 0.8.0, MIT License; linked statically into the command-line tool.
 
 The wheel does not bundle the NVIDIA kernel driver, CUDA runtime, cuFFT, or
-cuRAND. Those components are supplied by the target CUDA 12 installation and
-remain subject to NVIDIA's applicable license terms.
+cuRAND. Those components are supplied by the target CUDA 12.1-or-newer
+installation and remain subject to NVIDIA's applicable license terms.

@@ -71,7 +71,7 @@ repair-wheel-command = "auditwheel repair --plat manylinux_2_28_x86_64 --exclude
 
 [tool.cibuildwheel.environment]
 CMAKE_BUILD_TYPE = "Release"
-CMAKE_CUDA_ARCHITECTURES = "75;80;86;89;90"
+CMAKE_CUDA_ARCHITECTURES = "75;80;86;89;90;100;120"
 CUDA_HOME = "/usr/local/cuda"
 CUDACXX = "/usr/local/cuda/bin/nvcc"
 

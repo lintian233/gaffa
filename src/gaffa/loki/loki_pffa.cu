@@ -8,6 +8,7 @@
 #include <loki/utils/workspace.hpp>
 
 #include <cuda/std/span>
+#include <cuda.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -39,6 +40,37 @@ void check_cuda(cudaError_t status, const char* operation) {
     throw std::runtime_error(std::string(operation) + ": " +
                              cudaGetErrorString(status));
   }
+}
+
+void check_cuda_driver(CUresult status, const char* operation) {
+  if (status == CUDA_SUCCESS) {
+    return;
+  }
+  const char* message = nullptr;
+  (void)cuGetErrorString(status, &message);
+  throw std::runtime_error(std::string(operation) + ": " +
+                           (message != nullptr
+                                ? message
+                                : "unknown CUDA driver error"));
+}
+
+int cuda_stream_device(cudaStream_t stream) {
+  CUcontext stream_context = nullptr;
+  check_cuda_driver(cuStreamGetCtx(reinterpret_cast<CUstream>(stream),
+                                   &stream_context),
+                    "cuStreamGetCtx");
+  check_cuda_driver(cuCtxPushCurrent(stream_context), "cuCtxPushCurrent");
+
+  CUdevice stream_device = -1;
+  const CUresult device_status = cuCtxGetDevice(&stream_device);
+  CUcontext popped_context = nullptr;
+  const CUresult pop_status = cuCtxPopCurrent(&popped_context);
+  check_cuda_driver(pop_status, "cuCtxPopCurrent");
+  if (popped_context != stream_context) {
+    throw std::runtime_error("CUDA context stack changed while querying Loki stream");
+  }
+  check_cuda_driver(device_status, "cuCtxGetDevice");
+  return static_cast<int>(stream_device);
 }
 
 class DeviceGuard final {
@@ -489,10 +521,8 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
   ActiveSearchGuard active_search(impl_->search_active);
   DeviceGuard guard(impl_->options.device_id);
   if (execution_options.stream != nullptr) {
-    int stream_device = -1;
-    check_cuda(cudaStreamGetDevice(execution_options.stream, &stream_device),
-               "cudaStreamGetDevice");
-    if (stream_device != impl_->options.device_id) {
+    if (cuda_stream_device(execution_options.stream) !=
+        impl_->options.device_id) {
       throw std::invalid_argument("Loki P-FFA stream belongs to another CUDA device");
     }
   }
