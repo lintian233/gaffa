@@ -158,6 +158,7 @@ if(GAFFA_ENABLE_LOKI)
   target_include_directories(_loki PRIVATE include)
   set_target_properties(_loki PROPERTIES
     BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     LINKER_LANGUAGE CUDA
   )
@@ -341,6 +342,7 @@ if(GAFFA_ENABLE_LOKI)
   target_compile_definitions(gaffa_search PRIVATE GAFFA_SEARCH_ENABLE_LOKI)
   set_target_properties(gaffa_search PROPERTIES
     BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
   )
 endif()
 
@@ -352,3 +354,11 @@ install(TARGETS _core LIBRARY DESTINATION gaffa)
 if(GAFFA_ENABLE_LOKI)
   install(TARGETS _loki LIBRARY DESTINATION gaffa)
 endif()
+
+if(SKBUILD)
+  set(GAFFA_RUNTIME_INSTALL_DIR "${SKBUILD_SCRIPTS_DIR}")
+else()
+  include(GNUInstallDirs)
+  set(GAFFA_RUNTIME_INSTALL_DIR "${CMAKE_INSTALL_BINDIR}")
+endif()
+install(TARGETS gaffa_search RUNTIME DESTINATION "${GAFFA_RUNTIME_INSTALL_DIR}")

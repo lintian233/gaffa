@@ -26,13 +26,14 @@ export CXX="$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++"
 export CMAKE_CUDA_HOST_COMPILER="$CXX"
 export NVCC_CCBIN="$CXX"
 export CONAN_HOME="$PWD/.conan2"
+export LOKI_ROOT="${LOKI_ROOT:-$HOME/opt/loki}"
 
 # Avoid leaking system CUDA headers/libs into conda CUDA builds.
 export CPATH="$CONDA_PREFIX/targets/x86_64-linux/include"
 export C_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include"
 export CPLUS_INCLUDE_PATH="$CONDA_PREFIX/targets/x86_64-linux/include"
 export LIBRARY_PATH="$CONDA_PREFIX/targets/x86_64-linux/lib"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$LOKI_ROOT/lib:$CONDA_PREFIX/lib:$CONDA_PREFIX/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 echo "CONDA_PREFIX=$CONDA_PREFIX"
 echo "CUDA_HOME=$CUDA_HOME"
@@ -41,6 +42,7 @@ echo "CC=$CC"
 echo "CXX=$CXX"
 echo "CMAKE_CUDA_HOST_COMPILER=$CMAKE_CUDA_HOST_COMPILER"
 echo "CONAN_HOME=$CONAN_HOME"
+echo "LOKI_ROOT=$LOKI_ROOT"
 echo
 
 which python
