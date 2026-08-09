@@ -10,6 +10,8 @@
 
 namespace gaffa_search {
 
+class ProgressTracker;
+
 struct FileTiming {
   double read_seconds = 0.0;
   double dedispersion_seconds = 0.0;
@@ -57,5 +59,6 @@ struct RunResult {
 };
 
 RunResult execute(const Config& config);
+RunResult execute(const Config& config, ProgressTracker& progress);
 
 }  // namespace gaffa_search

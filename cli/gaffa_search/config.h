@@ -50,6 +50,19 @@ struct SearchRangeConfig {
   MotionRangeConfig motion{};
 };
 
+inline constexpr std::size_t kDefaultNativeCudaMaxPeakMemoryBytes =
+    1024ULL * 1024ULL * 1024ULL;
+
+struct NativeCudaResourceConfig {
+  // Maximum device memory reserved for compact Native CUDA FFA peaks.
+  std::size_t max_peak_memory_bytes =
+      kDefaultNativeCudaMaxPeakMemoryBytes;
+};
+
+struct ResourceConfig {
+  NativeCudaResourceConfig native_cuda{};
+};
+
 struct Config {
   std::filesystem::path input;
   std::vector<DmRangeConfig> dm_ranges;
@@ -66,6 +79,8 @@ struct Config {
   double running_median_seconds = 5.0;
   std::size_t subband_channels = 32;
   std::size_t ndm_per_nominal = 32;
+
+  ResourceConfig resources{};
 
   float snr_threshold = 7.5F;
   std::size_t max_peaks = 0;

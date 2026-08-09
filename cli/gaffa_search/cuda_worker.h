@@ -27,7 +27,8 @@ class CudaWorker {
                       std::size_t source_nsamples, double tsamp,
                       float snr_threshold, std::size_t max_peaks,
                       const std::string& preprocess,
-                      double running_median_seconds);
+                      double running_median_seconds,
+                      std::size_t max_peak_buffer_bytes);
 
   gaffa::DmPeaks run_native(
       std::span<const std::uint32_t> tile, std::size_t nseries,

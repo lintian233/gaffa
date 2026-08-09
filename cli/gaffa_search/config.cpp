@@ -195,6 +195,10 @@ void validate_config_impl(const Config& config) {
       config.ndm_per_nominal == 0) {
     throw std::invalid_argument("tile and subband sizes must be > 0");
   }
+  if (config.resources.native_cuda.max_peak_memory_bytes == 0) {
+    throw std::invalid_argument(
+        "native CUDA max peak memory must be greater than zero");
+  }
   if (!std::isfinite(config.snr_threshold)) {
     throw std::invalid_argument("snr threshold must be finite");
   }

@@ -1,7 +1,12 @@
 #include "config.h"
 #include "output.h"
+#include "progress_renderer.h"
 #include "report.h"
 #include "search.h"
+
+#ifdef GAFFA_SEARCH_ENABLE_LOKI
+#include "gaffa/loki_logging.h"
+#endif
 
 #include <cstdlib>
 #include <exception>
@@ -11,7 +16,16 @@ int main(int argc, char** argv) {
   try {
     const gaffa_search::Config config =
         gaffa_search::parse_arguments(argc, argv);
-    const gaffa_search::RunResult result = gaffa_search::execute(config);
+#ifdef GAFFA_SEARCH_ENABLE_LOKI
+    gaffa::suppress_loki_info();
+#endif
+    gaffa_search::RunResult result;
+    {
+      gaffa_search::ProgressTracker progress;
+      gaffa_search::ProgressRenderer renderer(std::cerr);
+      gaffa_search::ProgressSession session(renderer, progress);
+      result = gaffa_search::execute(config, progress);
+    }
     for (const gaffa_search::FileResult& file : result.files) {
       const gaffa_search::Report report = gaffa_search::make_report(file);
       if (config.candidate_output) {

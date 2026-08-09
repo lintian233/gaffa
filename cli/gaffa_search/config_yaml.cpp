@@ -4,9 +4,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <filesystem>
 #include <initializer_list>
 #include <limits>
+#include <array>
 #include <string>
 #include <string_view>
 #include <stdexcept>
@@ -81,6 +83,69 @@ std::size_t nonnegative_size(const YAML::Node& node, std::string_view path) {
                                 " must be a non-negative integer");
   }
   return static_cast<std::size_t>(value);
+}
+
+std::size_t byte_size(const YAML::Node& node, std::string_view path) {
+  const std::string text = scalar<std::string>(node, path);
+  struct Unit {
+    std::string_view suffix;
+    std::size_t multiplier;
+  };
+  constexpr std::array<Unit, 7> units = {{
+      {"KiB", 1024ULL},
+      {"MiB", 1024ULL * 1024ULL},
+      {"GiB", 1024ULL * 1024ULL * 1024ULL},
+      {"KB", 1000ULL},
+      {"MB", 1000ULL * 1000ULL},
+      {"GB", 1000ULL * 1000ULL * 1000ULL},
+      {"B", 1ULL},
+  }};
+
+  const Unit* selected = nullptr;
+  for (const Unit& unit : units) {
+    if (text.size() >= unit.suffix.size() &&
+        std::string_view(text).ends_with(unit.suffix)) {
+      selected = &unit;
+      break;
+    }
+  }
+  if (selected == nullptr) {
+    throw std::invalid_argument(std::string(path) +
+                                " must use a size suffix (B, KB, MB, GB, "
+                                "KiB, MiB, or GiB)");
+  }
+
+  const std::string_view number(
+      text.data(), text.size() - selected->suffix.size());
+  if (number.empty() ||
+      !std::all_of(number.begin(), number.end(), [](unsigned char value) {
+        return std::isdigit(value) != 0;
+      })) {
+    throw std::invalid_argument(std::string(path) + " has invalid size '" +
+                                text + "'");
+  }
+
+  unsigned long long value = 0;
+  try {
+    std::size_t position = 0;
+    value = std::stoull(std::string(number), &position);
+    if (position != number.size()) {
+      throw std::invalid_argument("trailing characters");
+    }
+  } catch (const std::exception& error) {
+    throw std::invalid_argument(std::string(path) + " has invalid size '" +
+                                text + "': " + error.what());
+  }
+
+  const unsigned long long multiplier = selected->multiplier;
+  if (value > std::numeric_limits<std::size_t>::max() / multiplier) {
+    throw std::invalid_argument(std::string(path) + " is too large");
+  }
+  const unsigned long long bytes = value * multiplier;
+  if (bytes > std::numeric_limits<std::size_t>::max()) {
+    throw std::invalid_argument(std::string(path) + " is too large");
+  }
+  return static_cast<std::size_t>(bytes);
 }
 
 std::filesystem::path resolve_path(const std::filesystem::path& config_path,
@@ -291,6 +356,28 @@ void parse_dedispersion(const YAML::Node& root, Config& config) {
   }
 }
 
+void parse_resources(const YAML::Node& root, Config& config) {
+  const YAML::Node resources = root["resources"];
+  if (!resources) {
+    return;
+  }
+  require_map(resources, "resources");
+  reject_unknown_keys(resources, {"native_cuda"}, "resources");
+
+  const YAML::Node native_cuda = resources["native_cuda"];
+  if (!native_cuda) {
+    return;
+  }
+  require_map(native_cuda, "resources.native_cuda");
+  reject_unknown_keys(native_cuda, {"max_peak_memory"},
+                      "resources.native_cuda");
+  if (native_cuda["max_peak_memory"]) {
+    config.resources.native_cuda.max_peak_memory_bytes = byte_size(
+        native_cuda["max_peak_memory"],
+        "resources.native_cuda.max_peak_memory");
+  }
+}
+
 void parse_search(const YAML::Node& root, Config& config) {
   const YAML::Node search = required_node(root, "search", "search");
   require_map(search, "search");
@@ -397,7 +484,8 @@ Config parse_yaml(const YAML::Node& root, const std::filesystem::path& path) {
   require_map(root, "root");
   reject_unknown_keys(root,
                       {"version", "input", "dm_ranges", "dedispersion",
-                       "search", "preprocess", "candidate", "output"},
+                       "search", "preprocess", "candidate", "resources",
+                       "output"},
                       "root");
   const int version = scalar<int>(required_node(root, "version", "version"),
                                   "version");
@@ -410,6 +498,7 @@ Config parse_yaml(const YAML::Node& root, const std::filesystem::path& path) {
   parse_input(root, path, config);
   parse_dm_ranges(root, config);
   parse_dedispersion(root, config);
+  parse_resources(root, config);
   parse_search(root, config);
   parse_preprocess(root, config);
   parse_candidate(root, config);

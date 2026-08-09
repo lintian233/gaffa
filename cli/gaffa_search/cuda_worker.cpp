@@ -390,7 +390,8 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
                                 std::size_t source_nsamples, double tsamp,
                                 float threshold, std::size_t peak_limit,
                                 const std::string& preprocess_name,
-                                double median_seconds) {
+                                double median_seconds,
+                                std::size_t max_peak_buffer_bytes) {
   impl_->prepare_common(search, source_nsamples, tsamp, threshold,
                         peak_limit, preprocess_name, median_seconds);
   const double min_period =
@@ -411,8 +412,9 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
       plan, gaffa::CudaFfaProgramOptions{.device_id = impl_->device_id},
       gaffa::CudaFfaExecutionOptions{
           .series_tile_size = impl_->tile_capacity,
-          .initial_peak_buffer_bytes = 64ULL * 1024ULL * 1024ULL,
-          .max_peak_buffer_bytes = 1024ULL * 1024ULL * 1024ULL,
+          .initial_peak_buffer_bytes = std::min<std::size_t>(
+              64ULL * 1024ULL * 1024ULL, max_peak_buffer_bytes),
+          .max_peak_buffer_bytes = max_peak_buffer_bytes,
           .stream = impl_->stream->stream,
       });
   impl_->active_backend = Impl::ActiveBackend::Native;

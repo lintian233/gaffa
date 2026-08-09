@@ -208,6 +208,9 @@ dedispersion:
   device: 1
   subband_channels: 16
   ndm_per_nominal: 8
+resources:
+  native_cuda:
+    max_peak_memory: 4GiB
 search:
   dm_tile_size: 4
   devices:
@@ -247,6 +250,8 @@ output:
   EXPECT_EQ(config.dedispersion_device, 1);
   EXPECT_EQ(config.subband_channels, 16U);
   EXPECT_EQ(config.ndm_per_nominal, 8U);
+  EXPECT_EQ(config.resources.native_cuda.max_peak_memory_bytes,
+            4ULL * 1024ULL * 1024ULL * 1024ULL);
   EXPECT_EQ(config.dm_tile_size, 4U);
   ASSERT_EQ(config.native_cuda_devices, (std::vector<int>{0, 1}));
   ASSERT_EQ(config.loki_cuda_devices, (std::vector<int>{2}));
@@ -311,6 +316,47 @@ search:
   EXPECT_THROW(
       parse({"gaffa_search", "--config", native_window.path().string()}),
       std::invalid_argument);
+}
+
+TEST(GaffaSearchConfig, ParsesNativeCudaPeakMemoryUnits) {
+  TemporaryYaml yaml(R"(
+version: 1
+input: {path: observation.fil}
+dm_ranges: [{low: 0.0, step: 1.0, count: 2}]
+resources:
+  native_cuda: {max_peak_memory: 256MiB}
+search:
+  ranges:
+    - backend: native-cpu
+      period: {min: 0.1, max: 1.0}
+      bins: {min: 16, max: 32}
+)");
+
+  const auto config = parse({"gaffa_search", "--config", yaml.path().string()});
+  EXPECT_EQ(config.resources.native_cuda.max_peak_memory_bytes,
+            256ULL * 1024ULL * 1024ULL);
+}
+
+TEST(GaffaSearchConfig, RejectsInvalidNativeCudaPeakMemory) {
+  for (const std::string value : {"256", "0GiB", "-1GiB",
+                                  "999999999999999999999GiB"}) {
+    TemporaryYaml yaml("version: 1\n"
+                        "input: {path: observation.fil}\n"
+                        "dm_ranges: [{low: 0.0, step: 1.0, count: 2}]\n"
+                        "resources:\n"
+                        "  native_cuda:\n"
+                        "    max_peak_memory: " +
+                        value +
+                        "\n"
+                        "search:\n"
+                        "  ranges:\n"
+                        "    - backend: native-cpu\n"
+                        "      period: {min: 0.1, max: 1.0}\n"
+                        "      bins: {min: 16, max: 32}\n");
+    EXPECT_THROW(parse({"gaffa_search", "--config", yaml.path().string()}),
+                 std::invalid_argument)
+        << value;
+  }
 }
 
 TEST(GaffaSearchConfig, RejectsNegativeYamlSizesAndDevices) {

@@ -67,6 +67,7 @@ install: deps-debug
       -Ccmake.args="-Dpybind11_DIR=$PWD/build/conan/debug" \
       -Ccmake.args="-DCMAKE_BUILD_TYPE=Debug"
     {{ dev_env }} test -x "$CONDA_PREFIX/bin/gaffa_search"
+    {{ dev_env }} gaffa_search --help >/dev/null
 
 install-loki: deps-debug
     {{ dev_env }} python -m pip install -e ".[dev]" --no-build-isolation --force-reinstall \
@@ -77,6 +78,7 @@ install-loki: deps-debug
       -Ccmake.args="-DCMAKE_BUILD_TYPE=Debug" \
       -Ccmake.args="-DGAFFA_ENABLE_LOKI=ON"
     {{ dev_env }} test -x "$CONDA_PREFIX/bin/gaffa_search"
+    {{ dev_env }} gaffa_search --help >/dev/null
     {{ dev_env }} python -c "import gaffa._loki"
 
 wheel: deps-release

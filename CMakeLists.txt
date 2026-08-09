@@ -73,6 +73,21 @@ if(GAFFA_ENABLE_LOKI)
     GAFFA_LOKI_LIBRARY_DIR "${GAFFA_LOKI_LIBRARY_LOCATION}" DIRECTORY
   )
 
+  # The logging adapter uses Loki's header-only spdlog dependency without
+  # exposing spdlog through the gaffa core or public Loki adapter API.
+  find_package(fmt CONFIG REQUIRED)
+  find_package(spdlog CONFIG REQUIRED HINTS "${GAFFA_LOKI_LIBRARY_DIR}/..")
+
+  # Loki and the CLI use the shared fmt runtime in local/non-bundled builds.
+  # Keep this path in the installed development artifacts so they also work
+  # without sourcing env/dev.sh. Bundled wheels replace it with relative
+  # package RPATHs below and let auditwheel relocate fmt.
+  get_filename_component(GAFFA_FMT_CONFIG_DIR "${fmt_DIR}" DIRECTORY)
+  get_filename_component(GAFFA_FMT_LIBRARY_DIR
+                         "${GAFFA_FMT_CONFIG_DIR}" DIRECTORY)
+  set(GAFFA_LOKI_RUNTIME_LIBRARY_DIRS
+      "${GAFFA_LOKI_LIBRARY_DIR}" "${GAFFA_FMT_LIBRARY_DIR}")
+
   if(GAFFA_BUNDLE_LOKI)
     if(GAFFA_LOKI_IMPORTED_CONFIGURATION)
       get_target_property(
@@ -149,6 +164,7 @@ set_target_properties(gaffa_core PROPERTIES
 
 if(GAFFA_ENABLE_LOKI)
   add_library(gaffa_loki STATIC
+    src/gaffa/loki/loki_logging.cpp
     src/gaffa/loki/loki_pffa_plan.cpp
     src/gaffa/loki/loki_pffa.cu
     src/gaffa/loki/loki_dm_search.cu
@@ -157,9 +173,10 @@ if(GAFFA_ENABLE_LOKI)
     gaffa_core
     loki::loki
   )
+  target_link_libraries(gaffa_loki PRIVATE spdlog::spdlog_header_only)
   target_include_directories(gaffa_loki PUBLIC include)
   set_target_properties(gaffa_loki PROPERTIES
-    BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    BUILD_RPATH "${GAFFA_LOKI_RUNTIME_LIBRARY_DIRS}"
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON
     LINKER_LANGUAGE CUDA
@@ -185,7 +202,8 @@ if(GAFFA_ENABLE_LOKI)
   )
   target_link_libraries(_loki PRIVATE gaffa_loki)
   target_include_directories(_loki PRIVATE include)
-  set(GAFFA_LOKI_EXTENSION_INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}")
+  set(GAFFA_LOKI_EXTENSION_INSTALL_RPATH
+      "${GAFFA_LOKI_RUNTIME_LIBRARY_DIRS}")
   if(GAFFA_BUNDLE_LOKI)
     set(GAFFA_LOKI_EXTENSION_INSTALL_RPATH "$ORIGIN/.libs")
   endif()
@@ -299,6 +317,23 @@ if(BUILD_TESTING)
     LINKER_LANGUAGE CUDA
   )
   gtest_discover_tests(gaffa_search_output_tests)
+
+  add_executable(gaffa_search_progress_tests
+    cli/gaffa_search/config.cpp
+    cli/gaffa_search/config_yaml.cpp
+    cli/gaffa_search/progress.cpp
+    cli/gaffa_search/progress_renderer.cpp
+    tests/cli/test_gaffa_search_progress.cpp
+  )
+  target_link_libraries(gaffa_search_progress_tests PRIVATE
+    GTest::gtest_main
+    yaml-cpp::yaml-cpp
+  )
+  target_include_directories(gaffa_search_progress_tests PRIVATE
+    include
+    cli/gaffa_search
+  )
+  gtest_discover_tests(gaffa_search_progress_tests)
 endif()
 
 file(GLOB GAFFA_BENCHMARK_SOURCES CONFIGURE_DEPENDS
@@ -358,6 +393,8 @@ add_executable(gaffa_search
   cli/gaffa_search/config_yaml.cpp
   cli/gaffa_search/cuda_worker.cpp
   cli/gaffa_search/output.cpp
+  cli/gaffa_search/progress.cpp
+  cli/gaffa_search/progress_renderer.cpp
   cli/gaffa_search/report.cpp
   cli/gaffa_search/search.cpp
   cli/gaffa_search/main.cpp
@@ -374,7 +411,8 @@ set_target_properties(gaffa_search PROPERTIES
 if(GAFFA_ENABLE_LOKI)
   target_link_libraries(gaffa_search PRIVATE gaffa_loki)
   target_compile_definitions(gaffa_search PRIVATE GAFFA_SEARCH_ENABLE_LOKI)
-  set(GAFFA_LOKI_CLI_INSTALL_RPATH "${GAFFA_LOKI_LIBRARY_DIR}")
+  set(GAFFA_LOKI_CLI_INSTALL_RPATH
+      "${GAFFA_LOKI_RUNTIME_LIBRARY_DIRS}")
   if(GAFFA_BUNDLE_LOKI)
     if(SKBUILD)
       set(GAFFA_LOKI_CLI_INSTALL_RPATH "$ORIGIN/../.libs")
@@ -383,7 +421,7 @@ if(GAFFA_ENABLE_LOKI)
     endif()
   endif()
   set_target_properties(gaffa_search PROPERTIES
-    BUILD_RPATH "${GAFFA_LOKI_LIBRARY_DIR}"
+    BUILD_RPATH "${GAFFA_LOKI_RUNTIME_LIBRARY_DIRS}"
     INSTALL_RPATH "${GAFFA_LOKI_CLI_INSTALL_RPATH}"
     INSTALL_REMOVE_ENVIRONMENT_RPATH ON
   )

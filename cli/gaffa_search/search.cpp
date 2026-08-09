@@ -11,6 +11,8 @@
 #include "gaffa/harmonic.h"
 #include "gaffa/preprocessing.h"
 
+#include "progress.h"
+
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
@@ -300,7 +302,7 @@ gaffa::DmPeaks run_cuda_phase(
     const gaffa::DedispersedResult<ValueT>& dedispersed,
     const DmRangeRuntime& dm_range, const SearchRangeConfig& search,
     const Config& config, double tsamp, std::vector<int> devices,
-    std::optional<std::size_t> peak_limit) {
+    std::optional<std::size_t> peak_limit, ProgressTracker* progress) {
   check_device_ids(devices);
   const auto tiles = make_tiles(dedispersed.shape.ndm, config.dm_tile_size);
   std::vector<std::unique_ptr<CudaWorker>> workers;
@@ -311,7 +313,8 @@ gaffa::DmPeaks run_cuda_phase(
     if (search.backend == Backend::NativeCuda) {
       workers.back()->prepare_native(
           search, dedispersed.shape.nsamples, tsamp, config.snr_threshold,
-          config.max_peaks, config.preprocess, config.running_median_seconds);
+          config.max_peaks, config.preprocess, config.running_median_seconds,
+          config.resources.native_cuda.max_peak_memory_bytes);
     } else {
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
       workers.back()->prepare_loki(
@@ -391,6 +394,9 @@ gaffa::DmPeaks run_cuda_phase(
           local.insert(local.end(),
                        std::make_move_iterator(peaks.begin()),
                        std::make_move_iterator(peaks.end()));
+          if (progress != nullptr) {
+            progress->complete_search_units();
+          }
         }
       } catch (...) {
         worker_errors[worker_index] = std::current_exception();
@@ -530,13 +536,18 @@ double common_valid_duration(std::span<const SearchRunInfo> runs) {
 template <typename T>
 void run_dm_range(const gaffa::FilterbankData& filterbank,
                   const Config& config, const DmRangeRuntime& dm_range,
-                  FileTiming& timing, RawSearchResult& result) {
+                  FileTiming& timing, RawSearchResult& result,
+                  ProgressTracker* progress) {
   const auto dedispersion_begin = std::chrono::steady_clock::now();
   auto dedispersed = dedisperse<T>(filterbank, config, dm_range.config);
   const auto dedispersion_end = std::chrono::steady_clock::now();
   timing.dedispersion_seconds +=
       std::chrono::duration<double>(dedispersion_end - dedispersion_begin)
           .count();
+  if (progress != nullptr) {
+    progress->complete_dm_range();
+    progress->begin_search_phase();
+  }
   const auto search_begin = dedispersion_end;
 
   // Run backend phases in a stable order. A worker owns one active Program,
@@ -562,24 +573,42 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
           },
       };
       const auto peak_limit = remaining_peak_limit(result.peaks, config);
+      if (progress != nullptr) {
+        const std::size_t total_units =
+            backend == Backend::NativeCpu
+                ? 1
+                : dedispersed.shape.ndm / config.dm_tile_size +
+                      (dedispersed.shape.ndm % config.dm_tile_size == 0 ? 0
+                                                                        : 1);
+        progress->begin_search_run(dm_range.id, search.id, backend,
+                                   total_units);
+      }
       switch (backend) {
         case Backend::NativeCpu:
           run.peaks = run_native_cpu(
               dedispersed, dm_range, search, config,
               filterbank.header.tsamp, peak_limit);
+          if (progress != nullptr) {
+            progress->complete_search_units();
+          }
           break;
         case Backend::NativeCuda:
           run.peaks = run_cuda_phase(
               dedispersed, dm_range, search, config,
-              filterbank.header.tsamp, config.native_cuda_devices, peak_limit);
+              filterbank.header.tsamp, config.native_cuda_devices, peak_limit,
+              progress);
           break;
         case Backend::LokiCuda:
           run.peaks = run_cuda_phase(
               dedispersed, dm_range, search, config,
-              filterbank.header.tsamp, config.loki_cuda_devices, peak_limit);
+              filterbank.header.tsamp, config.loki_cuda_devices, peak_limit,
+              progress);
           break;
       }
       run.info.raw_peak_count = run.peaks.size();
+      if (progress != nullptr) {
+        progress->finish_search_run(run.info.raw_peak_count);
+      }
       append_checked(result.peaks, std::move(run.peaks), config);
       result.runs.push_back(std::move(run.info));
     }
@@ -594,23 +623,34 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
 
 template <typename T>
 RawSearchResult run_typed(const gaffa::FilterbankData& filterbank,
-                          const Config& config, FileTiming& timing) {
+                          const Config& config, FileTiming& timing,
+                          ProgressTracker* progress) {
   const auto dm_ranges = make_dm_ranges(config);
   RawSearchResult result;
   result.runs.reserve(dm_ranges.size() * config.search_ranges.size());
+  if (progress != nullptr) {
+    progress->begin_work(
+        dm_ranges.size(),
+        checked_multiply(dm_ranges.size(), config.search_ranges.size(),
+                         "search progress count overflow"));
+  }
   for (const auto& dm_range : dm_ranges) {
-    run_dm_range<T>(filterbank, config, dm_range, timing, result);
+    if (progress != nullptr) {
+      progress->begin_dm_range(dm_range.id);
+    }
+    run_dm_range<T>(filterbank, config, dm_range, timing, result, progress);
   }
   sort_peaks(result.peaks);
   return result;
 }
 
 RawSearchResult run_filterbank(const gaffa::FilterbankData& filterbank,
-                               const Config& config, FileTiming& timing) {
+                               const Config& config, FileTiming& timing,
+                               ProgressTracker* progress) {
   return std::visit(
       [&](const auto& values) {
         using T = typename std::decay_t<decltype(values)>::value_type;
-        return run_typed<T>(filterbank, config, timing);
+        return run_typed<T>(filterbank, config, timing, progress);
       },
       filterbank.samples);
 }
@@ -618,9 +658,13 @@ RawSearchResult run_filterbank(const gaffa::FilterbankData& filterbank,
 }  // namespace
 
 FileResult execute_file(const Config& config,
-                        const std::filesystem::path& input) {
+                        const std::filesystem::path& input,
+                        ProgressTracker* progress) {
   const auto total_begin = std::chrono::steady_clock::now();
   const auto read_begin = total_begin;
+  if (progress != nullptr) {
+    progress->begin_read();
+  }
   const gaffa::FilterbankData filterbank = gaffa::read_filterbank(input);
   const auto read_end = std::chrono::steady_clock::now();
   if (config.dedispersion_backend == DedispersionBackend::CudaSubband) {
@@ -635,13 +679,21 @@ FileResult execute_file(const Config& config,
                                static_cast<double>(result.observation_nsamples);
   result.timing.read_seconds =
       std::chrono::duration<double>(read_end - read_begin).count();
+  if (progress != nullptr) {
+    progress->finish_read(result.observation_nsamples,
+                          result.tsamp_seconds,
+                          result.observation_seconds);
+  }
   RawSearchResult raw =
-      run_filterbank(filterbank, config, result.timing);
+      run_filterbank(filterbank, config, result.timing, progress);
   const auto search_end = std::chrono::steady_clock::now();
 
   const auto candidate_begin = search_end;
   const double candidate_duration =
       common_valid_duration(raw.runs);
+  if (progress != nullptr) {
+    progress->begin_candidate(raw.peaks.size());
+  }
   const auto candidates = gaffa::make_candidates_cpu(
       raw.peaks,
       make_harmonic_context(filterbank.header, candidate_duration),
@@ -654,10 +706,21 @@ FileResult execute_file(const Config& config,
       std::chrono::duration<double>(candidate_end - candidate_begin).count();
   result.timing.total_seconds =
       std::chrono::duration<double>(candidate_end - total_begin).count();
+  if (progress != nullptr) {
+    progress->finish_candidate(ProgressSummary{
+        .elapsed_seconds = result.timing.candidate_seconds,
+        .raw_peaks = result.raw_peak_count,
+        .candidate_groups = result.candidates.candidate_set.candidates.size(),
+        .harmonic_relations =
+            result.candidates.harmonic_relations.size(),
+        .final_candidates = result.candidates.selected.size(),
+    });
+    progress->finish_file();
+  }
   return result;
 }
 
-RunResult execute(const Config& config) {
+RunResult execute_impl(const Config& config, ProgressTracker* progress) {
   std::vector<std::filesystem::path> inputs;
   if (std::filesystem::is_regular_file(config.input)) {
     inputs.push_back(config.input);
@@ -679,12 +742,29 @@ RunResult execute(const Config& config) {
 
   RunResult result;
   result.files.reserve(inputs.size());
-  for (const auto& input : inputs) {
-    Config file_config = config;
-    file_config.input = input;
-    result.files.push_back(execute_file(file_config, input));
+  try {
+    for (std::size_t index = 0; index < inputs.size(); ++index) {
+      const auto& input = inputs[index];
+      Config file_config = config;
+      file_config.input = input;
+      if (progress != nullptr) {
+        progress->begin_file(input, index + 1, inputs.size());
+      }
+      result.files.push_back(execute_file(file_config, input, progress));
+    }
+  } catch (...) {
+    if (progress != nullptr) {
+      progress->mark_failed();
+    }
+    throw;
   }
   return result;
+}
+
+RunResult execute(const Config& config) { return execute_impl(config, nullptr); }
+
+RunResult execute(const Config& config, ProgressTracker& progress) {
+  return execute_impl(config, &progress);
 }
 
 }  // namespace gaffa_search

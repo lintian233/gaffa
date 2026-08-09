@@ -31,6 +31,11 @@ dedispersion:
   subband_channels: 32
   ndm_per_nominal: 32
 
+resources:
+  # Native CUDA compact peak buffer cap. Loki does not use this setting.
+  native_cuda:
+    max_peak_memory: 4GiB
+
 search:
   dm_tile_size: 32
   devices:

@@ -8,10 +8,20 @@ import pytest
 from gaffa import _cli
 
 
+def test_binary_path_honours_environment_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary = Path("/tmp/gaffa-search-test")
+    monkeypatch.setenv("GAFFA_SEARCH_BINARY", str(binary))
+
+    assert _cli._binary_candidates()[0] == binary
+
+
 def test_main_executes_packaged_binary(monkeypatch: pytest.MonkeyPatch) -> None:
     binary = Path("/tmp/gaffa/_bin/gaffa_search")
     monkeypatch.setattr(_cli, "_binary_path", lambda: binary)
     monkeypatch.setattr(Path, "is_file", lambda self: self == binary)
+    monkeypatch.setattr(os, "access", lambda path, mode: path == binary)
     monkeypatch.setattr("sys.argv", ["gaffa_search", "--help"])
 
     invocation: tuple[Path, list[str]] | None = None
