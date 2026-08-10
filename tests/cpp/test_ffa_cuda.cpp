@@ -747,6 +747,37 @@ TEST(FfaCuda, ProgramSharedSubtreeTransformMatchesCpuForLargeBins) {
   }
 }
 
+TEST(FfaCuda, ProgramAdaptiveSharedSubtreeTransformMatchesCpu) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+
+  constexpr std::size_t rows = 256;
+  constexpr std::size_t bins = 256;
+  constexpr std::size_t nseries = 2;
+  const gaffa::FfaSearchPlan plan{
+      .observation = {.nsamples = rows * bins, .tsamp_seconds = 1.0},
+      .tasks = {
+          make_task(1.0, rows * bins, rows, rows, bins),
+      },
+      .width_trials = {1, 2, 4, 8},
+  };
+  const gaffa::CudaFfaProgram program(plan);
+  std::vector<float> input(nseries * rows * bins);
+  for (std::size_t index = 0; index < input.size(); ++index) {
+    input[index] = static_cast<float>((index * 29 + 11) % 61) - 30.0F;
+  }
+
+  const auto shape = program.execution_plan().groups()[0].tasks[0].shape;
+  const auto output =
+      transform_with_program_on_cuda(program, 0, 0, input, nseries, shape);
+  const auto expected = expected_transform(input, nseries, shape);
+  ASSERT_EQ(output.size(), expected.size());
+  for (std::size_t index = 0; index < expected.size(); ++index) {
+    EXPECT_FLOAT_EQ(output[index], expected[index]) << "index=" << index;
+  }
+}
+
 TEST(FfaCuda, ProgramTransformAcceptsExplicitStream) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";

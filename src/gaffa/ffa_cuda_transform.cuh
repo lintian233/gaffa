@@ -25,8 +25,6 @@ std::size_t checked_float_bytes(std::size_t count, const char* message) {
   return checked_multiply(count, sizeof(float), message);
 }
 
-constexpr std::size_t kPreferredSharedSubtreeRows = 16;
-
 void check_cuda(cudaError_t status, const char* operation) {
   if (status != cudaSuccess) {
     throw std::runtime_error(std::string(operation) + ": " +
@@ -43,23 +41,34 @@ std::size_t subtree_shared_bytes(std::size_t rows, std::size_t bins) {
       "CUDA FFA subtree shared byte size overflow");
 }
 
+std::size_t floor_power_of_two(std::size_t value) {
+  if (value == 0) {
+    return 0;
+  }
+  std::size_t power = 1;
+  while (power <= value / 2) {
+    power *= 2;
+  }
+  return power;
+}
+
 std::size_t select_shared_subtree_rows(std::size_t bins, int device_id) {
   int optin_shared_bytes = 0;
   check_cuda(cudaDeviceGetAttribute(&optin_shared_bytes,
                                     cudaDevAttrMaxSharedMemoryPerBlockOptin,
                                     device_id),
              "cudaDeviceGetAttribute max opt-in shared memory");
-  if (optin_shared_bytes <= 0) {
+  if (optin_shared_bytes <= 0 || bins == 0) {
     return 0;
   }
 
+  const std::size_t bytes_per_row = subtree_shared_bytes(1, bins);
   const std::size_t rows_by_capacity =
-      static_cast<std::size_t>(optin_shared_bytes) /
-      (3 * bins * sizeof(float));
+      static_cast<std::size_t>(optin_shared_bytes) / bytes_per_row;
   if (rows_by_capacity < 2) {
     return 0;
   }
-  return std::min(kPreferredSharedSubtreeRows, rows_by_capacity);
+  return floor_power_of_two(rows_by_capacity);
 }
 
 void configure_subtree_dynamic_shared_memory(std::size_t shared_bytes) {

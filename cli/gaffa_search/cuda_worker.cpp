@@ -1,5 +1,7 @@
 #include "cuda_worker.h"
 
+#include "debug.h"
+
 #include "gaffa/cuda_memory.h"
 #include "gaffa/ffa_cuda.h"
 #include "gaffa/ffa_plan.h"
@@ -16,6 +18,7 @@
 #include <cuda_runtime_api.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -227,6 +230,7 @@ struct CudaWorker::Impl {
 
   void upload_and_prepare(std::span<const std::uint32_t> tile,
                           std::size_t nseries) {
+    const auto begin = detail::DebugClock::now();
     if (nseries == 0 || nseries > tile_capacity ||
         tile.size() != checked_multiply(nseries, source_nsamples,
                                         "CUDA worker input size overflow")) {
@@ -259,9 +263,15 @@ struct CudaWorker::Impl {
             .synchronize_after_call = false,
         });
     upload_and_prepare_float(source_float.data(), nseries);
+    DEBUGPRINT("cuda_worker upload_prepare device=" << device_id
+                                                      << " input=uint32"
+                                                      << " nseries=" << nseries
+                                                      << " host_seconds="
+                                                      << detail::debug_seconds(begin));
   }
 
   void upload_and_prepare(std::span<const float> tile, std::size_t nseries) {
+    const auto begin = detail::DebugClock::now();
     if (nseries == 0 || nseries > tile_capacity ||
         tile.size() != checked_multiply(nseries, source_nsamples,
                                         "CUDA worker input size overflow")) {
@@ -273,10 +283,16 @@ struct CudaWorker::Impl {
                                cudaMemcpyHostToDevice, stream->stream),
                "CUDA worker float H2D");
     upload_and_prepare_float(source_float.data(), nseries);
+    DEBUGPRINT("cuda_worker upload_prepare device=" << device_id
+                                                      << " input=float"
+                                                      << " nseries=" << nseries
+                                                      << " host_seconds="
+                                                      << detail::debug_seconds(begin));
   }
 
   void upload_and_prepare_float(float* source, std::size_t nseries) {
     if (preprocess != nullptr) {
+      const auto preprocess_begin = detail::DebugClock::now();
       preprocess_time_series_batch_inplace_cuda(
           *preprocess,
           gaffa::MutableCudaTimeSeriesBatchView{
@@ -286,10 +302,16 @@ struct CudaWorker::Impl {
               .device_id = device_id,
           });
       preprocess->synchronize();
+      DEBUGPRINT("cuda_worker preprocess_wait device=" << device_id
+                                                         << " nseries="
+                                                         << nseries
+                                                         << " host_seconds="
+                                                         << detail::debug_seconds(preprocess_begin));
     }
 
     float* prepared = source;
     if (prepared_nsamples != source_nsamples) {
+      const auto window_begin = detail::DebugClock::now();
       check_cuda(cudaSetDevice(device_id), "cudaSetDevice worker window");
       const std::size_t copied =
           window_mode == WindowMode::ZeroPad
@@ -308,6 +330,14 @@ struct CudaWorker::Impl {
                      nseries, cudaMemcpyDeviceToDevice, stream->stream),
                  "CUDA worker window copy");
       prepared = prepared_input.data();
+      DEBUGPRINT("cuda_worker window_enqueue device=" << device_id
+                                                        << " source_nsamples="
+                                                        << source_nsamples
+                                                        << " prepared_nsamples="
+                                                        << prepared_nsamples
+                                                        << " nseries=" << nseries
+                                                        << " host_seconds="
+                                                        << detail::debug_seconds(window_begin));
     }
 
     active_prepared = gaffa::CudaTimeSeriesBatchView{
@@ -340,13 +370,18 @@ struct CudaWorker::Impl {
         source_nsamples != input_nsamples) {
       throw std::logic_error("CUDA worker is not prepared for Native search");
     }
+    const auto tile_begin = detail::DebugClock::now();
     upload_and_prepare(tile, nseries);
+    const auto ffa_begin = detail::DebugClock::now();
     const gaffa::FfaBatchSearchResult raw = gaffa::search_ffa_raw_batch_cuda(
         *native, active_prepared,
         gaffa::FfaSearchOptions{
             .snr_threshold = snr_threshold,
             .max_peaks = max_peaks,
         });
+    const double ffa_host_seconds = detail::debug_seconds(ffa_begin);
+    const std::size_t raw_peak_count = raw.peaks.size();
+    const auto projection_begin = detail::DebugClock::now();
     gaffa::SeriesPeaks peaks;
     peaks.reserve(raw.peaks.size());
     const auto& observation = native->execution_plan().observation();
@@ -356,11 +391,25 @@ struct CudaWorker::Impl {
           .peak = gaffa::periodic_peak_from_ffa(peak.peak, observation),
       });
     }
-    return CudaSearchResult{
+    const double projection_seconds = detail::debug_seconds(projection_begin);
+    const auto attach_begin = detail::DebugClock::now();
+    CudaSearchResult result{
         .peaks = attach(peaks, dms, global_dm_index_begin),
         .complete = raw.complete,
         .warnings = std::move(raw.warnings),
     };
+    DEBUGPRINT("cuda_worker native_tile device=" << device_id
+                                                  << " nseries=" << nseries
+                                                  << " raw_peaks=" << raw_peak_count
+                                                  << " ffa_host_seconds="
+                                                  << ffa_host_seconds
+                                                  << " projection_seconds="
+                                                  << projection_seconds
+                                                  << " attach_seconds="
+                                                  << detail::debug_seconds(attach_begin)
+                                                  << " total_host_seconds="
+                                                  << detail::debug_seconds(tile_begin));
+    return result;
   }
 
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
@@ -373,7 +422,9 @@ struct CudaWorker::Impl {
         source_nsamples != input_nsamples) {
       throw std::logic_error("CUDA worker is not prepared for Loki search");
     }
+    const auto tile_begin = detail::DebugClock::now();
     upload_and_prepare(tile, nseries);
+    const auto loki_begin = detail::DebugClock::now();
     const gaffa::SeriesPeaks peaks = loki->search_batch(
         active_prepared,
         gaffa::LokiPffaExecutionOptions{
@@ -383,12 +434,24 @@ struct CudaWorker::Impl {
                                : max_peaks,
             .reduction = reduction,
         });
+    const double loki_host_seconds = detail::debug_seconds(loki_begin);
     const auto& diagnostics = loki->last_search_diagnostics();
-    return CudaSearchResult{
+    const auto attach_begin = detail::DebugClock::now();
+    CudaSearchResult result{
         .peaks = attach(peaks, dms, global_dm_index_begin),
         .complete = diagnostics.complete,
         .warnings = diagnostics.warnings,
     };
+    DEBUGPRINT("cuda_worker loki_tile device=" << device_id
+                                                << " nseries=" << nseries
+                                                << " peaks=" << result.peaks.size()
+                                                << " loki_host_seconds="
+                                                << loki_host_seconds
+                                                << " attach_seconds="
+                                                << detail::debug_seconds(attach_begin)
+                                                << " total_host_seconds="
+                                                << detail::debug_seconds(tile_begin));
+    return result;
   }
 #endif
 };
@@ -414,6 +477,7 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
                                 double median_seconds,
                                 std::size_t max_peak_buffer_bytes,
                                 const gaffa::PeakReductionOptions& reduction) {
+  const auto begin = detail::DebugClock::now();
   impl_->prepare_common(search, source_nsamples, tsamp, threshold,
                         peak_limit, preprocess_name, median_seconds);
   impl_->reduction = reduction;
@@ -442,6 +506,14 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
           .stream = impl_->stream->stream,
       });
   impl_->active_backend = Impl::ActiveBackend::Native;
+  DEBUGPRINT("cuda_worker prepare device=" << impl_->device_id
+                                             << " backend=native-cuda"
+                                             << " source_nsamples="
+                                             << source_nsamples
+                                             << " prepared_nsamples="
+                                             << impl_->prepared_nsamples
+                                             << " host_seconds="
+                                             << detail::debug_seconds(begin));
 }
 
 CudaSearchResult CudaWorker::run_native(
@@ -467,6 +539,7 @@ void CudaWorker::prepare_loki(const SearchRangeConfig& search,
                               const std::string& preprocess_name,
                               double median_seconds,
                               const gaffa::PeakReductionOptions& reduction) {
+  const auto begin = detail::DebugClock::now();
   impl_->prepare_common(search, source_nsamples, tsamp, threshold,
                         peak_limit, preprocess_name, median_seconds);
   impl_->reduction = reduction;
@@ -488,6 +561,14 @@ void CudaWorker::prepare_loki(const SearchRangeConfig& search,
   impl_->loki = std::make_unique<gaffa::LokiPffaProgram>(
       plan, gaffa::LokiPffaProgramOptions{.device_id = impl_->device_id});
   impl_->active_backend = Impl::ActiveBackend::Loki;
+  DEBUGPRINT("cuda_worker prepare device=" << impl_->device_id
+                                             << " backend=loki-cuda"
+                                             << " source_nsamples="
+                                             << source_nsamples
+                                             << " prepared_nsamples="
+                                             << impl_->prepared_nsamples
+                                             << " host_seconds="
+                                             << detail::debug_seconds(begin));
 }
 
 CudaSearchResult CudaWorker::run_loki(

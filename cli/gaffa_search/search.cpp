@@ -1,6 +1,7 @@
 #include "search.h"
 
 #include "cuda_worker.h"
+#include "debug.h"
 
 #include "gaffa/candidate_analysis.h"
 #include "gaffa/dedispersion.h"
@@ -260,6 +261,9 @@ gaffa::DedispersedResult<DmResultValue<T>> dedisperse(
 
 void append_checked(gaffa::DmPeaks& destination, gaffa::DmPeaks source,
                     const Config& config) {
+  const auto begin = detail::DebugClock::now();
+  const std::size_t source_size = source.size();
+  const std::size_t destination_size = destination.size();
   const std::size_t limit =
       config.candidate.detection.max_total_raw_peaks;
   if (limit != 0 &&
@@ -270,6 +274,12 @@ void append_checked(gaffa::DmPeaks& destination, gaffa::DmPeaks source,
   destination.insert(destination.end(),
                      std::make_move_iterator(source.begin()),
                      std::make_move_iterator(source.end()));
+  DEBUGPRINT("raw_peak_append destination_before=" << destination_size
+                                                    << " source=" << source_size
+                                                    << " destination_after="
+                                                    << destination.size()
+                                                    << " host_seconds="
+                                                    << detail::debug_seconds(begin));
 }
 
 template <typename ValueT>
@@ -278,6 +288,7 @@ gaffa::DmPeaks run_native_cpu(
     const DmRangeRuntime& dm_range, const SearchRangeConfig& search,
     const Config& config, double tsamp,
     std::optional<std::size_t> peak_limit) {
+  const auto begin = detail::DebugClock::now();
   if (search.window_mode != WindowMode::Truncate) {
     throw std::invalid_argument(
         "native-cpu currently supports only truncate window mode");
@@ -300,6 +311,10 @@ gaffa::DmPeaks run_native_cpu(
   if (peak_limit && peaks.size() > *peak_limit) {
     throw std::runtime_error("maximum total raw peak limit exceeded");
   }
+  DEBUGPRINT("native_cpu_search dm_range=" << dm_range.id
+                                             << " peaks=" << peaks.size()
+                                             << " host_seconds="
+                                             << detail::debug_seconds(begin));
   return peaks;
 }
 
@@ -309,11 +324,21 @@ CudaSearchResult run_cuda_phase(
     const DmRangeRuntime& dm_range, const SearchRangeConfig& search,
     const Config& config, double tsamp, std::vector<int> devices,
     std::optional<std::size_t> peak_limit, ProgressTracker* progress) {
+  const auto phase_begin = detail::DebugClock::now();
   check_device_ids(devices);
   const auto tiles = make_tiles(dedispersed.shape.ndm, config.dm_tile_size);
+  DEBUGPRINT("cuda_phase begin dm_range=" << dm_range.id
+                                             << " search_range=" << search.id
+                                             << " backend="
+                                             << backend_name(search.backend)
+                                             << " ndm=" << dedispersed.shape.ndm
+                                             << " tile_size=" << config.dm_tile_size
+                                             << " tiles=" << tiles.size()
+                                             << " devices=" << devices.size());
   std::vector<std::unique_ptr<CudaWorker>> workers;
   workers.reserve(devices.size());
   for (const int device : devices) {
+    const auto prepare_begin = detail::DebugClock::now();
     workers.push_back(std::make_unique<CudaWorker>(device,
                                                    config.dm_tile_size));
     if (search.backend == Backend::NativeCuda) {
@@ -337,6 +362,11 @@ CudaSearchResult run_cuda_phase(
           "loki-cuda was requested but GAFFA_ENABLE_LOKI is disabled");
 #endif
     }
+    DEBUGPRINT("cuda_phase worker_prepared device=" << device
+                                                     << " backend="
+                                                     << backend_name(search.backend)
+                                                     << " host_seconds="
+                                                     << detail::debug_seconds(prepare_begin));
   }
 
   std::vector<CudaSearchResult> worker_results(workers.size());
@@ -368,6 +398,14 @@ CudaSearchResult run_cuda_phase(
               dedispersed.data.data() + offset, count);
           const auto dms = std::span<const double>(
               dm_range.dm_values.data() + tile.local_begin, tile.count);
+          const auto tile_begin = detail::DebugClock::now();
+          DEBUGPRINT("cuda_phase tile_begin worker=" << worker_index
+                                                       << " device="
+                                                       << workers[worker_index]->device_id()
+                                                       << " tile=" << tile_index
+                                                       << " dm_begin="
+                                                       << tile.local_begin
+                                                       << " dm_count=" << tile.count);
           CudaSearchResult search_result;
           if constexpr (std::is_same_v<ValueT, std::uint32_t>) {
             if (search.backend == Backend::NativeCuda) {
@@ -404,13 +442,24 @@ CudaSearchResult run_cuda_phase(
                 "maximum total raw peak limit exceeded");
           }
           auto& local = worker_results[worker_index];
+          const std::size_t tile_peak_count = peaks.size();
           local.complete &= search_result.complete;
           local.warnings.insert(local.warnings.end(),
                                 search_result.warnings.begin(),
                                 search_result.warnings.end());
-          local.peaks.insert(local.peaks.end(),
-                       std::make_move_iterator(peaks.begin()),
-                       std::make_move_iterator(peaks.end()));
+          const auto append_begin = detail::DebugClock::now();
+          local.peaks.insert(
+              local.peaks.end(), std::make_move_iterator(peaks.begin()),
+              std::make_move_iterator(peaks.end()));
+          DEBUGPRINT("cuda_phase tile_end worker=" << worker_index
+                                                     << " device="
+                                                     << workers[worker_index]->device_id()
+                                                     << " tile=" << tile_index
+                                                     << " peaks=" << tile_peak_count
+                                                     << " host_append_seconds="
+                                                     << detail::debug_seconds(append_begin)
+                                                     << " total_host_seconds="
+                                                     << detail::debug_seconds(tile_begin));
           if (progress != nullptr) {
             progress->complete_search_units();
           }
@@ -421,9 +470,12 @@ CudaSearchResult run_cuda_phase(
       }
     });
   }
+  const auto join_begin = detail::DebugClock::now();
   for (auto& thread : threads) {
     thread.join();
   }
+  DEBUGPRINT("cuda_phase workers_joined host_seconds="
+             << detail::debug_seconds(join_begin));
 
   std::exception_ptr first_error;
   for (const auto& error : worker_errors) {
@@ -432,6 +484,7 @@ CudaSearchResult run_cuda_phase(
       break;
     }
   }
+  const auto reset_begin = detail::DebugClock::now();
   for (auto& worker : workers) {
     try {
       worker->reset();
@@ -441,11 +494,14 @@ CudaSearchResult run_cuda_phase(
       }
     }
   }
+  DEBUGPRINT("cuda_phase workers_reset host_seconds="
+             << detail::debug_seconds(reset_begin));
   if (first_error != nullptr) {
     std::rethrow_exception(first_error);
   }
   gaffa::DmPeaks output;
   CudaSearchResult result;
+  const auto combine_begin = detail::DebugClock::now();
   for (auto& local : worker_results) {
     result.complete &= local.complete;
     result.warnings.insert(result.warnings.end(), local.warnings.begin(),
@@ -454,6 +510,13 @@ CudaSearchResult run_cuda_phase(
                   std::make_move_iterator(local.peaks.end()));
   }
   result.peaks = std::move(output);
+  DEBUGPRINT("cuda_phase end dm_range=" << dm_range.id
+                                          << " search_range=" << search.id
+                                          << " peaks=" << result.peaks.size()
+                                          << " combine_seconds="
+                                          << detail::debug_seconds(combine_begin)
+                                          << " total_host_seconds="
+                                          << detail::debug_seconds(phase_begin));
   return result;
 }
 
@@ -562,12 +625,22 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
                   const Config& config, const DmRangeRuntime& dm_range,
                   FileTiming& timing, RawSearchResult& result,
                   ProgressTracker* progress) {
+  const auto range_begin = detail::DebugClock::now();
+  DEBUGPRINT("dm_range begin id=" << dm_range.id
+                                  << " low=" << dm_range.config.dm_low
+                                  << " step=" << dm_range.config.dm_step
+                                  << " ndm=" << dm_range.config.ndm);
   const auto dedispersion_begin = std::chrono::steady_clock::now();
   auto dedispersed = dedisperse<T>(filterbank, config, dm_range.config);
   const auto dedispersion_end = std::chrono::steady_clock::now();
   timing.dedispersion_seconds +=
       std::chrono::duration<double>(dedispersion_end - dedispersion_begin)
           .count();
+  DEBUGPRINT("dm_range dedispersed id=" << dm_range.id
+                                         << " ndm=" << dedispersed.shape.ndm
+                                         << " nsamples=" << dedispersed.shape.nsamples
+                                         << " host_seconds="
+                                         << detail::debug_seconds(dedispersion_begin));
   if (progress != nullptr) {
     progress->complete_dm_range();
     progress->begin_search_phase();
@@ -586,6 +659,13 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
           search.backend == Backend::NativeCpu
               ? dedispersed.shape.nsamples
               : prepared_length(search, dedispersed.shape.nsamples);
+      const auto run_begin = detail::DebugClock::now();
+      DEBUGPRINT("search_run begin dm_range=" << dm_range.id
+                                               << " search_range=" << search.id
+                                               << " backend=" << backend_name(backend)
+                                               << " source_nsamples="
+                                               << dedispersed.shape.nsamples
+                                               << " prepared_nsamples=" << prepared);
       SearchRunResult run{
           .info = SearchRunInfo{
               .dm_range_id = dm_range.id,
@@ -650,6 +730,13 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
       result.warnings.insert(result.warnings.end(), run.warnings.begin(),
                              run.warnings.end());
       result.runs.push_back(std::move(run.info));
+      DEBUGPRINT("search_run end dm_range=" << dm_range.id
+                                             << " search_range=" << search.id
+                                             << " backend=" << backend_name(backend)
+                                             << " raw_peaks="
+                                             << result.runs.back().raw_peak_count
+                                             << " host_seconds="
+                                             << detail::debug_seconds(run_begin));
     }
   };
   run_backend(Backend::NativeCpu);
@@ -658,6 +745,9 @@ void run_dm_range(const gaffa::FilterbankData& filterbank,
   const auto search_end = std::chrono::steady_clock::now();
   timing.search_seconds +=
       std::chrono::duration<double>(search_end - search_begin).count();
+  DEBUGPRINT("dm_range end id=" << dm_range.id
+                                << " host_seconds="
+                                << detail::debug_seconds(range_begin));
 }
 
 template <typename T>
@@ -679,7 +769,11 @@ RawSearchResult run_typed(const gaffa::FilterbankData& filterbank,
     }
     run_dm_range<T>(filterbank, config, dm_range, timing, result, progress);
   }
+  const auto sort_begin = detail::DebugClock::now();
   sort_peaks(result.peaks);
+  DEBUGPRINT("raw_peak_sort count=" << result.peaks.size()
+                                     << " host_seconds="
+                                     << detail::debug_seconds(sort_begin));
   return result;
 }
 
@@ -706,6 +800,11 @@ FileResult search_file(const Config& config,
   }
   const gaffa::FilterbankData filterbank = gaffa::read_filterbank(input);
   const auto read_end = std::chrono::steady_clock::now();
+  DEBUGPRINT("file read path=" << input.string()
+                                << " nsamples=" << filterbank.header.nsamples
+                                << " nchans=" << filterbank.header.nchans
+                                << " host_seconds="
+                                << detail::debug_seconds(read_begin));
   if (config.dedispersion_backend == DedispersionBackend::CudaSubband) {
     check_device_ids({config.dedispersion_device});
   }
@@ -726,6 +825,10 @@ FileResult search_file(const Config& config,
   RawSearchResult raw =
       run_filterbank(filterbank, config, result.timing, progress);
   const auto search_end = std::chrono::steady_clock::now();
+  DEBUGPRINT("file search_end path=" << input.string()
+                                      << " raw_peaks=" << raw.peaks.size()
+                                      << " host_seconds="
+                                      << detail::debug_seconds(read_end));
 
   const auto candidate_begin = search_end;
   const double candidate_duration =
@@ -737,6 +840,12 @@ FileResult search_file(const Config& config,
       raw.peaks,
       make_harmonic_context(filterbank.header, candidate_duration),
       make_candidate_options(config));
+  DEBUGPRINT("candidate end path=" << input.string()
+                                    << " raw_peaks=" << raw.peaks.size()
+                                    << " candidates="
+                                    << candidates.selected.size()
+                                    << " host_seconds="
+                                    << detail::debug_seconds(candidate_begin));
   result.raw_peak_count = raw.peaks.size();
   result.candidates = std::move(candidates);
   result.search_runs = std::move(raw.runs);
@@ -758,6 +867,9 @@ FileResult search_file(const Config& config,
     });
     progress->finish_file();
   }
+  DEBUGPRINT("file end path=" << input.string()
+                               << " total_host_seconds="
+                               << detail::debug_seconds(total_begin));
   return result;
 }
 
