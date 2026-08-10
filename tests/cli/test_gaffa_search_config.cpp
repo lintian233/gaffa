@@ -84,6 +84,19 @@ TEST(GaffaSearchConfig, ParsesPeakReductionOverrides) {
             128U);
 }
 
+TEST(GaffaSearchConfig, ParsesLokiPhaseToleranceOverride) {
+  const auto config = parse({
+      "gaffa_search", "--input", "observation.fil", "--dm-range",
+      "0:1:4", "--search", "loki-cuda:0.018:1:180:256", "--loki-devices",
+      "0", "--search-top-k", "0:8", "--search-max-groups", "0:128",
+      "--search-phase-tolerance", "0:0.05",
+  });
+
+  ASSERT_EQ(config.search_ranges.size(), 1U);
+  EXPECT_DOUBLE_EQ(config.search_ranges.front().reduction.phase_tolerance_cycles,
+                   0.05);
+}
+
 TEST(GaffaSearchConfig, RejectsPeakReductionWithoutGroupLimit) {
   EXPECT_THROW(
       parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
@@ -189,7 +202,54 @@ TEST(GaffaSearchConfig, ParsesPhysicalCandidateDmRadius) {
       {"gaffa_search", "--input", "observation.fil", "--dm-range",
        "0:1:4", "--search", "native-cpu:0.018:1:180:256",
        "--candidate-dm-radius", "2.5"});
-  EXPECT_DOUBLE_EQ(config.candidate_dm_radius, 2.5);
+  EXPECT_DOUBLE_EQ(config.candidate.clustering.max_dm_distance, 2.5);
+}
+
+TEST(GaffaSearchConfig, ParsesCandidateAnalysisOptions) {
+  const auto config = parse({
+      "gaffa_search", "--input", "observation.fil", "--dm-range", "0:1:4",
+      "--search", "native-cpu:0.018:1:180:256", "--snr-threshold", "8.0",
+      "--max-peaks", "12", "--max-total-raw-peaks", "100",
+      "--candidate-group-phase", "0.03", "--candidate-no-group-widths",
+      "--candidate-cluster-phase", "0.2", "--candidate-no-cluster-widths",
+      "--candidate-dm-radius", "2.5", "--candidate-snr-min", "8.0",
+      "--max-candidates", "4", "--harmonic-max", "12",
+      "--harmonic-denominator-max", "4", "--harmonic-frequency-bins", "0.75",
+      "--harmonic-phase-distance", "0.8", "--harmonic-dm-distance", "2.0",
+      "--harmonic-use-snr-consistency", "--harmonic-snr-distance", "2.5",
+  });
+
+  EXPECT_FLOAT_EQ(config.candidate.detection.snr_threshold, 8.0F);
+  EXPECT_EQ(config.candidate.detection.max_peaks_per_dm, 12U);
+  EXPECT_EQ(config.candidate.detection.max_total_raw_peaks, 100U);
+  EXPECT_DOUBLE_EQ(config.candidate.grouping.max_phase_distance_cycles, 0.03);
+  EXPECT_FALSE(config.candidate.grouping.merge_widths);
+  EXPECT_DOUBLE_EQ(config.candidate.clustering.max_phase_distance_cycles, 0.2);
+  EXPECT_DOUBLE_EQ(config.candidate.clustering.max_dm_distance, 2.5);
+  EXPECT_FALSE(config.candidate.clustering.cluster_across_widths);
+  EXPECT_FLOAT_EQ(config.candidate.selection.snr_min, 8.0F);
+  EXPECT_EQ(config.candidate.selection.max_candidates, 4U);
+  EXPECT_EQ(config.candidate.harmonic.max_harmonic, 12U);
+  EXPECT_EQ(config.candidate.harmonic.denominator_max, 4U);
+  ASSERT_TRUE(config.candidate.harmonic.frequency_tolerance_bins.has_value());
+  EXPECT_DOUBLE_EQ(*config.candidate.harmonic.frequency_tolerance_bins, 0.75);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.phase_distance_max, 0.8);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.dm_distance_max, 2.0);
+  EXPECT_TRUE(config.candidate.harmonic.use_snr_consistency);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.snr_distance_max, 2.5);
+}
+
+TEST(GaffaSearchConfig, RejectsInvalidCandidateAnalysisOptions) {
+  EXPECT_THROW(
+      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
+             "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+             "--candidate-group-phase", "nan"}),
+      std::invalid_argument);
+  EXPECT_THROW(
+      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
+             "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+             "--harmonic-max", "1"}),
+      std::invalid_argument);
 }
 
 TEST(GaffaSearchConfig, ParsesOutputControls) {
@@ -247,17 +307,34 @@ search:
       bins: {min: 180, max: 256}
       accel: {min: -5.0, max: 5.0}
       jerk: {min: -0.2, max: 0.2}
-      reduction: {top_k: 3, max_groups: 64}
+      reduction: {top_k: 3, max_groups: 64, phase_tolerance_cycles: 0.05}
       window: zero-pad
 preprocess:
   kind: normalise
   running_median_seconds: 3.0
 candidate:
-  snr_threshold: 8.0
-  max_peaks: 12
-  max_total_raw_peaks: 100
-  max_candidates: 4
-  dm_radius: 2.5
+  detection:
+    snr_threshold: 8.0
+    max_peaks_per_dm: 12
+    max_total_raw_peaks: 100
+  grouping:
+    max_phase_distance_cycles: 0.03
+    merge_widths: false
+  clustering:
+    max_phase_distance_cycles: 0.2
+    max_dm_distance: 2.5
+    merge_widths: false
+  harmonic:
+    max_harmonic: 12
+    denominator_max: 4
+    frequency_tolerance_bins: 0.75
+    phase_distance_max: 0.8
+    dm_distance_max: 2.0
+    use_snr_consistency: true
+    snr_distance_max: 2.5
+  selection:
+    snr_min: 8.0
+    max_candidates: 4
 output:
   prefix: results/candidates
   print_candidates: 7
@@ -293,11 +370,26 @@ output:
   EXPECT_DOUBLE_EQ(config.search_ranges[1].motion.jerk->maximum, 0.2);
   EXPECT_EQ(config.search_ranges[1].reduction.top_k_per_group, 3U);
   EXPECT_EQ(config.search_ranges[1].reduction.max_groups_per_series, 64U);
-  EXPECT_FLOAT_EQ(config.snr_threshold, 8.0F);
-  EXPECT_EQ(config.max_peaks, 12U);
-  EXPECT_EQ(config.max_total_raw_peaks, 100U);
-  EXPECT_EQ(config.max_candidates, 4U);
-  EXPECT_DOUBLE_EQ(config.candidate_dm_radius, 2.5);
+  EXPECT_DOUBLE_EQ(config.search_ranges[1].reduction.phase_tolerance_cycles,
+                   0.05);
+  EXPECT_FLOAT_EQ(config.candidate.detection.snr_threshold, 8.0F);
+  EXPECT_EQ(config.candidate.detection.max_peaks_per_dm, 12U);
+  EXPECT_EQ(config.candidate.detection.max_total_raw_peaks, 100U);
+  EXPECT_DOUBLE_EQ(config.candidate.grouping.max_phase_distance_cycles, 0.03);
+  EXPECT_FALSE(config.candidate.grouping.merge_widths);
+  EXPECT_DOUBLE_EQ(config.candidate.clustering.max_phase_distance_cycles, 0.2);
+  EXPECT_DOUBLE_EQ(config.candidate.clustering.max_dm_distance, 2.5);
+  EXPECT_FALSE(config.candidate.clustering.cluster_across_widths);
+  EXPECT_EQ(config.candidate.harmonic.max_harmonic, 12U);
+  EXPECT_EQ(config.candidate.harmonic.denominator_max, 4U);
+  ASSERT_TRUE(config.candidate.harmonic.frequency_tolerance_bins.has_value());
+  EXPECT_DOUBLE_EQ(*config.candidate.harmonic.frequency_tolerance_bins, 0.75);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.phase_distance_max, 0.8);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.dm_distance_max, 2.0);
+  EXPECT_TRUE(config.candidate.harmonic.use_snr_consistency);
+  EXPECT_DOUBLE_EQ(config.candidate.harmonic.snr_distance_max, 2.5);
+  EXPECT_FLOAT_EQ(config.candidate.selection.snr_min, 8.0F);
+  EXPECT_EQ(config.candidate.selection.max_candidates, 4U);
   EXPECT_EQ(config.print_candidates, 7U);
   ASSERT_TRUE(config.candidate_output.has_value());
   EXPECT_EQ(*config.candidate_output,

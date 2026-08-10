@@ -9,6 +9,7 @@
 #include <initializer_list>
 #include <limits>
 #include <array>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <stdexcept>
@@ -74,6 +75,17 @@ T optional_scalar(const YAML::Node& parent, const char* key, T fallback,
                  std::string_view path) {
   const YAML::Node node = parent[key];
   return node ? scalar<T>(node, path) : fallback;
+}
+
+template <typename T>
+std::optional<T> optional_nullable_scalar(const YAML::Node& parent,
+                                          const char* key,
+                                          std::string_view path) {
+  const YAML::Node node = parent[key];
+  if (!node || node.IsNull()) {
+    return std::nullopt;
+  }
+  return scalar<T>(node, path);
 }
 
 std::size_t nonnegative_size(const YAML::Node& node, std::string_view path) {
@@ -281,7 +293,8 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
   if (reduction_node) {
     require_map(reduction_node, path + ".reduction");
     reject_unknown_keys(reduction_node,
-                        {"top_k", "max_groups", "frequency_tolerance_hz"},
+                        {"top_k", "max_groups", "frequency_tolerance_hz",
+                         "phase_tolerance_cycles"},
                         path + ".reduction");
     if (reduction_node["top_k"]) {
       reduction.top_k_per_group = nonnegative_size(
@@ -295,6 +308,11 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
       reduction.frequency_tolerance_hz = scalar<double>(
           reduction_node["frequency_tolerance_hz"],
           path + ".reduction.frequency_tolerance_hz");
+    }
+    if (reduction_node["phase_tolerance_cycles"]) {
+      reduction.phase_tolerance_cycles = scalar<double>(
+          reduction_node["phase_tolerance_cycles"],
+          path + ".reduction.phase_tolerance_cycles");
     }
   }
 
@@ -457,27 +475,115 @@ void parse_candidate(const YAML::Node& root, Config& config) {
   }
   require_map(node, "candidate");
   reject_unknown_keys(node,
-                      {"snr_threshold", "max_peaks", "max_total_raw_peaks",
-                       "max_candidates", "dm_radius"},
+                      {"detection", "grouping", "clustering", "harmonic",
+                       "selection"},
                       "candidate");
-  config.snr_threshold = optional_scalar<float>(
-      node, "snr_threshold", config.snr_threshold,
-      "candidate.snr_threshold");
-  if (node["max_peaks"]) {
-    config.max_peaks =
-        nonnegative_size(node["max_peaks"], "candidate.max_peaks");
+
+  const YAML::Node detection = node["detection"];
+  if (detection) {
+    require_map(detection, "candidate.detection");
+    reject_unknown_keys(detection,
+                        {"snr_threshold", "max_peaks_per_dm",
+                         "max_total_raw_peaks"},
+                        "candidate.detection");
+    config.candidate.detection.snr_threshold = optional_scalar<float>(
+        detection, "snr_threshold", config.candidate.detection.snr_threshold,
+        "candidate.detection.snr_threshold");
+    if (detection["max_peaks_per_dm"]) {
+      config.candidate.detection.max_peaks_per_dm = nonnegative_size(
+          detection["max_peaks_per_dm"],
+          "candidate.detection.max_peaks_per_dm");
+    }
+    if (detection["max_total_raw_peaks"]) {
+      config.candidate.detection.max_total_raw_peaks = nonnegative_size(
+          detection["max_total_raw_peaks"],
+          "candidate.detection.max_total_raw_peaks");
+    }
   }
-  if (node["max_total_raw_peaks"]) {
-    config.max_total_raw_peaks = nonnegative_size(
-        node["max_total_raw_peaks"], "candidate.max_total_raw_peaks");
+
+  const YAML::Node grouping = node["grouping"];
+  if (grouping) {
+    require_map(grouping, "candidate.grouping");
+    reject_unknown_keys(grouping, {"max_phase_distance_cycles", "merge_widths"},
+                        "candidate.grouping");
+    config.candidate.grouping.max_phase_distance_cycles = optional_scalar<double>(
+        grouping, "max_phase_distance_cycles",
+        config.candidate.grouping.max_phase_distance_cycles,
+        "candidate.grouping.max_phase_distance_cycles");
+    config.candidate.grouping.merge_widths = optional_scalar<bool>(
+        grouping, "merge_widths", config.candidate.grouping.merge_widths,
+        "candidate.grouping.merge_widths");
   }
-  if (node["max_candidates"]) {
-    config.max_candidates =
-        nonnegative_size(node["max_candidates"], "candidate.max_candidates");
+
+  const YAML::Node clustering = node["clustering"];
+  if (clustering) {
+    require_map(clustering, "candidate.clustering");
+    reject_unknown_keys(clustering,
+                        {"max_phase_distance_cycles", "max_dm_distance",
+                         "merge_widths"},
+                        "candidate.clustering");
+    config.candidate.clustering.max_phase_distance_cycles = optional_scalar<double>(
+        clustering, "max_phase_distance_cycles",
+        config.candidate.clustering.max_phase_distance_cycles,
+        "candidate.clustering.max_phase_distance_cycles");
+    config.candidate.clustering.max_dm_distance = optional_scalar<double>(
+        clustering, "max_dm_distance",
+        config.candidate.clustering.max_dm_distance,
+        "candidate.clustering.max_dm_distance");
+    config.candidate.clustering.cluster_across_widths = optional_scalar<bool>(
+        clustering, "merge_widths",
+        config.candidate.clustering.cluster_across_widths,
+        "candidate.clustering.merge_widths");
   }
-  if (node["dm_radius"]) {
-    config.candidate_dm_radius =
-        scalar<double>(node["dm_radius"], "candidate.dm_radius");
+
+  const YAML::Node harmonic = node["harmonic"];
+  if (harmonic) {
+    require_map(harmonic, "candidate.harmonic");
+    reject_unknown_keys(harmonic,
+                        {"max_harmonic", "denominator_max",
+                         "frequency_tolerance_bins", "phase_distance_max",
+                         "dm_distance_max", "use_snr_consistency",
+                         "snr_distance_max"},
+                        "candidate.harmonic");
+    config.candidate.harmonic.max_harmonic = optional_scalar<std::size_t>(
+        harmonic, "max_harmonic", config.candidate.harmonic.max_harmonic,
+        "candidate.harmonic.max_harmonic");
+    config.candidate.harmonic.denominator_max = optional_scalar<std::size_t>(
+        harmonic, "denominator_max",
+        config.candidate.harmonic.denominator_max,
+        "candidate.harmonic.denominator_max");
+    config.candidate.harmonic.frequency_tolerance_bins =
+        optional_nullable_scalar<double>(
+            harmonic, "frequency_tolerance_bins",
+            "candidate.harmonic.frequency_tolerance_bins");
+    config.candidate.harmonic.phase_distance_max = optional_scalar<double>(
+        harmonic, "phase_distance_max",
+        config.candidate.harmonic.phase_distance_max,
+        "candidate.harmonic.phase_distance_max");
+    config.candidate.harmonic.dm_distance_max = optional_scalar<double>(
+        harmonic, "dm_distance_max", config.candidate.harmonic.dm_distance_max,
+        "candidate.harmonic.dm_distance_max");
+    config.candidate.harmonic.use_snr_consistency = optional_scalar<bool>(
+        harmonic, "use_snr_consistency",
+        config.candidate.harmonic.use_snr_consistency,
+        "candidate.harmonic.use_snr_consistency");
+    config.candidate.harmonic.snr_distance_max = optional_scalar<double>(
+        harmonic, "snr_distance_max",
+        config.candidate.harmonic.snr_distance_max,
+        "candidate.harmonic.snr_distance_max");
+  }
+
+  const YAML::Node selection = node["selection"];
+  if (selection) {
+    require_map(selection, "candidate.selection");
+    reject_unknown_keys(selection, {"snr_min", "max_candidates"},
+                        "candidate.selection");
+    config.candidate.selection.snr_min = optional_scalar<float>(
+        selection, "snr_min", config.candidate.selection.snr_min,
+        "candidate.selection.snr_min");
+    config.candidate.selection.max_candidates = optional_scalar<std::size_t>(
+        selection, "max_candidates", config.candidate.selection.max_candidates,
+        "candidate.selection.max_candidates");
   }
 }
 

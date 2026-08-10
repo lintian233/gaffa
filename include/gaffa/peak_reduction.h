@@ -15,9 +15,15 @@ struct PeakReductionOptions {
   std::size_t max_groups_per_series = 0;
 
   // Native FFA frequency bucket width. Zero selects one Fourier bin of the
-  // active observation (1 / duration). Loki uses its discrete search
-  // coordinates and does not use this field.
+  // active observation (1 / duration). Loki does not use this field.
   double frequency_tolerance_hz = 0.0;
+
+  // Loki phase-cell width in cycles over the searched observation. Zero uses
+  // one exact Loki search coordinate per group. A positive value creates a
+  // conservative, backend-local phase-cell key; it is a lossy pre-reduction
+  // hint, not the final scientific candidate equivalence test. Native FFA
+  // does not use this field.
+  double phase_tolerance_cycles = 0.0;
 
   [[nodiscard]] bool enabled() const noexcept {
     return top_k_per_group != 0;

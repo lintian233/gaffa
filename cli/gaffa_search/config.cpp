@@ -149,9 +149,11 @@ struct MotionOverride {
 };
 
 struct ReductionOverride {
+  enum class Term { TopK, MaxGroups, PhaseTolerance };
   std::size_t search_id = 0;
-  bool top_k = false;
-  std::size_t value = 0;
+  Term term = Term::TopK;
+  std::size_t size_value = 0;
+  double double_value = 0.0;
 };
 
 void apply_motion_overrides(Config& config,
@@ -178,19 +180,72 @@ void apply_reduction_overrides(
       throw std::invalid_argument("reduction search id is out of range");
     }
     auto& reduction = config.search_ranges[item.search_id].reduction;
+    if (item.term == ReductionOverride::Term::PhaseTolerance) {
+      reduction.phase_tolerance_cycles = item.double_value;
+      continue;
+    }
     std::size_t* target =
-        item.top_k ? &reduction.top_k_per_group
-                   : &reduction.max_groups_per_series;
+        item.term == ReductionOverride::Term::TopK
+            ? &reduction.top_k_per_group
+            : &reduction.max_groups_per_series;
     if (*target != 0) {
       throw std::invalid_argument(
           "reduction option was specified more than once");
     }
-    *target = item.value;
+    *target = item.size_value;
   }
 }
 
 bool has_motion(const MotionRangeConfig& motion) {
   return motion.accel.has_value() || motion.jerk.has_value();
+}
+
+void validate_candidate_config(const CandidateConfig& candidate) {
+  if (!std::isfinite(candidate.detection.snr_threshold)) {
+    throw std::invalid_argument(
+        "candidate detection SNR threshold must be finite");
+  }
+  if (!std::isfinite(candidate.grouping.max_phase_distance_cycles) ||
+      candidate.grouping.max_phase_distance_cycles < 0.0) {
+    throw std::invalid_argument(
+        "candidate grouping phase distance must be finite and non-negative");
+  }
+  if (!std::isfinite(candidate.clustering.max_phase_distance_cycles) ||
+      candidate.clustering.max_phase_distance_cycles < 0.0) {
+    throw std::invalid_argument(
+        "candidate clustering phase distance must be finite and non-negative");
+  }
+  if (!std::isfinite(candidate.clustering.max_dm_distance) ||
+      candidate.clustering.max_dm_distance < 0.0) {
+    throw std::invalid_argument(
+        "candidate clustering DM distance must be finite and non-negative");
+  }
+  if (candidate.harmonic.max_harmonic < 2) {
+    throw std::invalid_argument("candidate harmonic max must be >= 2");
+  }
+  if (candidate.harmonic.denominator_max == 0) {
+    throw std::invalid_argument(
+        "candidate harmonic denominator max must be > 0");
+  }
+  if (candidate.harmonic.frequency_tolerance_bins &&
+      (!std::isfinite(*candidate.harmonic.frequency_tolerance_bins) ||
+       *candidate.harmonic.frequency_tolerance_bins < 0.0)) {
+    throw std::invalid_argument(
+        "candidate harmonic frequency tolerance must be finite and non-negative");
+  }
+  if (!std::isfinite(candidate.harmonic.phase_distance_max) ||
+      candidate.harmonic.phase_distance_max < 0.0 ||
+      !std::isfinite(candidate.harmonic.dm_distance_max) ||
+      candidate.harmonic.dm_distance_max < 0.0 ||
+      !std::isfinite(candidate.harmonic.snr_distance_max) ||
+      candidate.harmonic.snr_distance_max < 0.0) {
+    throw std::invalid_argument(
+        "candidate harmonic distances must be finite and non-negative");
+  }
+  if (!std::isfinite(candidate.selection.snr_min)) {
+    throw std::invalid_argument(
+        "candidate selection SNR minimum must be finite");
+  }
 }
 
 void validate_motion_range(const std::optional<gaffa::ValueRange>& range,
@@ -223,9 +278,7 @@ void validate_config_impl(const Config& config) {
     throw std::invalid_argument(
         "native CUDA max peak memory must be greater than zero");
   }
-  if (!std::isfinite(config.snr_threshold)) {
-    throw std::invalid_argument("snr threshold must be finite");
-  }
+  validate_candidate_config(config.candidate);
   if (config.candidate_output && config.candidate_output->empty()) {
     throw std::invalid_argument("--cand path must not be empty");
   }
@@ -270,12 +323,6 @@ void validate_config_impl(const Config& config) {
     previous_global_end += range.ndm;
     previous_end = range_end;
   }
-  if (!std::isfinite(config.candidate_dm_radius) ||
-      config.candidate_dm_radius < 0.0) {
-    throw std::invalid_argument(
-        "candidate DM radius must be finite and non-negative");
-  }
-
   for (const auto& search : config.search_ranges) {
     if (!(search.period_min > 0.0) ||
         !(search.period_max > search.period_min) ||
@@ -295,6 +342,11 @@ void validate_config_impl(const Config& config) {
         search.reduction.frequency_tolerance_hz < 0.0) {
       throw std::invalid_argument(
           "reduction frequency tolerance must be finite and non-negative");
+    }
+    if (!std::isfinite(search.reduction.phase_tolerance_cycles) ||
+        search.reduction.phase_tolerance_cycles < 0.0) {
+      throw std::invalid_argument(
+          "reduction phase tolerance must be finite and non-negative");
     }
     if (search.motion.jerk && !search.motion.accel) {
       throw std::invalid_argument("jerk search requires accel search");
@@ -338,6 +390,7 @@ void print_usage(const char* program) {
       << "  --search-jerk ID:MIN:MAX  Loki jerk range in m/s^3\n"
       << "  --search-top-k ID:N       GPU peak top-K per coordinate group\n"
       << "  --search-max-groups ID:N Maximum coordinate groups per DM\n"
+      << "  --search-phase-tolerance ID:N Loki phase-cell tolerance in cycles\n"
       << "  --dedisp-backend VALUE    cpu-subband or cuda-subband\n"
       << "  --dedisp-device ID        CUDA device for dedispersion\n"
       << "  --native-devices IDS      Comma-separated Native CUDA devices\n"
@@ -347,14 +400,26 @@ void print_usage(const char* program) {
       << "  --median-seconds VALUE    Running median width\n"
       << "  --subband-channels N      Subband channel count\n"
       << "  --ndm-per-nominal N       DM trials per nominal subband\n"
-      << "  --snr-threshold VALUE     Raw peak threshold\n"
-      << "  --max-peaks N             Per-series raw peak limit; 0 is unlimited\n"
+      << "  --snr-threshold VALUE     Detection raw peak threshold\n"
+      << "  --max-peaks N             Per-DM raw peak limit; 0 is unlimited\n"
       << "  --max-total-raw-peaks N   Whole-run raw peak limit; 0 is unlimited\n"
+      << "  --candidate-group-phase N Same-DM phase grouping distance in cycles\n"
+      << "  --candidate-no-group-widths Do not merge different widths within DM\n"
+      << "  --candidate-cluster-phase N Cross-DM phase distance in cycles\n"
+      << "  --candidate-dm-radius N   Cross-DM radius in pc cm^-3\n"
+      << "  --candidate-no-cluster-widths Do not cluster across widths\n"
+      << "  --candidate-snr-min N     Final candidate SNR minimum\n"
       << "  --max-candidates N        Final candidate limit; 0 is unlimited\n"
+      << "  --harmonic-max N          Maximum harmonic numerator\n"
+      << "  --harmonic-denominator-max N Maximum harmonic denominator\n"
+      << "  --harmonic-frequency-bins N Optional harmonic frequency guard\n"
+      << "  --harmonic-phase-distance N Harmonic phase distance limit\n"
+      << "  --harmonic-dm-distance N  Harmonic DM distance limit\n"
+      << "  --harmonic-use-snr-consistency Enable harmonic SNR consistency\n"
+      << "  --harmonic-snr-distance N Harmonic SNR distance limit\n"
       << "  --print-candidates N      Number shown on stdout; 0 prints all\n"
       << "  --cand PATH               Output prefix/directory for .cand and .out\n"
       << "  --overwrite               Allow replacing existing output files\n"
-      << "  --candidate-dm-radius N   Cross-DM radius in pc cm^-3\n"
       << "  --help                    Show this message\n";
 }
 
@@ -421,20 +486,33 @@ Config parse_arguments(int argc, char** argv) {
           },
       });
     } else if (argument == "--search-top-k" ||
-               argument == "--search-max-groups") {
+               argument == "--search-max-groups" ||
+               argument == "--search-phase-tolerance") {
       const char* option = argument == "--search-top-k"
                                ? "--search-top-k"
-                               : "--search-max-groups";
+                               : argument == "--search-max-groups"
+                                     ? "--search-max-groups"
+                                     : "--search-phase-tolerance";
       const auto parts = split(require_value(option), ':');
       if (parts.size() != 2) {
         throw std::invalid_argument(std::string(option) +
                                     " expects search_id:value");
       }
-      reduction_overrides.push_back(ReductionOverride{
+      ReductionOverride override{
           .search_id = parse_number<std::size_t>(parts[0], "search id"),
-          .top_k = argument == "--search-top-k",
-          .value = parse_number<std::size_t>(parts[1], "reduction value"),
-      });
+      };
+      if (argument == "--search-phase-tolerance") {
+        override.term = ReductionOverride::Term::PhaseTolerance;
+        override.double_value =
+            parse_number<double>(parts[1], "phase tolerance");
+      } else {
+        override.term = argument == "--search-top-k"
+                            ? ReductionOverride::Term::TopK
+                            : ReductionOverride::Term::MaxGroups;
+        override.size_value =
+            parse_number<std::size_t>(parts[1], "reduction value");
+      }
+      reduction_overrides.push_back(override);
     } else if (argument == "--dedisp-backend") {
       const auto value = require_value("--dedisp-backend");
       if (value == "cpu-subband") {
@@ -477,21 +555,63 @@ Config parse_arguments(int argc, char** argv) {
           parse_number<std::size_t>(require_value("--ndm-per-nominal"),
                                     "ndm per nominal");
     } else if (argument == "--snr-threshold") {
-      config.snr_threshold =
+      config.candidate.detection.snr_threshold =
           parse_number<float>(require_value("--snr-threshold"),
                               "SNR threshold");
     } else if (argument == "--max-peaks") {
-      config.max_peaks =
+      config.candidate.detection.max_peaks_per_dm =
           parse_number<std::size_t>(require_value("--max-peaks"),
                                     "max peaks");
     } else if (argument == "--max-total-raw-peaks") {
-      config.max_total_raw_peaks =
+      config.candidate.detection.max_total_raw_peaks =
           parse_number<std::size_t>(require_value("--max-total-raw-peaks"),
                                     "max total raw peaks");
+    } else if (argument == "--candidate-group-phase") {
+      config.candidate.grouping.max_phase_distance_cycles =
+          parse_number<double>(require_value("--candidate-group-phase"),
+                               "candidate grouping phase distance");
+    } else if (argument == "--candidate-no-group-widths") {
+      config.candidate.grouping.merge_widths = false;
+    } else if (argument == "--candidate-cluster-phase") {
+      config.candidate.clustering.max_phase_distance_cycles =
+          parse_number<double>(require_value("--candidate-cluster-phase"),
+                               "candidate clustering phase distance");
+    } else if (argument == "--candidate-no-cluster-widths") {
+      config.candidate.clustering.cluster_across_widths = false;
+    } else if (argument == "--candidate-snr-min") {
+      config.candidate.selection.snr_min =
+          parse_number<float>(require_value("--candidate-snr-min"),
+                              "candidate SNR minimum");
     } else if (argument == "--max-candidates") {
-      config.max_candidates =
+      config.candidate.selection.max_candidates =
           parse_number<std::size_t>(require_value("--max-candidates"),
                                     "max candidates");
+    } else if (argument == "--harmonic-max") {
+      config.candidate.harmonic.max_harmonic =
+          parse_number<std::size_t>(require_value("--harmonic-max"),
+                                    "harmonic max");
+    } else if (argument == "--harmonic-denominator-max") {
+      config.candidate.harmonic.denominator_max =
+          parse_number<std::size_t>(require_value("--harmonic-denominator-max"),
+                                    "harmonic denominator max");
+    } else if (argument == "--harmonic-frequency-bins") {
+      config.candidate.harmonic.frequency_tolerance_bins =
+          parse_number<double>(require_value("--harmonic-frequency-bins"),
+                               "harmonic frequency tolerance");
+    } else if (argument == "--harmonic-phase-distance") {
+      config.candidate.harmonic.phase_distance_max =
+          parse_number<double>(require_value("--harmonic-phase-distance"),
+                               "harmonic phase distance");
+    } else if (argument == "--harmonic-dm-distance") {
+      config.candidate.harmonic.dm_distance_max =
+          parse_number<double>(require_value("--harmonic-dm-distance"),
+                               "harmonic DM distance");
+    } else if (argument == "--harmonic-use-snr-consistency") {
+      config.candidate.harmonic.use_snr_consistency = true;
+    } else if (argument == "--harmonic-snr-distance") {
+      config.candidate.harmonic.snr_distance_max =
+          parse_number<double>(require_value("--harmonic-snr-distance"),
+                               "harmonic SNR distance");
     } else if (argument == "--print-candidates") {
       config.print_candidates =
           parse_number<std::size_t>(require_value("--print-candidates"),
@@ -502,7 +622,7 @@ Config parse_arguments(int argc, char** argv) {
     } else if (argument == "--overwrite") {
       config.overwrite_output = true;
     } else if (argument == "--candidate-dm-radius") {
-      config.candidate_dm_radius =
+      config.candidate.clustering.max_dm_distance =
           parse_number<double>(require_value("--candidate-dm-radius"),
                                "candidate DM radius");
     } else {

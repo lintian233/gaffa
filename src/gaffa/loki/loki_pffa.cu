@@ -14,12 +14,16 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <stdexcept>
+#include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace gaffa {
@@ -175,6 +179,146 @@ double parameter_value(const loki::ParamLimit& limit, std::size_t count,
                          (static_cast<double>(index) + 0.5);
 }
 
+struct LokiPhaseCellKey {
+  std::uint8_t order = 0;
+  std::int64_t frequency = 0;
+  std::int64_t acceleration = 0;
+  std::int64_t jerk = 0;
+  std::int64_t snap = 0;
+
+  [[nodiscard]] bool operator==(const LokiPhaseCellKey& other) const noexcept {
+    return order == other.order && frequency == other.frequency &&
+           acceleration == other.acceleration && jerk == other.jerk &&
+           snap == other.snap;
+  }
+};
+
+struct LokiPhaseCellKeyHash {
+  [[nodiscard]] std::size_t operator()(
+      const LokiPhaseCellKey& key) const noexcept {
+    std::size_t result = std::hash<std::uint8_t>{}(key.order);
+    const auto combine = [&result](std::int64_t value) {
+      const std::size_t hash = std::hash<std::int64_t>{}(value);
+      result ^= hash + static_cast<std::size_t>(0x9e3779b9U) +
+                (result << 6U) + (result >> 2U);
+    };
+    combine(key.frequency);
+    combine(key.acceleration);
+    combine(key.jerk);
+    combine(key.snap);
+    return result;
+  }
+};
+
+struct LokiPhaseCellWidths {
+  double frequency = 0.0;
+  double acceleration = 0.0;
+  double jerk = 0.0;
+  double snap = 0.0;
+};
+
+double max_abs(const std::optional<ValueRange>& range) {
+  if (!range) {
+    return 0.0;
+  }
+  return std::max(std::abs(range->minimum), std::abs(range->maximum));
+}
+
+std::int64_t phase_cell_index(double value, double width) {
+  const long double cell = std::floor(static_cast<long double>(value) /
+                                      static_cast<long double>(width));
+  if (cell < static_cast<long double>(std::numeric_limits<std::int64_t>::min()) ||
+      cell > static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
+    throw std::overflow_error("Loki phase reduction cell index overflows int64");
+  }
+  return static_cast<std::int64_t>(cell);
+}
+
+LokiPhaseCellWidths make_loki_phase_cell_widths(
+    const LokiPffaPlan& plan, MotionOrder order, double tolerance_cycles) {
+  if (!(tolerance_cycles > 0.0) || !std::isfinite(tolerance_cycles)) {
+    throw std::invalid_argument(
+        "Loki phase tolerance must be finite and greater than zero");
+  }
+
+  constexpr double speed_of_light_m_per_s = 299792458.0;
+  const double duration = static_cast<double>(plan.input_nsamples()) *
+                          plan.tsamp_seconds();
+  const double half_duration = 0.5 * duration;
+  const double maximum_frequency =
+      std::max(std::abs(plan.search_space().frequency_hz.minimum),
+               std::abs(plan.search_space().frequency_hz.maximum));
+  const double maximum_displacement =
+      0.5 * max_abs(plan.search_space().acceleration_m_per_s2) *
+          half_duration * half_duration +
+      max_abs(plan.search_space().jerk_m_per_s3) * half_duration *
+          half_duration * half_duration / 6.0 +
+      max_abs(plan.search_space().snap_m_per_s4) * half_duration *
+          half_duration * half_duration * half_duration / 24.0;
+  const double maximum_phase_time =
+      half_duration + maximum_displacement / speed_of_light_m_per_s;
+  if (!(maximum_frequency > 0.0) || !(maximum_phase_time > 0.0) ||
+      !std::isfinite(maximum_frequency) || !std::isfinite(maximum_phase_time)) {
+    throw std::invalid_argument(
+        "Loki phase reduction requires finite positive search scales");
+  }
+
+  const std::size_t term_count =
+      1U + (order >= MotionOrder::Acceleration ? 1U : 0U) +
+      (order >= MotionOrder::Jerk ? 1U : 0U) +
+      (order >= MotionOrder::Snap ? 1U : 0U);
+  const double term_budget = tolerance_cycles /
+                             static_cast<double>(term_count);
+  const double frequency_width = term_budget / maximum_phase_time;
+  LokiPhaseCellWidths widths{.frequency = frequency_width};
+  if (order >= MotionOrder::Acceleration) {
+    widths.acceleration =
+        2.0 * speed_of_light_m_per_s * term_budget /
+        (maximum_frequency * half_duration * half_duration);
+  }
+  if (order >= MotionOrder::Jerk) {
+    widths.jerk =
+        6.0 * speed_of_light_m_per_s * term_budget /
+        (maximum_frequency * half_duration * half_duration * half_duration);
+  }
+  if (order >= MotionOrder::Snap) {
+    widths.snap =
+        24.0 * speed_of_light_m_per_s * term_budget /
+        (maximum_frequency * half_duration * half_duration * half_duration *
+         half_duration);
+  }
+  if (!(widths.frequency > 0.0) || !std::isfinite(widths.frequency) ||
+      (order >= MotionOrder::Acceleration &&
+       (!(widths.acceleration > 0.0) ||
+        !std::isfinite(widths.acceleration))) ||
+      (order >= MotionOrder::Jerk &&
+       (!(widths.jerk > 0.0) || !std::isfinite(widths.jerk))) ||
+      (order >= MotionOrder::Snap &&
+       (!(widths.snap > 0.0) || !std::isfinite(widths.snap)))) {
+    throw std::invalid_argument("Loki phase reduction cell width is invalid");
+  }
+  return widths;
+}
+
+LokiPhaseCellKey make_loki_phase_cell_key(
+    const PeriodicMotion& motion, const LokiPhaseCellWidths& widths) {
+  return LokiPhaseCellKey{
+      .order = static_cast<std::uint8_t>(motion.order),
+      .frequency = phase_cell_index(motion.frequency_hz, widths.frequency),
+      .acceleration =
+          widths.acceleration == 0.0
+              ? 0
+              : phase_cell_index(motion.acceleration_m_per_s2,
+                                 widths.acceleration),
+      .jerk = widths.jerk == 0.0
+                  ? 0
+                  : phase_cell_index(motion.jerk_m_per_s3, widths.jerk),
+      .snap = widths.snap == 0.0
+                  ? 0
+                  : phase_cell_index(motion.snap_m_per_s4, widths.snap),
+  };
+}
+
 struct LokiPeakRef {
   float snr = 0.0F;
   std::uint32_t index = 0;
@@ -202,11 +346,11 @@ __global__ void build_loki_reduction_refs_kernel(
 
 __global__ void build_loki_reduction_group_keys_kernel(
     const LokiPeakRef* refs, std::size_t count, std::size_t width_count,
-    std::uint32_t* keys) {
+    const std::uint32_t* coordinate_groups, std::uint32_t* keys) {
   const std::size_t index =
       static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (index < count) {
-    keys[index] = static_cast<std::uint32_t>(refs[index].index / width_count);
+    keys[index] = coordinate_groups[refs[index].index / width_count];
   }
 }
 
@@ -264,6 +408,7 @@ class LokiReductionWorkspace {
                          std::size_t input_capacity)
       : top_k_(options.top_k_per_group),
         max_groups_(options.max_groups_per_series),
+        phase_tolerance_cycles_(options.phase_tolerance_cycles),
         input_capacity_(input_capacity) {
     if (top_k_ == 0) {
       return;
@@ -290,12 +435,14 @@ class LokiReductionWorkspace {
                              std::size_t capacity) const noexcept {
     return top_k_ == options.top_k_per_group &&
            max_groups_ == options.max_groups_per_series &&
+           phase_tolerance_cycles_ == options.phase_tolerance_cycles &&
            input_capacity_ >= capacity;
   }
 
   [[nodiscard]] std::size_t bytes() const noexcept {
     return refs_a_.bytes() + refs_b_.bytes() + sorted_scores_.bytes() +
            keys_a_.bytes() + keys_b_.bytes() + group_count_.bytes() +
+           coordinate_groups_.bytes() +
            output_.bytes() + output_count_.bytes() + overflow_.bytes() +
            temp_.bytes();
   }
@@ -334,6 +481,8 @@ class LokiReductionWorkspace {
               "Loki reduction group key byte size overflow");
     add_array(input_capacity, sizeof(std::uint32_t),
               "Loki reduction group key byte size overflow");
+    add_array(input_capacity, sizeof(std::uint32_t),
+              "Loki reduction coordinate group byte size overflow");
     add_array(1, sizeof(std::uint32_t),
               "Loki reduction group counter byte size overflow");
     const std::size_t output_count = checked_multiply(
@@ -353,6 +502,17 @@ class LokiReductionWorkspace {
 
   [[nodiscard]] const CudaDeviceBuffer<LokiPeakRef>& output() const noexcept {
     return output_;
+  }
+
+  void set_coordinate_groups(std::span<const std::uint32_t> groups,
+                              cudaStream_t stream) {
+    if (!enabled() || groups.empty() || groups.size() > input_capacity_) {
+      throw std::invalid_argument("invalid Loki coordinate group metadata");
+    }
+    check_cuda(cudaMemcpyAsync(coordinate_groups_.data(), groups.data(),
+                               groups.size() * sizeof(std::uint32_t),
+                               cudaMemcpyHostToDevice, stream),
+               "Loki reduction coordinate groups H2D");
   }
 
   LokiReductionSummary reduce(const CudaDeviceBuffer<float>& scores,
@@ -385,7 +545,8 @@ class LokiReductionWorkspace {
         temp_.data(), temp_bytes, scores.data(), sorted_scores_.data(),
         refs_a_.data(), refs_b_.data(), count, 0, sizeof(float) * 8, stream);
     build_loki_reduction_group_keys_kernel<<<blocks, 256, 0, stream>>>(
-        refs_b_.data(), count, width_count, keys_a_.data());
+        refs_b_.data(), count, width_count, coordinate_groups_.data(),
+        keys_a_.data());
     check_cuda(cudaGetLastError(), "Loki reduction key launch");
     cub::DeviceRadixSort::SortPairs(
         temp_.data(), temp_bytes, keys_a_.data(), keys_b_.data(),
@@ -423,6 +584,7 @@ class LokiReductionWorkspace {
     keys_a_ = CudaDeviceBuffer<std::uint32_t>(input_capacity_);
     keys_b_ = CudaDeviceBuffer<std::uint32_t>(input_capacity_);
     group_count_ = CudaDeviceBuffer<std::uint32_t>(1);
+    coordinate_groups_ = CudaDeviceBuffer<std::uint32_t>(input_capacity_);
     output_ = CudaDeviceBuffer<LokiPeakRef>(checked_multiply(
         max_groups_, top_k_, "Loki reduction output size overflow"));
     output_count_ = CudaDeviceBuffer<unsigned long long>(1);
@@ -432,6 +594,7 @@ class LokiReductionWorkspace {
 
   std::size_t top_k_ = 0;
   std::size_t max_groups_ = 0;
+  double phase_tolerance_cycles_ = 0.0;
   std::size_t input_capacity_ = 0;
   CudaDeviceBuffer<LokiPeakRef> refs_a_;
   CudaDeviceBuffer<LokiPeakRef> refs_b_;
@@ -439,6 +602,7 @@ class LokiReductionWorkspace {
   CudaDeviceBuffer<std::uint32_t> keys_a_;
   CudaDeviceBuffer<std::uint32_t> keys_b_;
   CudaDeviceBuffer<std::uint32_t> group_count_;
+  CudaDeviceBuffer<std::uint32_t> coordinate_groups_;
   CudaDeviceBuffer<LokiPeakRef> output_;
   CudaDeviceBuffer<unsigned long long> output_count_;
   CudaDeviceBuffer<unsigned int> overflow_;
@@ -454,6 +618,8 @@ struct LokiPffaProgram::Impl {
     std::vector<std::uint32_t> widths;
     std::size_t score_count = 0;
     std::size_t transient_bytes = 0;
+    std::vector<std::uint32_t> reduction_groups;
+    double reduction_phase_tolerance_cycles = -1.0;
 
     Region(loki::search::PulsarSearchConfig config_in,
            std::unique_ptr<loki::plans::FFAPlan<float>> plan_in,
@@ -488,6 +654,10 @@ struct LokiPffaProgram::Impl {
   [[nodiscard]] static loki::search::PulsarSearchConfig make_base_config(
       const LokiPffaPlan& plan, std::size_t budget_bytes);
   void initialize(cudaStream_t stream);
+  [[nodiscard]] PeriodicMotion make_motion(
+      const Region& region, std::size_t coordinate_index) const;
+  [[nodiscard]] std::vector<std::uint32_t> make_reduction_groups(
+      const Region& region, double phase_tolerance_cycles) const;
   [[nodiscard]] PeriodicPeak make_peak(const Region& region, float snr,
                                        std::uint32_t flat_index) const;
 
@@ -709,21 +879,19 @@ void LokiPffaProgram::Impl::initialize(cudaStream_t stream) {
   layout.emplace(std::move(new_layout));
 }
 
-PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
-                                              float snr,
-                                              std::uint32_t flat_index) const {
-  const std::size_t width_count = region.widths.size();
-  const std::size_t coordinate_index = flat_index / width_count;
-  const std::size_t width_index = flat_index % width_count;
+PeriodicMotion LokiPffaProgram::Impl::make_motion(
+    const Region& region, std::size_t coordinate_index) const {
   const auto& counts = region.plan->get_param_counts().back();
   const auto& strides = region.plan->get_param_cart_strides().back();
   const auto limits = region.config.get_param_limits();
   if (counts.size() != limits.size() || strides.size() != limits.size() ||
-      width_index >= region.widths.size()) {
+      coordinate_index >= region.plan->get_ncoords().back()) {
     throw std::runtime_error("invalid Loki compact candidate index metadata");
   }
-  std::vector<double> values;
-  values.reserve(limits.size());
+  if (limits.empty() || limits.size() > 4) {
+    throw std::runtime_error("unsupported Loki periodic coordinate dimension");
+  }
+  std::array<double, 4> values{};
   std::size_t remaining = coordinate_index;
   for (std::size_t index = 0; index < limits.size(); ++index) {
     const std::size_t parameter_index = remaining / strides[index];
@@ -731,19 +899,83 @@ PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
     if (parameter_index >= counts[index]) {
       throw std::runtime_error("Loki compact candidate coordinate is out of range");
     }
-    values.push_back(parameter_value(limits[index], counts[index], parameter_index));
+    values[index] = parameter_value(limits[index], counts[index], parameter_index);
+  }
+
+  PeriodicMotion motion{
+      .order = MotionOrder::Frequency,
+      // Loki's direct coordinates are defined on the full plan-length search
+      // window, which may include benchmark-local zero padding.
+      .reference_time_seconds =
+          0.5 * static_cast<double>(plan.input_nsamples()) * plan.tsamp_seconds(),
+      .frequency_hz = values[limits.size() - 1],
+  };
+  if (limits.size() >= 2) {
+    motion.order = MotionOrder::Acceleration;
+    motion.acceleration_m_per_s2 = values[limits.size() - 2];
+  }
+  if (limits.size() >= 3) {
+    motion.order = MotionOrder::Jerk;
+    motion.jerk_m_per_s3 = values[limits.size() - 3];
+  }
+  if (limits.size() >= 4) {
+    motion.order = MotionOrder::Snap;
+    motion.snap_m_per_s4 = values[limits.size() - 4];
+  }
+  return motion;
+}
+
+std::vector<std::uint32_t> LokiPffaProgram::Impl::make_reduction_groups(
+    const Region& region, double phase_tolerance_cycles) const {
+  const std::size_t coordinate_count = region.plan->get_ncoords().back();
+  if (coordinate_count > std::numeric_limits<std::uint32_t>::max()) {
+    throw std::overflow_error(
+        "Loki phase reduction coordinate count exceeds uint32_t");
+  }
+  std::vector<std::uint32_t> groups(coordinate_count);
+  if (phase_tolerance_cycles == 0.0) {
+    for (std::size_t index = 0; index < coordinate_count; ++index) {
+      groups[index] = static_cast<std::uint32_t>(index);
+    }
+    return groups;
+  }
+
+  const PeriodicMotion first_motion = make_motion(region, 0);
+  const LokiPhaseCellWidths widths = make_loki_phase_cell_widths(
+      plan, first_motion.order, phase_tolerance_cycles);
+  std::unordered_map<LokiPhaseCellKey, std::uint32_t,
+                     LokiPhaseCellKeyHash>
+      group_ids;
+  group_ids.reserve(coordinate_count);
+  std::uint32_t next_group = 0;
+  for (std::size_t index = 0; index < coordinate_count; ++index) {
+    const LokiPhaseCellKey key =
+        make_loki_phase_cell_key(make_motion(region, index), widths);
+    const auto [iterator, inserted] = group_ids.emplace(key, next_group);
+    if (inserted) {
+      if (next_group == std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error(
+            "Loki phase reduction group count exceeds uint32_t");
+      }
+      ++next_group;
+    }
+    groups[index] = iterator->second;
+  }
+  return groups;
+}
+
+PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
+                                              float snr,
+                                              std::uint32_t flat_index) const {
+  const std::size_t width_count = region.widths.size();
+  const std::size_t coordinate_index = flat_index / width_count;
+  const std::size_t width_index = flat_index % width_count;
+  if (width_index >= region.widths.size()) {
+    throw std::runtime_error("invalid Loki compact candidate index metadata");
   }
 
   PeriodicPeak peak{
-      .motion = {
-          .order = MotionOrder::Frequency,
-          // Loki's direct coordinates are defined on the full plan-length
-          // search window, which may include benchmark-local zero padding.
-          .reference_time_seconds =
-              0.5 * static_cast<double>(plan.input_nsamples()) *
-              plan.tsamp_seconds(),
-          .frequency_hz = values.back(),
-      },
+      .motion = make_motion(region, coordinate_index),
       .phase_bin = std::nullopt,
       .phase_bins = static_cast<std::size_t>(region.config.get_nbins()),
       .boxcar_width_bins = region.widths[width_index],
@@ -751,18 +983,6 @@ PeriodicPeak LokiPffaProgram::Impl::make_peak(const Region& region,
   };
   peak.duty_cycle = static_cast<double>(peak.boxcar_width_bins) /
                     static_cast<double>(peak.phase_bins);
-  if (values.size() >= 2) {
-    peak.motion.order = MotionOrder::Acceleration;
-    peak.motion.acceleration_m_per_s2 = values[values.size() - 2];
-  }
-  if (values.size() >= 3) {
-    peak.motion.order = MotionOrder::Jerk;
-    peak.motion.jerk_m_per_s3 = values[values.size() - 3];
-  }
-  if (values.size() >= 4) {
-    peak.motion.order = MotionOrder::Snap;
-    peak.motion.snap_m_per_s4 = values[values.size() - 4];
-  }
   return peak;
 }
 
@@ -816,6 +1036,11 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
         "Loki peak reduction frequency tolerance must be finite and "
         "non-negative");
   }
+  if (!std::isfinite(execution_options.reduction.phase_tolerance_cycles) ||
+      execution_options.reduction.phase_tolerance_cycles < 0.0) {
+    throw std::invalid_argument(
+        "Loki peak reduction phase tolerance must be finite and non-negative");
+  }
 
   ActiveSearchGuard active_search(impl_->search_active);
   impl_->diagnostics = LokiPffaSearchDiagnostics{};
@@ -857,7 +1082,7 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
   }
 
   std::vector<PeriodicPeak> peaks;
-  for (const auto& region : impl_->layout->regions) {
+  for (auto& region : impl_->layout->regions) {
     check_cuda(cudaMemcpyAsync(impl_->widths.data(), region.widths.data(),
                                region.widths.size() * sizeof(std::uint32_t),
                                cudaMemcpyHostToDevice, execution_options.stream),
@@ -893,6 +1118,16 @@ std::vector<PeriodicPeak> LokiPffaProgram::search(
     std::size_t selected_count = passing;
     LokiReductionSummary reduction_summary;
     if (impl_->reduction != nullptr) {
+      if (region.reduction_groups.empty() ||
+          region.reduction_phase_tolerance_cycles !=
+              execution_options.reduction.phase_tolerance_cycles) {
+        region.reduction_groups = impl_->make_reduction_groups(
+            region, execution_options.reduction.phase_tolerance_cycles);
+        region.reduction_phase_tolerance_cycles =
+            execution_options.reduction.phase_tolerance_cycles;
+      }
+      impl_->reduction->set_coordinate_groups(region.reduction_groups,
+                                              execution_options.stream);
       reduction_summary = impl_->reduction->reduce(
           impl_->scores, impl_->indices, passing, region.widths.size(),
           execution_options.stream);

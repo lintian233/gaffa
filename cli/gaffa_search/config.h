@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gaffa/candidate_analysis.h"
 #include "gaffa/peak_reduction.h"
 #include "gaffa/periodic_peak.h"
 
@@ -65,6 +66,20 @@ struct ResourceConfig {
   NativeCudaResourceConfig native_cuda{};
 };
 
+struct CandidateDetectionConfig {
+  float snr_threshold = 7.5F;
+  std::size_t max_peaks_per_dm = 0;
+  std::size_t max_total_raw_peaks = 0;
+};
+
+struct CandidateConfig {
+  CandidateDetectionConfig detection{};
+  gaffa::DmPeakGroupingOptions grouping{};
+  gaffa::CandidateClusteringOptions clustering{};
+  gaffa::HarmonicOptions harmonic{};
+  gaffa::CandidateSelectionOptions selection{};
+};
+
 struct Config {
   std::filesystem::path input;
   std::vector<DmRangeConfig> dm_ranges;
@@ -83,14 +98,8 @@ struct Config {
   std::size_t ndm_per_nominal = 32;
 
   ResourceConfig resources{};
-
-  float snr_threshold = 7.5F;
-  std::size_t max_peaks = 0;
-  std::size_t max_total_raw_peaks = 0;
-  std::size_t max_candidates = 0;
+  CandidateConfig candidate{};
   std::size_t print_candidates = 64;
-  // Physical DM distance in pc cm^-3 used for candidate clustering.
-  double candidate_dm_radius = 25.0;
 
   // When set, this is an output prefix for a single input file, or an output
   // directory for directory input. The CLI writes both .cand and .out.

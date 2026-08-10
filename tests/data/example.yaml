@@ -53,7 +53,7 @@ search:
       # policies are intentionally not specified for a native range.
       reduction:
         top_k: 100
-        max_groups: 100
+        max_groups: 10000
         frequency_tolerance_hz: 0.0
 
     - backend: loki-cuda
@@ -71,18 +71,37 @@ search:
       window: truncate
       reduction:
         top_k: 100
-        max_groups: 100
+        max_groups: 10000
+        # Conservative Loki phase-cell width used only for backend reduction.
+        phase_tolerance_cycles: 1
 
 preprocess:
   kind: riptide
   running_median_seconds: 5.0
 
 candidate:
-  snr_threshold: 7.5
-  max_peaks: 0
-  max_total_raw_peaks: 0
-  max_candidates: 0
-  dm_radius: 100
+  detection:
+    snr_threshold: 7.5
+    max_peaks_per_dm: 0
+    max_total_raw_peaks: 0
+  grouping:
+    max_phase_distance_cycles: 0.05
+    merge_widths: true
+  clustering:
+    max_phase_distance_cycles: 0.1
+    max_dm_distance: 100
+    merge_widths: true
+  harmonic:
+    max_harmonic: 16
+    denominator_max: 5
+    frequency_tolerance_bins: null
+    phase_distance_max: 1.0
+    dm_distance_max: 3.0
+    use_snr_consistency: false
+    snr_distance_max: 3.0
+  selection:
+    snr_min: 0.0
+    max_candidates: 0
 
 output:
   print_candidates: 64

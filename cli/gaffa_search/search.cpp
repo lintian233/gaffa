@@ -195,11 +195,12 @@ std::size_t prepared_length(const SearchRangeConfig& search,
 }
 
 gaffa::CandidateOptions make_candidate_options(const Config& config) {
-  gaffa::CandidateOptions options;
-  options.clustering.max_dm_distance = config.candidate_dm_radius;
-  options.selection.snr_min = 0.0F;
-  options.selection.max_candidates = config.max_candidates;
-  return options;
+  return gaffa::CandidateOptions{
+      .grouping = config.candidate.grouping,
+      .clustering = config.candidate.clustering,
+      .harmonic = config.candidate.harmonic,
+      .selection = config.candidate.selection,
+  };
 }
 
 gaffa::HarmonicContext make_harmonic_context(
@@ -259,9 +260,10 @@ gaffa::DedispersedResult<DmResultValue<T>> dedisperse(
 
 void append_checked(gaffa::DmPeaks& destination, gaffa::DmPeaks source,
                     const Config& config) {
-  if (config.max_total_raw_peaks != 0 &&
-      (destination.size() > config.max_total_raw_peaks ||
-       source.size() > config.max_total_raw_peaks - destination.size())) {
+  const std::size_t limit =
+      config.candidate.detection.max_total_raw_peaks;
+  if (limit != 0 &&
+      (destination.size() > limit || source.size() > limit - destination.size())) {
     throw std::runtime_error(
         "maximum total raw peak limit exceeded");
   }
@@ -290,9 +292,9 @@ gaffa::DmPeaks run_native_cpu(
       plan,
       gaffa::DmFfaOptions{
           .preprocess = preprocess,
-          .search = {
-              .snr_threshold = config.snr_threshold,
-              .max_peaks = config.max_peaks,
+      .search = {
+              .snr_threshold = config.candidate.detection.snr_threshold,
+              .max_peaks = config.candidate.detection.max_peaks_per_dm,
           },
       });
   if (peak_limit && peaks.size() > *peak_limit) {
@@ -316,15 +318,19 @@ CudaSearchResult run_cuda_phase(
                                                    config.dm_tile_size));
     if (search.backend == Backend::NativeCuda) {
       workers.back()->prepare_native(
-          search, dedispersed.shape.nsamples, tsamp, config.snr_threshold,
-          config.max_peaks, config.preprocess, config.running_median_seconds,
+          search, dedispersed.shape.nsamples, tsamp,
+          config.candidate.detection.snr_threshold,
+          config.candidate.detection.max_peaks_per_dm, config.preprocess,
+          config.running_median_seconds,
           config.resources.native_cuda.max_peak_memory_bytes,
           search.reduction);
     } else {
 #ifdef GAFFA_SEARCH_ENABLE_LOKI
       workers.back()->prepare_loki(
-          search, dedispersed.shape.nsamples, tsamp, config.snr_threshold,
-          config.max_peaks, config.preprocess, config.running_median_seconds,
+          search, dedispersed.shape.nsamples, tsamp,
+          config.candidate.detection.snr_threshold,
+          config.candidate.detection.max_peaks_per_dm, config.preprocess,
+          config.running_median_seconds,
           search.reduction);
 #else
       throw std::runtime_error(
@@ -490,13 +496,15 @@ void sort_peaks(gaffa::DmPeaks& peaks) {
 
 std::optional<std::size_t> remaining_peak_limit(
     const gaffa::DmPeaks& peaks, const Config& config) {
-  if (config.max_total_raw_peaks == 0) {
+  const std::size_t limit =
+      config.candidate.detection.max_total_raw_peaks;
+  if (limit == 0) {
     return std::nullopt;
   }
-  if (peaks.size() > config.max_total_raw_peaks) {
+  if (peaks.size() > limit) {
     throw std::runtime_error("maximum total raw peak limit exceeded");
   }
-  return config.max_total_raw_peaks - peaks.size();
+  return limit - peaks.size();
 }
 
 SearchCoordinate make_search_coordinate(std::size_t source_nsamples,

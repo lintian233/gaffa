@@ -242,6 +242,54 @@ TEST(LokiPffaProgram, ReductionBoundsCoordinateGroupsAndReportsOverflow) {
   ASSERT_FALSE(diagnostics.warnings.empty());
 }
 
+TEST(LokiPffaProgram, PhaseToleranceMergesOnlyReductionCoordinateCells) {
+  if (!has_cuda_device()) {
+    GTEST_SKIP() << "CUDA device is not visible";
+  }
+  ASSERT_EQ(cudaSetDevice(0), cudaSuccess);
+
+  auto plan_options = test_plan_options();
+  plan_options.snr_threshold = 0.01F;
+  const auto plan = gaffa::make_loki_pffa_plan(
+      kNsamples, kTsampSeconds,
+      {.frequency_hz = {.minimum = 100.0, .maximum = 110.0}},
+      plan_options);
+  const std::vector<float> signal = make_sinusoid();
+  gaffa::CudaDeviceBuffer<float> signal_device(signal.size());
+  ASSERT_EQ(cudaMemcpy(signal_device.data(), signal.data(), signal_device.bytes(),
+                       cudaMemcpyHostToDevice),
+            cudaSuccess);
+  const auto& signal_device_const = signal_device;
+
+  gaffa::LokiPffaProgram exact_program(plan);
+  const auto exact = exact_program.search(
+      signal_device_const.as_span(0),
+      gaffa::LokiPffaExecutionOptions{
+          .max_peaks_per_series = 1'000'000,
+          .reduction = gaffa::PeakReductionOptions{
+              .top_k_per_group = 1,
+              .max_groups_per_series = 20'000,
+              .phase_tolerance_cycles = 0.0,
+          },
+      });
+
+  gaffa::LokiPffaProgram approximate_program(plan);
+  const auto approximate = approximate_program.search(
+      signal_device_const.as_span(0),
+      gaffa::LokiPffaExecutionOptions{
+          .max_peaks_per_series = 1'000'000,
+          .reduction = gaffa::PeakReductionOptions{
+              .top_k_per_group = 1,
+              .max_groups_per_series = 20'000,
+              .phase_tolerance_cycles = 1'000'000.0,
+          },
+      });
+
+  EXPECT_GT(exact.size(), 1U);
+  EXPECT_EQ(approximate.size(), 1U);
+  EXPECT_TRUE(approximate_program.last_search_diagnostics().complete);
+}
+
 TEST(LokiPffaProgram, SearchesBatchAndAttachesDmIdentity) {
   if (!has_cuda_device()) {
     GTEST_SKIP() << "CUDA device is not visible";
