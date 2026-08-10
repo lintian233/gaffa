@@ -6,6 +6,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
@@ -208,4 +209,59 @@ TEST(FfaSearchCpu, MatchesMaterializedBlockReference) {
                      reference[index].frequency);
     EXPECT_FLOAT_EQ(result.peaks[index].snr, reference[index].snr);
   }
+}
+
+TEST(FfaSearchCpu, NativeReductionUsesFrequencyBucketsAndBoundsGroups) {
+  const gaffa::FfaObservation observation{
+      .nsamples = 1000,
+      .tsamp_seconds = 1.0,
+  };
+  std::vector<gaffa::FfaPeak> raw{
+      gaffa::FfaPeak{.frequency = 1.01, .snr = 5.0F},
+      gaffa::FfaPeak{.frequency = 1.05, .snr = 8.0F},
+      gaffa::FfaPeak{.frequency = 1.11, .snr = 2.0F},
+      gaffa::FfaPeak{.frequency = 1.15, .snr = 7.0F},
+      gaffa::FfaPeak{.frequency = 2.0, .snr = 9.0F},
+  };
+  const gaffa::PeakReductionOptions options{
+      .top_k_per_group = 1,
+      .max_groups_per_series = 2,
+      .frequency_tolerance_hz = 0.1,
+  };
+
+  const auto result = gaffa::reduce_ffa_peaks_cpu(
+      std::move(raw), observation, options);
+
+  ASSERT_EQ(result.peaks.size(), 2);
+  EXPECT_FALSE(result.complete);
+  ASSERT_EQ(result.warnings.size(), 1);
+  EXPECT_NE(result.warnings.front().find("max_groups_per_series"),
+            std::string::npos);
+  EXPECT_DOUBLE_EQ(result.peaks[0].frequency, 2.0);
+  EXPECT_FLOAT_EQ(result.peaks[0].snr, 9.0F);
+  EXPECT_DOUBLE_EQ(result.peaks[1].frequency, 1.05);
+  EXPECT_FLOAT_EQ(result.peaks[1].snr, 8.0F);
+}
+
+TEST(FfaSearchCpu, NativeReductionCanBeDisabledWithoutChangingPeaks) {
+  std::vector<gaffa::FfaPeak> raw{
+      gaffa::FfaPeak{.frequency = 1.01, .snr = 5.0F},
+      gaffa::FfaPeak{.frequency = 1.05, .snr = 8.0F},
+  };
+  const auto result = gaffa::reduce_ffa_peaks_cpu(
+      std::move(raw), gaffa::FfaObservation{.nsamples = 1000,
+                                             .tsamp_seconds = 1.0},
+      gaffa::PeakReductionOptions{});
+
+  ASSERT_EQ(result.peaks.size(), 2);
+  EXPECT_TRUE(result.complete);
+  EXPECT_TRUE(result.warnings.empty());
+}
+
+TEST(FfaSearchCpu, NativeReductionRejectsInvalidGroupLimit) {
+  EXPECT_THROW(
+      (void)gaffa::reduce_ffa_peaks_cpu(
+          {}, gaffa::FfaObservation{.nsamples = 1000, .tsamp_seconds = 1.0},
+          gaffa::PeakReductionOptions{.top_k_per_group = 1}),
+      std::invalid_argument);
 }

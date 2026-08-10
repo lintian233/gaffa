@@ -47,4 +47,15 @@ std::vector<PeriodicPeak> search_ffa_cpu(
     const FfaSearchPlan& plan,
     const FfaSearchOptions& options = {});
 
+// Applies the Native FFA bounded reduction to one series of raw FFA peaks.
+// Peaks are grouped by the same frequency bucket used by Native CUDA, ranked
+// by S/N, and limited by top_k_per_group and max_groups_per_series. The
+// observation is required because a zero frequency tolerance means one
+// Fourier bin (1 / duration_seconds). The input is consumed by value so the
+// normal DM wrapper can reduce in-place without a second raw-peak copy.
+FfaSearchResult reduce_ffa_peaks_cpu(
+    std::vector<FfaPeak> peaks,
+    const FfaObservation& observation,
+    const PeakReductionOptions& options);
+
 }  // namespace gaffa

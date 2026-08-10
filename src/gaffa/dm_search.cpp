@@ -59,6 +59,16 @@ void validate_dm_search_inputs(DedispersedShape shape,
   if (!std::isfinite(options.search.snr_threshold)) {
     throw std::invalid_argument("DM search S/N threshold must be finite");
   }
+  if (options.reduction.enabled() &&
+      options.reduction.max_groups_per_series == 0) {
+    throw std::invalid_argument(
+        "DM FFA reduction requires max_groups_per_series > 0");
+  }
+  if (!std::isfinite(options.reduction.frequency_tolerance_hz) ||
+      options.reduction.frequency_tolerance_hz < 0.0) {
+    throw std::invalid_argument(
+        "DM FFA frequency reduction tolerance must be finite and non-negative");
+  }
 }
 
 template <typename T>
@@ -69,6 +79,7 @@ DmPeaks search_ffa_peaks_for_dm(
     const PreprocessPlan& preprocess,
     const FfaSearchPlan& ffa_plan,
     const FfaSearchOptions& ffa_options,
+    const PeakReductionOptions& reduction,
     std::vector<float>& scratch) {
   const std::span<const T> row = dm_row(input, dm_index);
   std::span<const float> time_series;
@@ -89,8 +100,16 @@ DmPeaks search_ffa_peaks_for_dm(
     time_series = scratch;
   }
 
-  const std::vector<PeriodicPeak> peaks = search_ffa_cpu(
-      time_series, ffa_plan, ffa_options);
+  std::vector<PeriodicPeak> peaks;
+  if (!reduction.enabled()) {
+    peaks = search_ffa_cpu(time_series, ffa_plan, ffa_options);
+  } else {
+    FfaSearchResult raw =
+        search_ffa_raw_cpu(time_series, ffa_plan, ffa_options);
+    FfaSearchResult reduced = reduce_ffa_peaks_cpu(
+        std::move(raw.peaks), ffa_plan.observation, reduction);
+    peaks = periodic_peaks_from_ffa(reduced.peaks, ffa_plan.observation);
+  }
   return attach_dm_peaks(peaks, trials.values[dm_index],
                          trials.index_offset + dm_index);
 }
@@ -121,7 +140,7 @@ DmPeaks search_dm_ffa_impl(DedispersedResultView<T> input,
       try {
         DmPeaks peaks = search_ffa_peaks_for_dm(
             input, trials, dm_index, options.preprocess, ffa_plan,
-            options.search, scratch);
+            options.search, options.reduction, scratch);
         if (!peaks.empty()) {
           local_peaks.insert(local_peaks.end(),
                              std::make_move_iterator(peaks.begin()),

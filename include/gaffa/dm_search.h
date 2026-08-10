@@ -16,6 +16,7 @@ namespace gaffa {
 struct DmFfaOptions {
   PreprocessPlan preprocess{};
   FfaSearchOptions search{};
+  PeakReductionOptions reduction{};
 };
 
 // Runs preprocessing and FFA peak search for every DM row in an eager host

@@ -158,6 +158,8 @@ gaffa::FfaSearchPlan make_native_plan(const SearchRangeConfig& search,
           .period_max = search.period_max,
           .bins_min = search.bins_min,
           .bins_max = search.bins_max,
+          .duty_cycle_max = search.duty_cycle_max,
+          .width_trial_spacing = search.width_trial_spacing,
       });
 }
 
@@ -303,10 +305,11 @@ gaffa::DmPeaks run_native_cpu(
       plan,
       gaffa::DmFfaOptions{
           .preprocess = preprocess,
-      .search = {
+          .search = {
               .snr_threshold = config.candidate.detection.snr_threshold,
               .max_peaks = config.candidate.detection.max_peaks_per_dm,
           },
+          .reduction = search.reduction,
       });
   if (peak_limit && peaks.size() > *peak_limit) {
     throw std::runtime_error("maximum total raw peak limit exceeded");

@@ -148,6 +148,13 @@ struct MotionOverride {
   gaffa::ValueRange range{};
 };
 
+struct SearchPlanOverride {
+  enum class Term { DutyCycleMax, WidthTrialSpacing };
+  std::size_t search_id = 0;
+  Term term = Term::DutyCycleMax;
+  double value = 0.0;
+};
+
 struct ReductionOverride {
   enum class Term { TopK, MaxGroups, PhaseTolerance };
   std::size_t search_id = 0;
@@ -170,6 +177,21 @@ void apply_motion_overrides(Config& config,
       throw std::invalid_argument("motion range was specified more than once");
     }
     *target = item.range;
+  }
+}
+
+void apply_search_plan_overrides(
+    Config& config, const std::vector<SearchPlanOverride>& overrides) {
+  for (const SearchPlanOverride& item : overrides) {
+    if (item.search_id >= config.search_ranges.size()) {
+      throw std::invalid_argument("search plan search id is out of range");
+    }
+    SearchRangeConfig& search = config.search_ranges[item.search_id];
+    if (item.term == SearchPlanOverride::Term::DutyCycleMax) {
+      search.duty_cycle_max = item.value;
+    } else {
+      search.width_trial_spacing = item.value;
+    }
   }
 }
 
@@ -333,6 +355,16 @@ void validate_config_impl(const Config& config) {
     }
     validate_motion_range(search.motion.accel, "accel");
     validate_motion_range(search.motion.jerk, "jerk");
+    if (!std::isfinite(search.duty_cycle_max) ||
+        !(search.duty_cycle_max > 0.0 && search.duty_cycle_max < 1.0)) {
+      throw std::invalid_argument(
+          "search duty_cycle_max must be finite and in (0, 1)");
+    }
+    if (!std::isfinite(search.width_trial_spacing) ||
+        !(search.width_trial_spacing > 1.0)) {
+      throw std::invalid_argument(
+          "search width_trial_spacing must be finite and > 1");
+    }
     if (search.reduction.top_k_per_group != 0 &&
         search.reduction.max_groups_per_series == 0) {
       throw std::invalid_argument(
@@ -388,6 +420,8 @@ void print_usage(const char* program) {
       << "  --search VALUE            Repeatable search range\n"
       << "  --search-accel ID:MIN:MAX Loki acceleration range in m/s^2\n"
       << "  --search-jerk ID:MIN:MAX  Loki jerk range in m/s^3\n"
+      << "  --search-duty-cycle-max ID:VALUE Maximum searched duty cycle\n"
+      << "  --search-width-trial-spacing ID:VALUE Boxcar width spacing\n"
       << "  --search-top-k ID:N       GPU peak top-K per coordinate group\n"
       << "  --search-max-groups ID:N Maximum coordinate groups per DM\n"
       << "  --search-phase-tolerance ID:N Loki phase-cell tolerance in cycles\n"
@@ -446,6 +480,7 @@ Config parse_arguments(int argc, char** argv) {
 
   Config config;
   std::vector<MotionOverride> motion_overrides;
+  std::vector<SearchPlanOverride> search_plan_overrides;
   std::vector<ReductionOverride> reduction_overrides;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
@@ -484,6 +519,23 @@ Config parse_arguments(int argc, char** argv) {
               .minimum = parse_number<double>(parts[1], "motion minimum"),
               .maximum = parse_number<double>(parts[2], "motion maximum"),
           },
+      });
+    } else if (argument == "--search-duty-cycle-max" ||
+               argument == "--search-width-trial-spacing") {
+      const char* option = argument == "--search-duty-cycle-max"
+                               ? "--search-duty-cycle-max"
+                               : "--search-width-trial-spacing";
+      const auto parts = split(require_value(option), ':');
+      if (parts.size() != 2) {
+        throw std::invalid_argument(std::string(option) +
+                                    " expects search_id:value");
+      }
+      search_plan_overrides.push_back(SearchPlanOverride{
+          .search_id = parse_number<std::size_t>(parts[0], "search id"),
+          .term = argument == "--search-duty-cycle-max"
+                      ? SearchPlanOverride::Term::DutyCycleMax
+                      : SearchPlanOverride::Term::WidthTrialSpacing,
+          .value = parse_number<double>(parts[1], "search plan value"),
       });
     } else if (argument == "--search-top-k" ||
                argument == "--search-max-groups" ||
@@ -630,6 +682,7 @@ Config parse_arguments(int argc, char** argv) {
     }
   }
   apply_motion_overrides(config, motion_overrides);
+  apply_search_plan_overrides(config, search_plan_overrides);
   apply_reduction_overrides(config, reduction_overrides);
   validate_config(config);
   return config;

@@ -84,6 +84,32 @@ TEST(GaffaSearchConfig, ParsesPeakReductionOverrides) {
             128U);
 }
 
+TEST(GaffaSearchConfig, ParsesSearchPlanWidthOverrides) {
+  const auto config = parse({
+      "gaffa_search", "--input", "observation.fil", "--dm-range",
+      "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+      "--search-duty-cycle-max", "0:0.35", "--search-width-trial-spacing",
+      "0:1.75",
+  });
+
+  ASSERT_EQ(config.search_ranges.size(), 1U);
+  EXPECT_DOUBLE_EQ(config.search_ranges.front().duty_cycle_max, 0.35);
+  EXPECT_DOUBLE_EQ(config.search_ranges.front().width_trial_spacing, 1.75);
+}
+
+TEST(GaffaSearchConfig, RejectsInvalidSearchPlanWidthOverrides) {
+  EXPECT_THROW(
+      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
+             "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+             "--search-duty-cycle-max", "0:1.0"}),
+      std::invalid_argument);
+  EXPECT_THROW(
+      parse({"gaffa_search", "--input", "observation.fil", "--dm-range",
+             "0:1:4", "--search", "native-cpu:0.018:1:180:256",
+             "--search-width-trial-spacing", "0:1.0"}),
+      std::invalid_argument);
+}
+
 TEST(GaffaSearchConfig, ParsesLokiPhaseToleranceOverride) {
   const auto config = parse({
       "gaffa_search", "--input", "observation.fil", "--dm-range",
@@ -302,6 +328,8 @@ search:
     - backend: native-cpu
       period: {min: 0.018, max: 1.0}
       bins: {min: 180, max: 256}
+      duty_cycle_max: 0.35
+      width_trial_spacing: 1.75
     - backend: loki-cuda
       period: {min: 0.018, max: 1.0}
       bins: {min: 180, max: 256}
@@ -358,6 +386,8 @@ output:
   ASSERT_EQ(config.search_ranges.size(), 2U);
   EXPECT_EQ(config.search_ranges[0].backend,
             gaffa_search::Backend::NativeCpu);
+  EXPECT_DOUBLE_EQ(config.search_ranges[0].duty_cycle_max, 0.35);
+  EXPECT_DOUBLE_EQ(config.search_ranges[0].width_trial_spacing, 1.75);
   EXPECT_EQ(config.search_ranges[1].backend,
             gaffa_search::Backend::LokiCuda);
   EXPECT_EQ(config.search_ranges[1].window_mode,

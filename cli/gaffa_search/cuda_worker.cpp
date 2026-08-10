@@ -494,6 +494,8 @@ void CudaWorker::prepare_native(const SearchRangeConfig& search,
           .period_max = search.period_max,
           .bins_min = search.bins_min,
           .bins_max = search.bins_max,
+          .duty_cycle_max = search.duty_cycle_max,
+          .width_trial_spacing = search.width_trial_spacing,
       });
   impl_->native = std::make_unique<gaffa::CudaFfaProgram>(
       plan, gaffa::CudaFfaProgramOptions{.device_id = impl_->device_id},
@@ -556,6 +558,8 @@ void CudaWorker::prepare_loki(const SearchRangeConfig& search,
       gaffa::LokiPffaPlanOptions{
           .phase_bins_min = search.bins_min,
           .phase_bins_max = search.bins_max,
+          .duty_cycle_max = search.duty_cycle_max,
+          .width_spacing = search.width_trial_spacing,
           .snr_threshold = threshold,
       });
   impl_->loki = std::make_unique<gaffa::LokiPffaProgram>(

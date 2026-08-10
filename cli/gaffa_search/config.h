@@ -48,6 +48,9 @@ struct SearchRangeConfig {
   double period_max = 0.0;
   std::size_t bins_min = 0;
   std::size_t bins_max = 0;
+  // Shared Riptide/Loki boxcar-width planning parameters.
+  double duty_cycle_max = 0.20;
+  double width_trial_spacing = 1.5;
   WindowMode window_mode = WindowMode::Truncate;
   MotionRangeConfig motion{};
   gaffa::PeakReductionOptions reduction{};

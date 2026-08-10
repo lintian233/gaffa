@@ -266,7 +266,8 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
   require_map(node, path);
   reject_unknown_keys(node,
                       {"backend", "period", "bins", "accel", "jerk",
-                       "window", "reduction"},
+                       "window", "duty_cycle_max", "width_trial_spacing",
+                       "reduction"},
                       path);
 
   const std::string backend_path = path + ".backend";
@@ -329,6 +330,11 @@ SearchRangeConfig parse_search_range(const YAML::Node& node,
       .bins_max = nonnegative_size(
           required_node(bins, "max", path + ".bins.max"),
           path + ".bins.max"),
+      .duty_cycle_max = optional_scalar<double>(
+          node, "duty_cycle_max", 0.20, path + ".duty_cycle_max"),
+      .width_trial_spacing = optional_scalar<double>(
+          node, "width_trial_spacing", 1.5,
+          path + ".width_trial_spacing"),
       .window_mode = window
                           ? parse_window_value(
                                 scalar<std::string>(window, path + ".window"),
